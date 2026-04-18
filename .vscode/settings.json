@@ -1,0 +1,26 @@
+{
+  "files.exclude": {
+    "**/.pio": true,
+    "**/.cxx": true,
+    "**/__pycache__": true
+  },
+  "files.watcherExclude": {
+    "**/.pio/**": true,
+    "**/.cxx/**": true,
+    "**/build/**": true,
+    "**/__pycache__/**": true
+  },
+  "search.exclude": {
+    "**/.pio/libdeps/**": true,
+    "**/.pio/build/**": true,
+    "**/releases/**/*.bin": true
+  },
+  "C_Cpp.files.exclude": {
+    "**/.pio/libdeps/*/examples/**": true,
+    "**/.pio/libdeps/*/test/**": true,
+    "**/.pio/libdeps/*/docs/**": true,
+    "**/.pio/build/**": true
+  },
+  "C_Cpp.intelliSenseEngine": "default",
+  "C_Cpp.autoAddFileAssociations": false
+}
