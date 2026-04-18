@@ -1,0 +1,69 @@
+name: Build Firmware
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'platformio.ini'
+      - 'partitions_ota.csv'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'platformio.ini'
+      - 'partitions_ota.csv'
+  release:
+    types: [created]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build ESP32-S3 firmware
+        run: pio run -e esp32s3
+
+      - name: Compute SHA256
+        run: |
+          cd .pio/build/esp32s3
+          sha256sum firmware.bin bootloader.bin partitions.bin > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-esp32s3
+          path: |
+            .pio/build/esp32s3/firmware.bin
+            .pio/build/esp32s3/bootloader.bin
+            .pio/build/esp32s3/partitions.bin
+            .pio/build/esp32s3/SHA256SUMS.txt
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            .pio/build/esp32s3/firmware.bin
+            .pio/build/esp32s3/bootloader.bin
+            .pio/build/esp32s3/partitions.bin
+            .pio/build/esp32s3/SHA256SUMS.txt

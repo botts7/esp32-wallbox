@@ -1,0 +1,115 @@
+#pragma once
+
+#include <Arduino.h>
+#include <NimBLEDevice.h>
+#include "bapi.h"
+
+// Wallbox BLE connection manager.
+// Handles connect/reconnect, BAPI framing, PIN auth, notifications.
+// Includes WiFi coexistence, keepalive, and smart reconnect.
+
+class WallboxBLE {
+public:
+    enum class State {
+        DISCONNECTED,
+        CONNECTING,
+        AUTHENTICATING,
+        CONNECTED,
+        ERROR
+    };
+
+    void begin(const char* addr);
+    void loop();
+
+    // Send a BAPI command (blocking, up to timeoutMs)
+    String sendCommand(const char* met, const char* par = "null", uint32_t timeoutMs = 5000);
+
+    // Non-blocking: queue a command
+    void queueCommand(const char* met, const char* par = "null");
+
+    // State
+    State state() const { return _state; }
+    bool isConnected() const { return _state == State::CONNECTED; }
+    const char* stateStr() const;
+
+    // PIN
+    void setPin(const char* pin) { _pin = pin; }
+    bool pinRequired() const { return _pinRequired; }
+
+    // UUID override
+    void setUUIDs(const char* svc, const char* chr) { _svcUUID = svc; _chrUUID = chr; }
+
+    // Responses
+    String lastResponse() const { return _lastResponse; }
+    using ResponseCallback = void (*)(const String& json);
+    void onResponse(ResponseCallback cb) { _responseCb = cb; }
+
+    // Yield callback — called during BLE wait so web server stays responsive
+    using YieldCallback = void (*)();
+    void onYield(YieldCallback cb) { _yieldCb = cb; }
+
+    // Stats
+    uint32_t txCount() const { return _txCount; }
+    uint32_t rxCount() const { return _rxCount; }
+    int rssi() const;
+    int scanRSSI() const { return _scanRSSI; }
+    uint32_t lastActivityAge() const { return millis() - _lastActivityTime; }
+
+    // Device info (from GATT 0x180A Device Information service)
+    String deviceManufacturer() const { return _devMfg; }
+    String deviceModel() const { return _devModel; }
+    String deviceFirmware() const { return _devFw; }
+    String deviceName() const { return _devName; }
+
+private:
+    void _connect();
+    void _disconnect();
+    bool _authenticate();
+    static void _notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_t len, bool isNotify);
+
+    static WallboxBLE* _instance;
+
+    NimBLEClient* _client = nullptr;
+    NimBLERemoteCharacteristic* _chr = nullptr;
+
+    String _addr;
+    String _pin;
+    String _svcUUID;
+    String _chrUUID;
+    NimBLEAddress _foundAddr;
+    State _state = State::DISCONNECTED;
+    bool _pinRequired = false;
+
+    // Response handling
+    bapi::ResponseParser _parser;
+    String _lastResponse;
+    volatile bool _responseReady = false;
+    ResponseCallback _responseCb = nullptr;
+    YieldCallback _yieldCb = nullptr;
+
+    // Command queue
+    String _pendingCmd;
+    bool _hasPending = false;
+
+    // Reconnect timing
+    uint32_t _lastConnectAttempt = 0;
+    uint32_t _connectBackoff = 2000;
+
+    // Keepalive & activity tracking
+    uint32_t _lastActivityTime = 0;
+    static const uint32_t PING_INTERVAL_MS = 30000;
+
+    // Scan cache for smart reconnect
+    uint32_t _lastSeenTime = 0;
+    static const uint32_t SCAN_CACHE_MS = 30000;
+
+    // Stats
+    uint32_t _txCount = 0;
+    uint32_t _rxCount = 0;
+    int _scanRSSI = -127;
+    String _devMfg, _devModel, _devFw, _devName;
+
+    int _nextId = 1;
+};
+
+extern WallboxBLE wallboxBLE;
