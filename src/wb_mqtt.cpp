@@ -455,15 +455,15 @@ void WallboxMQTT::sendDiscovery() {
     publishDiscoveryEntity(*_client, "sensor", "current_l3", "Charging Current L3",
         "mdi:current-ac", st, "{{ (value_json.r.L3 / 10) | round(1) }}", "A", "current", nullptr, "measurement");
 
-    // en/gen/grid are in Wh, divide by 1000 for kWh
+    // en/gen/grid are in 10-Wh units (centi-kWh), divide by 100 for kWh
     publishDiscoveryEntity(*_client, "sensor", "energy_session", "Session Energy",
-        "mdi:lightning-bolt", st, "{{ (value_json.r.en / 1000) | round(3) }}", "kWh", "energy", nullptr, "total_increasing");
+        "mdi:lightning-bolt", st, "{{ (value_json.r.en / 100) | round(2) }}", "kWh", "energy", nullptr, "total_increasing");
 
     publishDiscoveryEntity(*_client, "sensor", "grid_energy", "Grid Energy",
-        "mdi:transmission-tower", st, "{{ (value_json.r.grid / 1000) | round(3) }}", "kWh", "energy", nullptr, "total_increasing");
+        "mdi:transmission-tower", st, "{{ (value_json.r.grid / 100) | round(2) }}", "kWh", "energy", nullptr, "total_increasing");
 
     publishDiscoveryEntity(*_client, "sensor", "green_energy", "Green Energy",
-        "mdi:leaf", st, "{{ (value_json.r.gen / 1000) | round(3) }}", "kWh", "energy", nullptr, "total_increasing");
+        "mdi:leaf", st, "{{ (value_json.r.gen / 100) | round(2) }}", "kWh", "energy", nullptr, "total_increasing");
 
     // Discharge energy — populates on bidirectional chargers (Quasar 2 V2H)
     // Always 0 on one-way chargers (Pulsar Plus/MAX, Copper, Commander)

@@ -437,7 +437,7 @@ static void handleDashboard() {
 
 <script>
 var SN={0:'Disconnected',1:'Connected',2:'Charging',3:'Paused',4:'Scheduled',5:'Discharging',6:'Error',7:'Disconnected',8:'Locked',9:'Updating',10:'Queue (Power)',13:'Waiting for Car',14:'Error',16:'Ready',17:'Connected',18:'Waiting for Schedule',19:'Scheduled',20:'Charging',21:'Charge Complete',22:'Paused by User',23:'Queue (Power Share)',24:'Queue (Eco Smart)',25:'Waiting for Schedule',26:'Discharging',161:'Ready',178:'Paused',179:'Charging',180:'Scheduled',189:'Ready',193:'Paused',194:'Locked',209:'Reserved (OCPP)',210:'Updating'};
-function P(){fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null')return;var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;if(s){var n=SN[s.st];if(!n&&rt)n=SN[rt.charger_status];document.getElementById('v-st').textContent=n||'Code '+s.st;document.getElementById('v-pw').textContent=(+s.cp).toFixed(2)+' kW';var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));var l1=(s.L1/10).toFixed(1),l2=(s.L2/10).toFixed(1),l3=(s.L3/10).toFixed(1);if(threePhase){document.getElementById('l-cr').textContent='L1 / L2 / L3';document.getElementById('v-cr').textContent=l1+' / '+l2+' / '+l3+' A'}else{document.getElementById('l-cr').textContent='Charging Current';document.getElementById('v-cr').textContent=l1+' A'}document.getElementById('v-en').textContent=(s.en/1000).toFixed(2)+' kWh';document.getElementById('v-mc').textContent=s.cur+' A';document.getElementById('sl').value=s.cur;document.getElementById('sv').textContent=s.cur+'A'}if(rt){document.getElementById('v-lk').textContent=rt.lock_status==0?'Unlocked':'Locked';var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};var oe=document.getElementById('v-oc');if(oe)oe.textContent=os[rt.ocpp_status]||'Code '+rt.ocpp_status}}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(d.r){document.getElementById('v-vt').textContent=d.r.v1+' V';document.getElementById('v-gp').textContent=d.r.p1+' W'}}).catch(function(){})}
+function P(){fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null')return;var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;if(s){var n=SN[s.st];if(!n&&rt)n=SN[rt.charger_status];document.getElementById('v-st').textContent=n||'Code '+s.st;document.getElementById('v-pw').textContent=(+s.cp).toFixed(2)+' kW';var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));var l1=(s.L1/10).toFixed(1),l2=(s.L2/10).toFixed(1),l3=(s.L3/10).toFixed(1);if(threePhase){document.getElementById('l-cr').textContent='L1 / L2 / L3';document.getElementById('v-cr').textContent=l1+' / '+l2+' / '+l3+' A'}else{document.getElementById('l-cr').textContent='Charging Current';document.getElementById('v-cr').textContent=l1+' A'}document.getElementById('v-en').textContent=(s.en/100).toFixed(2)+' kWh';document.getElementById('v-mc').textContent=s.cur+' A';document.getElementById('sl').value=s.cur;document.getElementById('sv').textContent=s.cur+'A'}if(rt){document.getElementById('v-lk').textContent=rt.lock_status==0?'Unlocked':'Locked';var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};var oe=document.getElementById('v-oc');if(oe)oe.textContent=os[rt.ocpp_status]||'Code '+rt.ocpp_status}}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(d.r){document.getElementById('v-vt').textContent=d.r.v1+' V';document.getElementById('v-gp').textContent=d.r.p1+' W'}}).catch(function(){})}
 function C(a){toast('Sending '+a.split('&')[0]+'...','info');fetch('/api/command?action='+a).then(function(x){return x.json()}).then(function(d){if(d.error)toast(d.error,'error');else toast('Command sent','success');setTimeout(P,1000)}).catch(function(e){toast('Error: '+e,'error')})}
 var _curTimer=null;
 function setCurrent(v){if(_curTimer)clearTimeout(_curTimer);_curTimer=setTimeout(function(){toast('Setting '+v+'A','info');fetch('/api/command?action=current&value='+v).then(function(x){return x.json()}).then(function(d){if(d.error)toast(d.error,'error');else toast('Max current set to '+v+'A','success');setTimeout(P,1000)}).catch(function(e){toast('Error: '+e,'error')})},300)}
@@ -593,7 +593,7 @@ function loadSessions(){
           var html='';
           items.forEach(function(s){
             var dur=s.dur?Math.round(s.dur/60)+'m':'-';
-            var en=s.en?(s.en/1000).toFixed(2)+' kWh':'-';
+            var en=s.en?(s.en/100).toFixed(2)+' kWh':'-';
             var ts=s.ts?new Date(s.ts*1000).toLocaleString():'Session #'+s.id;
             html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:4px 0;display:flex;justify-content:space-between'><div><div style='font-size:.82em;color:var(--text2)'>"+ts+"</div><div style='font-size:.78em;color:var(--text3)'>Session #"+s.id+"</div></div><div style='text-align:right'><div style='font-weight:600'>"+en+"</div><div style='font-size:.78em;color:var(--text3)'>"+dur+"</div></div></div>";
           });
@@ -855,7 +855,9 @@ static void handleSessionsPage() {
 
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F4C5;</span><h2>Weekly Heatmap</h2></div>
-  <div id='heatmap' style='display:grid;grid-template-columns:60px repeat(24,minmax(12px,1fr));gap:2px;font-size:.7em'></div>
+  <div style='overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -4px;padding:0 4px'>
+    <div id='heatmap' style='display:grid;grid-template-columns:48px repeat(24,minmax(10px,1fr));gap:2px;font-size:.7em;min-width:320px'></div>
+  </div>
   <div style='display:flex;justify-content:space-between;margin-top:10px;font-size:.78em;color:var(--text3)'>
     <span>Low</span>
     <div style='display:flex;gap:3px'>
@@ -887,7 +889,7 @@ function buildHeatmap(sessions){
   sessions.forEach(function(s){
     if(!s.ts||!s.en)return;
     var dt=new Date(s.ts*1000);var day=dt.getDay();var hr=dt.getHours();
-    var kwh=s.en/1000;grid[day][hr]+=kwh;if(grid[day][hr]>max)max=grid[day][hr];
+    var kwh=s.en/100;grid[day][hr]+=kwh;if(grid[day][hr]>max)max=grid[day][hr];
   });
   var hm=document.getElementById('heatmap');hm.innerHTML='';
   // Header row (empty corner + hour labels)
@@ -918,7 +920,7 @@ function loadSessions2(){
           buildHeatmap(sessions);
           var html='';sessions.slice().reverse().slice(0,10).forEach(function(s){
             var dur=s.dur?Math.round(s.dur/60)+'m':'-';
-            var en=s.en?(s.en/1000).toFixed(2)+' kWh':'-';
+            var en=s.en?(s.en/100).toFixed(2)+' kWh':'-';
             var ts=s.ts?new Date(s.ts*1000).toLocaleString():'#'+s.id;
             html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:4px 0;display:flex;justify-content:space-between'><div><div style='font-size:.82em'>"+ts+"</div><div style='font-size:.78em;color:var(--text3)'>#"+s.id+" \u00B7 "+dur+"</div></div><div style='font-weight:600'>"+en+"</div></div>";
           });
