@@ -355,11 +355,12 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, p.c_str());
 
     } else if (sub == "eco_mode") {
-        // HA sends: "Off", "Solar + Grid", "Full Green (Solar Only)"
+        // HA sends: "Off", "Full Green (Solar Only)", "Solar + Grid"
+        // BAPI: esm=0 disabled, esm=1 Full Green, esm=2 Solar+Grid
         String s = payload;
         int mode = 0;
-        if (s == "Solar + Grid") mode = 1;
-        else if (s.startsWith("Full Green")) mode = 2;
+        if (s.startsWith("Full Green")) mode = 1;
+        else if (s == "Solar + Grid") mode = 2;
         String p = "{\"esm\":" + String(mode) + ",\"ese\":" + String(mode > 0 ? 1 : 0) + ",\"esp\":100}";
         wallboxBLE.sendCommand(bapi::MET_SET_ECO_SMART, p.c_str());
 
@@ -605,12 +606,12 @@ void WallboxMQTT::sendDiscovery() {
         "mdi:timer-lock", cmdAutolockTime.c_str(), sTopic_,
         "{{ value_json.autolock_time | default(60) }}", 10, 600, 10, "s");
 
-    // Eco Smart Mode (select)
-    static const char* ecoOptions[] = {"Off", "Solar + Grid", "Full Green (Solar Only)"};
+    // Eco Smart Mode (select). BAPI esm: 0=Off, 1=Full Green, 2=Solar+Grid
+    static const char* ecoOptions[] = {"Off", "Full Green (Solar Only)", "Solar + Grid"};
     publishDiscoverySelect(*_client, "eco_mode", "Eco Smart Mode",
         "mdi:solar-power", cmdEcoMode.c_str(), sTopic_,
         "{% set m = value_json.eco_mode | default(0) %}"
-        "{% if m == 0 %}Off{% elif m == 1 %}Solar + Grid{% elif m == 2 %}Full Green (Solar Only){% else %}Off{% endif %}",
+        "{% if m == 0 %}Off{% elif m == 1 %}Full Green (Solar Only){% elif m == 2 %}Solar + Grid{% else %}Off{% endif %}",
         ecoOptions, 3);
 
     // Eco Smart power %

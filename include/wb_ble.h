@@ -32,6 +32,11 @@ public:
     bool isConnected() const { return _state == State::CONNECTED; }
     const char* stateStr() const;
 
+    // Temporarily release BLE so the official app can connect
+    void pause(uint32_t ms);
+    bool isPaused() const { return _pausedUntil > millis(); }
+    uint32_t pauseRemainingMs() const { return _pausedUntil > millis() ? _pausedUntil - millis() : 0; }
+
     // PIN
     void setPin(const char* pin) { _pin = pin; }
     bool pinRequired() const { return _pinRequired; }
@@ -94,6 +99,9 @@ private:
     // Reconnect timing
     uint32_t _lastConnectAttempt = 0;
     uint32_t _connectBackoff = 2000;
+
+    // Pause window (for releasing BLE to official app)
+    uint32_t _pausedUntil = 0;
 
     // Keepalive & activity tracking
     uint32_t _lastActivityTime = 0;

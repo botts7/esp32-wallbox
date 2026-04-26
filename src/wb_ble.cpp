@@ -18,7 +18,15 @@ void WallboxBLE::begin(const char* addr) {
     Serial.printf("[BLE] Target: %s\n", addr);
 }
 
+void WallboxBLE::pause(uint32_t ms) {
+    _pausedUntil = millis() + ms;
+    if (_state == State::CONNECTED) _disconnect();
+    _state = State::DISCONNECTED;
+    Serial.printf("[BLE] paused for %u ms (release for official app)\n", ms);
+}
+
 void WallboxBLE::loop() {
+    if (isPaused()) return;  // skip all BLE activity during user-requested pause
     switch (_state) {
     case State::DISCONNECTED:
     case State::ERROR:

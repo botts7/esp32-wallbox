@@ -4,6 +4,37 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.1.0] - 2026-04-26
+
+### Added
+- **/sessions page redesign**: stats tiles (All-time, This Week, This Month) at top, with localStorage-cached session log so revisits are instant.
+- **Daily Charging** view groups sessions by day with totals. Click any day to expand and see every individual sub-session (useful for solar/eco-smart charging that pauses/restarts many times).
+- **Load older sessions** button paginates through the charger's full history (delta-fetches only new sids on revisit).
+- **Schedule CRUD**: per-row Edit and Delete buttons, "+ Add New" form with auto-assigned sid, list refreshes after each operation.
+- **Phase Switch panel**: Settings → Settings tab now opens an editable panel (was read-only).
+- **Halo LED panel**: Settings → Charger tab — Standby on/off, brightness slider, standby timeout. Matches the official app.
+- **Eco Smart panel** now fetches and pre-fills current state (mode + solar power target) and saves both.
+- **Release BLE for App** button: temporarily disconnects the gateway from the charger so the official Wallbox app can BLE-connect. Live amber countdown banner with 5-min default. Auto-resumes.
+- **Schedule list shows individual sids** and renders edit/delete icons per schedule.
+- **Session start–end times** displayed in CHARGER_TZ (no more browser-local drift).
+
+### Fixed
+- **FOUC** (flash of unstyled content): body now hidden until `window.load`. Inline html/body background prevents white flash.
+- **Heatmap distributes kWh across hours** instead of dumping the whole session into the start hour. 5-min granularity.
+- **Heatmap mobile overflow**: now scrolls horizontally inside its card.
+- **Heatmap "stuck at 30/30"**: `CHARGER_TZ` was undefined on the `/sessions` page, causing `buildHeatmap` to throw before writing the session list. Now defined on every page that needs it.
+- **Session list sorted by timestamp desc** so today's sessions appear at the top regardless of fetch order.
+- **Session timestamps render in CHARGER_TZ** (was browser-local), so all browsers see the same time matching the charger's clock.
+- **Eco Smart mode mapping** corrected: `esm:1` is **Full Green**, `esm:2` is **Solar + Grid** (was inverted everywhere — web UI, F() display, MQTT discovery template, and HA select command handler).
+- **Day bitmask labels** in schedule list: was using Sun-first array but bitmask is Mon = bit 0. Fixed.
+- **Session energy unit confusion**: live `r_sta.en` is in 10-Wh (centi-kWh, divide by 100), but historical `r_log.en` is in Wh (divide by 1000). Both now correct.
+- **Schedule TZ race condition**: `Q('r_schs')` now awaits `tzReady` before rendering so times never flash as UTC.
+- **External CSS in `<head>` instead of bottom of body** — significantly faster page navigation (parallel fetch with HTML parse).
+
+### Notes
+- Discharge energy `den` divisor unverified; only matters for Quasar 2 V2H owners.
+- BAPI `r_sta.en/gen/grid` are in 10-Wh units; `r_log.en` is in Wh; `r_dca.e` is in Wh. Different scales for different methods.
+
 ## [2.0.1] - 2026-04-18
 
 ### Fixed
@@ -83,6 +114,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **MIT License** with Wallbox trademark disclaimer
 - **Confirmed working**: Wallbox Pulsar MAX with u-blox NINA-B22 BLE radio
 
+[2.1.0]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.1.0
 [2.0.1]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.0.1
 [2.0.0]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.0.0
 [1.0.0]: https://github.com/botts7/esp32-wallbox/releases/tag/v1.0.0

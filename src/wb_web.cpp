@@ -194,7 +194,9 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
     h += title;
     h += "</title>"
         "<style>"
-        "body{margin:0;padding:16px;padding-bottom:80px;background:#0f1117;color:#e2e8f0;font-family:-apple-system,system-ui,sans-serif;min-height:100vh}"
+        "html{background:#0f1117}"
+        "body{margin:0;padding:16px;padding-bottom:80px;background:#0f1117;color:#e2e8f0;font-family:-apple-system,system-ui,sans-serif;min-height:100vh;visibility:hidden}"
+        "body.ready{visibility:visible}"
         ".container{max-width:600px;margin:0 auto}"
         ".loading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 0;color:#64748b}"
         ".ld-spin{width:32px;height:32px;border:3px solid #3b82f6;border-top:3px solid transparent;border-radius:50%;animation:sp .8s linear infinite;margin-bottom:12px}"
@@ -213,7 +215,14 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
         ".toast-error{background:#dc2626;color:#fff}"
         ".toast-info{background:#2563eb;color:#fff}"
         "@keyframes toastIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}"
-        "</style>"
+        "</style>";
+    // Cache-bust CSS/JS with boot time (unique per firmware build + boot)
+    static String buildVer;
+    if (buildVer.length() == 0) {
+        buildVer = String((uint32_t)(esp_random() & 0xFFFFFF), HEX);
+    }
+    h += "<link rel='stylesheet' href='/style.css?v=" + buildVer + "'>"
+        "<script src='/app.js?v=" + buildVer + "' defer></script>"
         "</head><body><div class='container'>"
         "<div class='ble-bar'><span class='ble-dot'></span>BLE: ";
     h += bleState;
@@ -225,14 +234,7 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
 }
 
 static String htmlFoot(const char* activePath) {
-    // Cache-bust CSS/JS with boot time (unique per firmware build + boot)
-    static String buildVer;
-    if (buildVer.length() == 0) {
-        buildVer = String((uint32_t)(esp_random() & 0xFFFFFF), HEX);
-    }
-    String h = "<link rel='stylesheet' href='/style.css?v=" + buildVer + "'>"
-               "<script src='/app.js?v=" + buildVer + "'></script>"
-               "</div><nav class='nav-bar'>";
+    String h = "</div><nav class='nav-bar'>";
     auto navItem = [&](const char* href, const char* svg, const char* label) {
         h += "<a href='";
         h += href;
@@ -250,6 +252,7 @@ static String htmlFoot(const char* activePath) {
     navItem("/info", SVG_INFO, "Info");
     h += "</nav>"
          "<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(function(){});</script>"
+         "<script>(function(){var r=function(){document.body.classList.add('ready')};if(document.readyState==='complete')r();else window.addEventListener('load',r)})();</script>"
          "</body></html>";
     return h;
 }
@@ -328,8 +331,19 @@ static void handleApiStatus() {
     json += ",\"dev_model\":\"" + wallboxBLE.deviceModel() + "\"";
     json += ",\"dev_fw\":\"" + wallboxBLE.deviceFirmware() + "\"";
     json += ",\"dev_name\":\"" + wallboxBLE.deviceName() + "\"";
+    json += ",\"ble_paused\":" + String(wallboxBLE.isPaused() ? "true" : "false");
+    json += ",\"ble_pause_remaining\":" + String(wallboxBLE.pauseRemainingMs() / 1000);
     json += "}";
     http.send(200, "application/json", json);
+}
+
+static void handleBlePause() {
+    uint32_t ms = 5 * 60 * 1000;  // default 5 min
+    if (http.hasArg("ms")) ms = (uint32_t) http.arg("ms").toInt();
+    if (ms < 30000) ms = 30000;        // min 30s
+    if (ms > 30 * 60 * 1000) ms = 30 * 60 * 1000;  // max 30 min
+    wallboxBLE.pause(ms);
+    http.send(200, "application/json", String("{\"paused_for_s\":") + String(ms / 1000) + "}");
 }
 
 // Cache last charger data so web UI never blocks on BLE
@@ -481,14 +495,17 @@ static void handleSettings() {
 <!-- TAB 0: Schedules -->
 <div class='tab-panel active' id='tp0'>
   <div class='card'>
-    <button class='btn btn-outline' style='margin-bottom:12px' onclick='Q("r_schs","Schedules")'>View Current Schedules</button>
-    <button class='btn btn-outline' onclick='loadSessions()'>View Session History</button>
-    <a href='/sessions' class='btn btn-outline' style='display:block;text-decoration:none;text-align:center;margin-top:8px'>&#x1F4CA; Weekly Heatmap</a>
+    <div class='card-header'><span class='card-icon'>&#x1F4C5;</span><h2>Charging Schedules</h2></div>
+    <div id='sch-list'><span class='spinner'></span> Loading...</div>
+    <div class='row' style='margin-top:12px'>
+      <button class='btn btn-success' onclick='newSchedule()'>+ Add New</button>
+      <a href='/sessions' class='btn btn-outline' style='text-decoration:none;text-align:center'>&#x1F4CA; Heatmap</a>
+    </div>
     <div id='qr' style='display:none;margin-top:12px'></div>
   </div>
 
   <div class='card' id='sched-edit' style='display:none'>
-  <div class='card-header'><span class='card-icon'>&#x1F4C5;</span><h2>Edit Schedule</h2></div>
+  <div class='card-header'><span class='card-icon'>&#x270E;</span><h2 id='sch-form-title'>New Schedule</h2></div>
   <div class='row'>
     <div><label>Start</label><input type='time' id='ss' value='14:00'></div>
     <div><label>Stop</label><input type='time' id='se' value='20:00'></div>
@@ -509,8 +526,8 @@ static void handleSettings() {
   </div>
   <div><label>Enabled</label><select id='sn'><option value='1'>Yes</option><option value='0'>No</option></select></div>
   <div class='row' style='margin-top:10px'>
-    <button class='btn btn-success' onclick='saveSch()'>Save Schedule</button>
-    <button class='btn btn-outline' onclick='delSch()'>Delete All</button>
+    <button class='btn btn-success' onclick='saveSch()'>Save</button>
+    <button class='btn btn-outline' onclick='cancelEdit()'>Cancel</button>
   </div>
   <div id='sr' style='display:none;margin-top:10px'></div>
   </div>
@@ -524,7 +541,7 @@ static void handleSettings() {
       <button class='btn btn-outline' style='padding:12px' onclick='Q("g_ecos","Eco Smart")'>&#x2600; Eco Smart</button>
       <button class='btn btn-outline' style='padding:12px' onclick='Q("r_hsh","Power Boost")'>&#x26A1; Power Boost</button>
       <button class='btn btn-outline' style='padding:12px' onclick='Q("g_psh","Power Sharing")'>&#x1F50C; Power Sharing</button>
-      <button class='btn btn-outline' style='padding:12px' onclick='Q("g_phsw","Phase Switch")'>&#x1F504; Phase Switch</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='E("phasesw")'>&#x1F504; Phase Switch</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("eco")'>&#x2600; Set Eco Smart</button>
     </div>
     <div id='qr1' style='display:none;margin-top:12px'></div>
@@ -550,6 +567,8 @@ static void handleSettings() {
     <div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'>
       <button class='btn btn-outline' style='padding:12px' onclick='E("tz")'>&#x1F30D; Timezone</button>
       <button class='btn btn-outline' style='padding:12px' onclick='Q("gwsta","WiFi Status")'>&#x1F4F6; WiFi Status</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='E("halo")'>&#x1F4A1; Halo LED</button>
+      <button id='ble-pause-btn' class='btn btn-outline' style='padding:12px' onclick='pauseBle()'>&#x1F4F4; Release BLE for App</button>
       <button class='btn btn-outline' style='padding:12px' onclick='confirm2("Reboot the charger?",function(){fetch("/api/command?action=reboot").then(function(){toast("Reboot sent","success")})})' style='background:rgba(239,68,68,.08);border-color:var(--danger);color:var(--danger)'>&#x1F504; Reboot</button>
     </div>
     <div id='qr3' style='display:none;margin-top:12px'></div>
@@ -565,54 +584,139 @@ var tzReady=fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSig
 function utcToLocal(hhmm){var h=parseInt(hhmm.slice(0,2)),m=parseInt(hhmm.slice(2));try{return new Date(Date.UTC(2024,0,1,h,m)).toLocaleTimeString('en-AU',{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){var d=new Date();d.setUTCHours(h,m,0,0);return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)}}
 function localToUtc(hhmm){var p=hhmm.split(':');try{var fmt=new Intl.DateTimeFormat('en-US',{timeZone:CHARGER_TZ,hour:'numeric',minute:'numeric',hour12:false});var d=new Date(2024,0,1,parseInt(p[0]),parseInt(p[1]));var utc=new Date(d.toLocaleString('en-US',{timeZone:'UTC'}));var local=new Date(d.toLocaleString('en-US',{timeZone:CHARGER_TZ}));var diff=local-utc;var ud=new Date(d.getTime()-diff);return ('0'+ud.getUTCHours()).slice(-2)+('0'+ud.getUTCMinutes()).slice(-2)}catch(e){var d2=new Date();d2.setHours(parseInt(p[0]),parseInt(p[1]),0,0);return ('0'+d2.getUTCHours()).slice(-2)+('0'+d2.getUTCMinutes()).slice(-2)}}
 function Q(m,l){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)r=document.getElementById('qr');if(!r){toast('No result panel found','error');return}r.style.display='block';r.innerHTML="<span class='spinner'></span>"+l+"...";var doFetch=function(){fetch('/api/command?action=bapi&met='+m+'&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){if(d.error){r.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}r.innerHTML=F(m,l,d.r||d)}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'})};if(m==='r_schs'&&tzReady){tzReady.then(doFetch)}else{doFetch()}}
-function F(m,l,r){var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var s={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi',s[r]||'Code '+r)}else if(m==='r_ses'){h+=row('Last Session',r.last);h+=row('Total Sessions',r.size)}else if(m==='r_schs'){var sc=r.schedules||r;if(!Array.isArray(sc)){h+=row('Schedules','None');return h}sc.forEach(function(s,i){var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS[b]+' ';h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'><div style='display:flex;justify-content:space-between'><b>Schedule "+(i+1)+"</b><span class='badge "+(s.enabled?'badge-success':'badge-warning')+"'>"+(s.enabled?'Active':'Off')+"</span></div>";h+=row('Time',utcToLocal(s.start)+' - '+utcToLocal(s.stop));h+=row('Days',ds.trim()||'None');h+=row('Power Limit',(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A');if(s.target&&s.target.type==1)h+=row('Energy Limit',(s.target.value/1000)+' kWh');else h+=row('Energy Limit','No limit');h+="</div>"});if(!sc.length)h+=row('Schedules','None')}else if(m==='r_dca'){if(typeof r==='object'){h+=row('Voltage L1',r.v1+' V');if(r.v2)h+=row('Voltage L2',r.v2+' V');if(r.v3)h+=row('Voltage L3',r.v3+' V');h+=row('Power L1',r.p1+' W');if(r.p2)h+=row('Power L2',r.p2+' W');if(r.p3)h+=row('Power L3',r.p3+' W');h+=row('Current L1',(r.c1/10).toFixed(1)+' A');if(r.c2)h+=row('Current L2',(r.c2/10).toFixed(1)+' A');if(r.c3)h+=row('Current L3',(r.c3/10).toFixed(1)+' A');h+=row('Total Energy',(r.e/1000).toFixed(1)+' kWh')}else{h+=row('Energy Meter',''+r)}}else if(m==='g_alo'){if(typeof r==='object'){h+=row('Auto Lock',r.enabled?'Enabled':'Disabled');if(r.time)h+=row('Lock After',r.time+' seconds')}else{h+=row('Auto Lock',r?'Enabled':'Disabled')}}else if(m==='g_ecos'){var em={0:'Disabled',1:'Eco Smart (Solar + Grid)',2:'Full Green (Solar Only)'};if(typeof r==='object'){h+=row('Status',r.ese?'Active':'Inactive');h+=row('Mode',em[r.esm]||'Mode '+r.esm);h+=row('Solar Power Target',r.esp+'%')}else{h+=row('Eco Smart',em[r]||''+r)}}else if(m==='g_phsw'){if(typeof r==='object'){h+=row('Phase Switch',r.enabled?'Enabled':'Disabled')}else{h+=row('Phase Switch',r?'Enabled':'Disabled')}}else if(m==='read_pin'){if(typeof r==='object'){h+=row('BLE PIN',r.pin||'Not set');h+=row('PIN Version',r.version||'None')}else{h+=row('BLE PIN',''+r)}}else if(m==='r_hsh'){h+=row('ICP Max Current',r+'A')}else if(m==='g_psh'){if(typeof r==='object'){h+=row('Dynamic Power Sharing',r.dyps?'Enabled':'Disabled');h+=row('Max Power Per Charger',r.mcpp?r.mcpp+'W':'Unlimited');h+=row('Min Current',r.minI+'A');h+=row('Chargers in Group',r.nchg)}else{var ps={0:'Disabled',1:'Enabled',2:'Active'};h+=row('Power Sharing',ps[r]||''+r)}}else if(m==='g_tzn'){h+=row('Timezone',r.timezone||r)}else{h+="<pre style='margin:0;white-space:pre-wrap;font-size:.82em'>"+JSON.stringify(r,null,2)+"</pre>"}return h}
-function saveSch(){var st=localToUtc(document.getElementById('ss').value),sp=localToUtc(document.getElementById('se').value),d=0;document.querySelectorAll('#sd input:checked').forEach(function(c){d+=parseInt(c.value)});if(!d){toast('Select at least one day','error');return}var mcr=parseInt(document.getElementById('sc').value);var ekwh=parseInt(document.getElementById('se2').value)||0;var tgt=ekwh>0?{type:1,value:ekwh*1000}:{type:0,value:0};var p=JSON.stringify({sid:0,start:st,stop:sp,days:d,enabled:parseInt(document.getElementById('sn').value),mcr:mcr,repeat:1,type:0,name:'',target:tgt});toast('Saving schedule...','info');fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p)).then(function(x){return x.json()}).then(function(d){toast(d.error||'Schedule saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e,'error')})}
+function F(m,l,r){var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var s={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi',s[r]||'Code '+r)}else if(m==='r_ses'){h+=row('Last Session',r.last);h+=row('Total Sessions',r.size)}else if(m==='r_schs'){var sc=r.schedules||r;if(!Array.isArray(sc)){h+=row('Schedules','None');return h}sc.forEach(function(s,i){var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS[b]+' ';h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'><div style='display:flex;justify-content:space-between'><b>Schedule "+(i+1)+"</b><span class='badge "+(s.enabled?'badge-success':'badge-warning')+"'>"+(s.enabled?'Active':'Off')+"</span></div>";h+=row('Time',utcToLocal(s.start)+' - '+utcToLocal(s.stop));h+=row('Days',ds.trim()||'None');h+=row('Power Limit',(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A');if(s.target&&s.target.type==1)h+=row('Energy Limit',(s.target.value/1000)+' kWh');else h+=row('Energy Limit','No limit');h+="</div>"});if(!sc.length)h+=row('Schedules','None')}else if(m==='r_dca'){if(typeof r==='object'){h+=row('Voltage L1',r.v1+' V');if(r.v2)h+=row('Voltage L2',r.v2+' V');if(r.v3)h+=row('Voltage L3',r.v3+' V');h+=row('Power L1',r.p1+' W');if(r.p2)h+=row('Power L2',r.p2+' W');if(r.p3)h+=row('Power L3',r.p3+' W');h+=row('Current L1',(r.c1/10).toFixed(1)+' A');if(r.c2)h+=row('Current L2',(r.c2/10).toFixed(1)+' A');if(r.c3)h+=row('Current L3',(r.c3/10).toFixed(1)+' A');h+=row('Total Energy',(r.e/1000).toFixed(1)+' kWh')}else{h+=row('Energy Meter',''+r)}}else if(m==='g_alo'){if(typeof r==='object'){h+=row('Auto Lock',r.enabled?'Enabled':'Disabled');if(r.time)h+=row('Lock After',r.time+' seconds')}else{h+=row('Auto Lock',r?'Enabled':'Disabled')}}else if(m==='g_ecos'){var em={0:'Disabled',1:'Full Green (Solar Only)',2:'Eco Smart (Solar + Grid)'};if(typeof r==='object'){h+=row('Status',r.ese?'Active':'Inactive');h+=row('Mode',em[r.esm]||'Mode '+r.esm);h+=row('Solar Power Target',r.esp+'%')}else{h+=row('Eco Smart',em[r]||''+r)}}else if(m==='g_phsw'){if(typeof r==='object'){h+=row('Phase Switch',r.enabled?'Enabled':'Disabled')}else{h+=row('Phase Switch',r?'Enabled':'Disabled')}}else if(m==='read_pin'){if(typeof r==='object'){h+=row('BLE PIN',r.pin||'Not set');h+=row('PIN Version',r.version||'None')}else{h+=row('BLE PIN',''+r)}}else if(m==='r_hsh'){h+=row('ICP Max Current',r+'A')}else if(m==='g_psh'){if(typeof r==='object'){h+=row('Dynamic Power Sharing',r.dyps?'Enabled':'Disabled');h+=row('Max Power Per Charger',r.mcpp?r.mcpp+'W':'Unlimited');h+=row('Min Current',r.minI+'A');h+=row('Chargers in Group',r.nchg)}else{var ps={0:'Disabled',1:'Enabled',2:'Active'};h+=row('Power Sharing',ps[r]||''+r)}}else if(m==='g_tzn'){h+=row('Timezone',r.timezone||r)}else{h+="<pre style='margin:0;white-space:pre-wrap;font-size:.82em'>"+JSON.stringify(r,null,2)+"</pre>"}return h}
 function showTimezone(){E('tz')}
 function saveTz(){var tz=document.getElementById('tz-select').value;var p=JSON.stringify({timezone:tz});toast('Saving timezone...','info');fetch('/api/command?action=bapi&met=s_tzn&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(d.error){toast(d.error,'error')}else{CHARGER_TZ=tz;toast('Timezone set to '+tz,'success')}}).catch(function(e){toast('Error: '+e.message,'error')})}
-function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;r.style.display='block';var h='';if(type==='autolock'){h="<h2>&#x1F510; Auto Lock</h2><label>Enabled</label><select id='al-en'><option value='0'>Disabled</option><option value='1'>Enabled</option></select><label>Lock After (seconds)</label><input type='number' id='al-time' value='60' min='10' max='600'><div class='row' style='margin-top:10px'><button class='btn btn-success' onclick='saveAutoLock()'>Save</button></div><div id='al-result' style='display:none;margin-top:10px'></div>"}else if(type==='ocpp'){h="<h2>&#x1F517; OCPP</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ocpp&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};r.innerHTML="<h2>&#x1F517; OCPP Configuration</h2><label>Server URL</label><input id='ocpp-url' value='"+(o.u||'')+"' placeholder='ws://server:9000'><div class='row'><div><label>Charger ID</label><input id='ocpp-id' value='"+(o.chid||'')+"'></div><div><label>Password</label><input id='ocpp-pw' type='password' value='"+(o.pw||'')+"'></div></div><label>Enabled</label><select id='ocpp-en'><option value='0'"+(o.e?'':' selected')+">Disabled</option><option value='1'"+(o.e?' selected':'')+">Enabled</option></select><button class='btn btn-success' style='margin-top:10px' onclick='saveOcpp()'>Save OCPP</button><div id='ocpp-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='eco'){h="<h2>&#x2600; Eco Smart</h2><label>Mode</label><select id='eco-mode'><option value='0'>Disabled</option><option value='1'>Eco Smart (Solar + Grid)</option><option value='2'>Full Green (Solar Only)</option></select><p class='help'>Eco Smart uses solar surplus. Full Green only charges from solar.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveEco()'>Save</button><div id='eco-result' style='display:none;margin-top:10px'></div>"}else if(type==='tz'){h="<h2>&#x1F30D; Timezone</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var tz=d.r?d.r.timezone:'Unknown';CHARGER_TZ=tz;var opts='';var zones=['Australia/Sydney','Australia/Melbourne','Australia/Brisbane','Australia/Adelaide','Australia/Perth','Australia/Darwin','Australia/Hobart','Asia/Tokyo','Asia/Shanghai','Asia/Singapore','Asia/Kolkata','Asia/Dubai','Europe/London','Europe/Paris','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','America/Toronto','Pacific/Auckland','UTC'];zones.forEach(function(z){opts+="<option value='"+z+"'"+(z===tz?' selected':'')+">"+z.replace('_',' ')+"</option>"});r.innerHTML="<h2>&#x1F30D; Timezone</h2>"+row('Current',tz)+"<label style='margin-top:12px'>Change To</label><select id='tz-select'>"+opts+"</select><button class='btn btn-success' style='margin-top:10px' onclick='saveTz()'>Save</button><div id='tz-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}r.innerHTML=h}
-function showAutoLock(){E('autolock')}
+function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;r.style.display='block';var h='';if(type==='autolock'){h="<h2>&#x1F510; Auto Lock</h2><label>Enabled</label><select id='al-en'><option value='0'>Disabled</option><option value='1'>Enabled</option></select><label>Lock After (seconds)</label><input type='number' id='al-time' value='60' min='10' max='600'><div class='row' style='margin-top:10px'><button class='btn btn-success' onclick='saveAutoLock()'>Save</button></div><div id='al-result' style='display:none;margin-top:10px'></div>"}else if(type==='ocpp'){h="<h2>&#x1F517; OCPP</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ocpp&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};r.innerHTML="<h2>&#x1F517; OCPP Configuration</h2><label>Server URL</label><input id='ocpp-url' value='"+(o.u||'')+"' placeholder='ws://server:9000'><div class='row'><div><label>Charger ID</label><input id='ocpp-id' value='"+(o.chid||'')+"'></div><div><label>Password</label><input id='ocpp-pw' type='password' value='"+(o.pw||'')+"'></div></div><label>Enabled</label><select id='ocpp-en'><option value='0'"+(o.e?'':' selected')+">Disabled</option><option value='1'"+(o.e?' selected':'')+">Enabled</option></select><button class='btn btn-success' style='margin-top:10px' onclick='saveOcpp()'>Save OCPP</button><div id='ocpp-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='eco'){h="<h2>&#x2600; Eco Smart</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ecos&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};var esm=(typeof o.esm==='number')?o.esm:0;var esp=(typeof o.esp==='number')?o.esp:50;var ese=o.ese?true:false;var modes=[{v:0,t:'Disabled'},{v:1,t:'Full Green (Solar Only)'},{v:2,t:'Eco Smart (Solar + Grid)'}];var opts='';modes.forEach(function(m){opts+="<option value='"+m.v+"'"+(m.v===esm?' selected':'')+">"+m.t+"</option>"});r.innerHTML="<h2>&#x2600; Eco Smart</h2>"+row('Current state',ese?'Active':'Inactive')+"<label style='margin-top:12px'>Mode</label><select id='eco-mode'>"+opts+"</select><label>Solar Power Target (%)</label><input type='number' id='eco-esp' value='"+esp+"' min='0' max='100'><p class='help'>Eco Smart uses solar surplus. Full Green only charges from solar.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveEco()'>Save</button><div id='eco-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='tz'){h="<h2>&#x1F30D; Timezone</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var tz=d.r?d.r.timezone:'Unknown';CHARGER_TZ=tz;var opts='';var zones=['Australia/Sydney','Australia/Melbourne','Australia/Brisbane','Australia/Adelaide','Australia/Perth','Australia/Darwin','Australia/Hobart','Asia/Tokyo','Asia/Shanghai','Asia/Singapore','Asia/Kolkata','Asia/Dubai','Europe/London','Europe/Paris','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','America/Toronto','Pacific/Auckland','UTC'];zones.forEach(function(z){opts+="<option value='"+z+"'"+(z===tz?' selected':'')+">"+z.replace('_',' ')+"</option>"});r.innerHTML="<h2>&#x1F30D; Timezone</h2>"+row('Current',tz)+"<label style='margin-top:12px'>Change To</label><select id='tz-select'>"+opts+"</select><button class='btn btn-success' style='margin-top:10px' onclick='saveTz()'>Save</button><div id='tz-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='phasesw'){h="<h2>&#x1F504; Phase Switch</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_phsw&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var en=d.r&&d.r.enabled?true:false;r.innerHTML="<h2>&#x1F504; Phase Switch</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='phsw-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><p class='help'>Auto-switches between 1 and 3 phase based on solar surplus.</p><button class='btn btn-success' style='margin-top:10px' onclick='savePhaseSw()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='halo'){h="<h2>&#x1F4A1; Halo LED</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_halocfg&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};var bright=(typeof o.bright==='number')?o.bright:100;var mode=(typeof o.mode==='number')?o.mode:1;var ts=(typeof o.time_s==='number')?o.time_s:10;r.innerHTML="<h2>&#x1F4A1; Halo LED</h2>"+row('Current',(mode?'Standby on':'Standby off')+' \u00B7 '+bright+'%')+"<label style='margin-top:12px'>Standby</label><select id='halo-m'><option value='1'"+(mode===1?' selected':'')+">On (dim when idle)</option><option value='0'"+(mode===0?' selected':'')+">Off (always bright)</option></select><label>Brightness (%)</label><input type='range' id='halo-b' min='0' max='100' value='"+bright+"' oninput=\"document.getElementById('halo-bv').textContent=this.value+'%'\"><div id='halo-bv' style='text-align:center;margin-top:-4px;color:var(--text3);font-size:.85em'>"+bright+"%</div><label>Standby Timeout (seconds)</label><input type='number' id='halo-t' value='"+ts+"' min='0' max='3600'><p class='help'>How long to wait before dimming when standby is on.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveHalo()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}r.innerHTML=h}
 function saveAutoLock(){var p=JSON.stringify({enabled:parseInt(document.getElementById('al-en').value),time:parseInt(document.getElementById('al-time').value)});toast('Saving auto lock...','info');fetch('/api/command?action=bapi&met=s_alo&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Auto lock saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
-function showEcoSmart(){E('eco')}
-function saveEco(){var mode=parseInt(document.getElementById('eco-mode').value);var p=JSON.stringify({mode:mode});toast('Saving eco smart...','info');fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
-function loadOcpp(){E('ocpp')}
+function saveEco(){var mode=parseInt(document.getElementById('eco-mode').value);var espEl=document.getElementById('eco-esp');var esp=espEl?parseInt(espEl.value)||0:50;var p=JSON.stringify({mode:mode,esp:esp});toast('Saving eco smart...','info');fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function saveOcpp(){var p=JSON.stringify({u:document.getElementById('ocpp-url').value,chid:document.getElementById('ocpp-id').value,pw:document.getElementById('ocpp-pw').value,e:parseInt(document.getElementById('ocpp-en').value)});toast('Saving OCPP...','info');fetch('/api/command?action=bapi&met=s_ocpp&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'OCPP config saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
-function loadSessions(){
-  var r=document.getElementById('qr');r.style.display='block';
-  r.innerHTML="<span class='spinner'></span>Loading sessions...";
-  fetch('/api/command?action=bapi&met=r_ses&par=null',{signal:AbortSignal.timeout(15000)})
-    .then(function(x){return x.json()}).then(function(d){
-      if(!d.r||!d.r.last){r.innerHTML='<span style="color:var(--text3)">No sessions yet</span>';return}
-      var last=d.r.last,count=Math.min(20,last);
-      var h="<div style='font-weight:600;color:var(--accent);margin-bottom:8px'>Last "+count+" Sessions (total: "+last+")</div>";
-      h+="<div id='ses-list'><span class='spinner'></span> Fetching details...</div>";
-      r.innerHTML=h;
-      // Fetch each session detail sequentially (BLE can't handle parallel)
-      var items=[],idx=0,start=last-count+1;
-      function next(){
-        if(idx>=count){
-          var html='';
-          items.forEach(function(s){
-            var dur=s.dur?Math.round(s.dur/60)+'m':'-';
-            var en=s.en?(s.en/100).toFixed(2)+' kWh':'-';
-            var ts=s.ts?new Date(s.ts*1000).toLocaleString():'Session #'+s.id;
-            html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:4px 0;display:flex;justify-content:space-between'><div><div style='font-size:.82em;color:var(--text2)'>"+ts+"</div><div style='font-size:.78em;color:var(--text3)'>Session #"+s.id+"</div></div><div style='text-align:right'><div style='font-weight:600'>"+en+"</div><div style='font-size:.78em;color:var(--text3)'>"+dur+"</div></div></div>";
-          });
-          document.getElementById('ses-list').innerHTML=html||'<span style="color:var(--text3)">No details</span>';
-          return;
-        }
-        var sid=start+idx;
-        fetch('/api/command?action=bapi&met=r_log&par='+sid,{signal:AbortSignal.timeout(10000)})
-          .then(function(x){return x.json()}).then(function(sd){
-            if(sd.r){items.push({id:sid,dur:sd.r.dur||sd.r.duration,en:sd.r.en||sd.r.energy,ts:sd.r.ts||sd.r.timestamp||sd.r.start})}
-            idx++;next();
-          }).catch(function(){idx++;next()});
-      }
-      next();
-    }).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'});
+function savePhaseSw(){var en=parseInt(document.getElementById('phsw-en').value);var p=JSON.stringify({enabled:en});toast('Saving phase switch...','info');fetch('/api/command?action=bapi&met=s_phsw&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Phase switch saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
+function saveHalo(){var b=parseInt(document.getElementById('halo-b').value);var m=parseInt(document.getElementById('halo-m').value);var t=parseInt(document.getElementById('halo-t').value)||0;var p=JSON.stringify({bright:b,mode:m,time_s:t});toast('Saving halo...','info');fetch('/api/command?action=bapi&met=s_halocfg&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Halo saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
+var allSchedules=[];
+var editingSid=null;
+var DAYS_M=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+function loadSchedules(){
+  var l=document.getElementById('sch-list');
+  if(!l)return;
+  l.innerHTML="<span class='spinner'></span> Loading...";
+  fetch('/api/command?action=bapi&met=r_schs&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){
+    if(d.error){l.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}
+    var sc=(d.r&&d.r.schedules)||(Array.isArray(d.r)?d.r:[]);
+    allSchedules=sc;
+    if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules. Tap + Add New.</div>';return}
+    var html='';
+    sc.forEach(function(s){
+      var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS_M[b]+' ';
+      var t1=utcToLocal(s.start),t2=utcToLocal(s.stop);
+      var lim=(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A';
+      var ek=(s.target&&s.target.type==1)?(s.target.value/1000)+' kWh':'';
+      var badge=s.enabled?'<span class=\"badge badge-success\">On</span>':'<span class=\"badge badge-warning\">Off</span>';
+      html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" \u2013 "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" \u00B7 "+lim+(ek?' \u00B7 '+ek:'')+" \u00B7 #"+s.sid+"</div></div><div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>\u270E</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>\u2716</button></div></div></div>";
+    });
+    l.innerHTML=html;
+  }).catch(function(e){l.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'});
 }
-function delSch(){confirm2('Delete all schedules?',delSch2)}
-function delSch2(){var r=document.getElementById('sr');r.style.display='block';r.innerHTML="<span class='spinner'></span>Deleting...";fetch('/api/command?action=bapi&met=clr_sch&par=null').then(function(x){return x.json()}).then(function(d){r.innerHTML=d.error?'<span style="color:var(--danger)">'+d.error+'</span>':'<span style="color:var(--success)">Deleted</span>'}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e+'</span>'})}
+function newSchedule(){
+  editingSid=null;
+  document.getElementById('sch-form-title').textContent='New Schedule';
+  document.getElementById('ss').value='14:00';
+  document.getElementById('se').value='20:00';
+  document.querySelectorAll('#sd input').forEach(function(c){c.checked=false});
+  document.getElementById('sc').value='32';
+  document.getElementById('se2').value='0';
+  document.getElementById('sn').value='1';
+  document.getElementById('sched-edit').style.display='block';
+  document.getElementById('sched-edit').scrollIntoView({behavior:'smooth',block:'start'});
+}
+function editSchedule(sid){
+  var s=allSchedules.find(function(x){return x.sid===sid});
+  if(!s){toast('Schedule not found','error');return}
+  editingSid=sid;
+  document.getElementById('sch-form-title').textContent='Edit Schedule #'+sid;
+  document.getElementById('ss').value=utcToLocal(s.start);
+  document.getElementById('se').value=utcToLocal(s.stop);
+  document.querySelectorAll('#sd input').forEach(function(c){c.checked=(s.days&parseInt(c.value))!==0});
+  document.getElementById('sc').value=s.mcr||32;
+  document.getElementById('se2').value=(s.target&&s.target.type==1)?Math.round(s.target.value/1000):0;
+  document.getElementById('sn').value=s.enabled?'1':'0';
+  document.getElementById('sched-edit').style.display='block';
+  document.getElementById('sched-edit').scrollIntoView({behavior:'smooth',block:'start'});
+}
+function cancelEdit(){
+  document.getElementById('sched-edit').style.display='none';
+  editingSid=null;
+}
+function saveSch(){
+  var st=localToUtc(document.getElementById('ss').value);
+  var sp=localToUtc(document.getElementById('se').value);
+  var d=0;document.querySelectorAll('#sd input:checked').forEach(function(c){d+=parseInt(c.value)});
+  if(!d){toast('Select at least one day','error');return}
+  var mcr=parseInt(document.getElementById('sc').value);
+  var ekwh=parseInt(document.getElementById('se2').value)||0;
+  var tgt=ekwh>0?{type:1,value:ekwh*1000}:{type:0,value:0};
+  var sid;
+  if(editingSid!==null){sid=editingSid}else{var maxSid=allSchedules.length?Math.max.apply(null,allSchedules.map(function(s){return s.sid})):-1;sid=maxSid+1}
+  var p=JSON.stringify({sid:sid,start:st,stop:sp,days:d,enabled:parseInt(document.getElementById('sn').value),mcr:mcr,repeat:1,type:0,name:'',target:tgt});
+  toast('Saving...','info');
+  fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    toast(editingSid!==null?'Schedule #'+sid+' updated':'Schedule added','success');
+    cancelEdit();
+    loadSchedules();  }).catch(function(e){toast('Error: '+e.message,'error')});
+}
+function deleteSchedule(sid){
+  confirm2('Delete schedule #'+sid+'?',function(){doDeleteSchedule(sid)});
+}
+function doDeleteSchedule(sid){
+  var keep=allSchedules.filter(function(s){return s.sid!==sid});
+  toast('Deleting schedule #'+sid+'...','info');
+  fetch('/api/command?action=bapi&met=clr_sch&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(){
+    var i=0;
+    function next(){
+      if(i>=keep.length){toast('Deleted','success');loadSchedules();return}
+      var s=keep[i++];
+      var p=JSON.stringify({sid:i-1,start:s.start,stop:s.stop,days:s.days,enabled:s.enabled,mcr:s.mcr,repeat:s.repeat||1,type:s.type||0,name:s.name||'',target:s.target||{type:0,value:0}});
+      fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(next).catch(next);
+    }
+    next();
+  }).catch(function(e){toast('Error: '+e.message,'error');loadSchedules()});
+}
+function delSch(){confirm2('Delete ALL schedules?',function(){fetch('/api/command?action=bapi&met=clr_sch&par=null').then(function(x){return x.json()}).then(function(){toast('All schedules deleted','success');loadSchedules()}).catch(function(e){toast('Error: '+e.message,'error')})});}
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
+var _pauseTimer=null;
+function fmtMmSs(s){var m=Math.floor(s/60),ss=s%60;return m+':'+(ss<10?'0':'')+ss}
+function startPauseUI(remaining){
+  var btn=document.getElementById('ble-pause-btn');
+  if(!btn)return;
+  btn.disabled=true;
+  btn.style.background='rgba(245,158,11,.15)';
+  btn.style.borderColor='#f59e0b';
+  btn.style.color='#f59e0b';
+  if(_pauseTimer)clearInterval(_pauseTimer);
+  var deadline=Date.now()+remaining*1000;
+  function tick(){
+    var s=Math.max(0,Math.round((deadline-Date.now())/1000));
+    btn.innerHTML="⏸ BLE released · "+fmtMmSs(s)+" remaining";
+    if(s<=0){clearInterval(_pauseTimer);_pauseTimer=null;btn.disabled=false;btn.style.background='';btn.style.borderColor='';btn.style.color='';btn.innerHTML='\u{1F4F4} Release BLE for App';toast('BLE resumed','info')}
+  }
+  tick();_pauseTimer=setInterval(tick,1000);
+}
+function pauseBle(){
+  confirm2('Release BLE for 5 minutes? Gateway will stop polling so the official Wallbox app can connect.',function(){
+    var btn=document.getElementById('ble-pause-btn');if(btn){btn.disabled=true;btn.innerHTML="<span class='spinner'></span> Releasing..."}
+    fetch('/api/ble/pause?ms=300000').then(function(x){return x.json()}).then(function(d){
+      var s=d.paused_for_s||300;
+      toast('BLE released — open the Wallbox app now','success');
+      startPauseUI(s);
+    }).catch(function(e){toast('Error: '+e.message,'error');if(btn){btn.disabled=false;btn.innerHTML='\u{1F4F4} Release BLE for App'}});
+  });
+}
+// On page load, sync UI with actual pause state
+fetch('/api/status').then(function(x){return x.json()}).then(function(d){
+  if(d.ble_paused&&d.ble_pause_remaining>0)startPauseUI(d.ble_pause_remaining);
+}).catch(function(){});
+loadSchedules();
 </script>
 </div>
 )HTML";
@@ -851,7 +955,26 @@ static void handleSessionsPage() {
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading...</div>
 <div id='pg' style='display:none'>
 <h1>&#x1F4CA; Charging Sessions</h1>
-<p class='subtitle'>Weekly pattern from last 30 days</p>
+<p class='subtitle'>Charging history and patterns</p>
+
+<div class='card'>
+  <div class='card-header'><span class='card-icon'>&#x1F4CA;</span><h2>Totals</h2></div>
+  <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px'>
+    <div style='background:var(--bg);border-radius:8px;padding:10px;text-align:center'>
+      <div style='font-size:.68em;color:var(--text3);text-transform:uppercase;letter-spacing:.5px'>All Time</div>
+      <div id='tile-allt' style='font-size:1.1em;font-weight:600;margin-top:4px'>–</div>
+    </div>
+    <div style='background:var(--bg);border-radius:8px;padding:10px;text-align:center'>
+      <div style='font-size:.68em;color:var(--text3);text-transform:uppercase;letter-spacing:.5px'>This Week</div>
+      <div id='tile-week' style='font-size:1.1em;font-weight:600;margin-top:4px'>–</div>
+    </div>
+    <div style='background:var(--bg);border-radius:8px;padding:10px;text-align:center'>
+      <div style='font-size:.68em;color:var(--text3);text-transform:uppercase;letter-spacing:.5px'>This Month</div>
+      <div id='tile-month' style='font-size:1.1em;font-weight:600;margin-top:4px'>–</div>
+    </div>
+  </div>
+  <div style='text-align:center;font-size:.7em;color:var(--text3);margin-top:8px'>Long-term graphs: use the HA Energy dashboard</div>
+</div>
 
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F4C5;</span><h2>Weekly Heatmap</h2></div>
@@ -872,7 +995,7 @@ static void handleSessionsPage() {
 </div>
 
 <div class='card'>
-  <div class='card-header'><span class='card-icon'>&#x1F4C8;</span><h2>Recent Sessions</h2></div>
+  <div class='card-header'><span class='card-icon'>&#x1F4C8;</span><h2>Daily Charging</h2></div>
   <div id='slist'><span class='spinner'></span> Loading sessions...</div>
 </div>
 
@@ -882,14 +1005,29 @@ static void handleSessionsPage() {
 </div>
 <script>
 var DAYS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+var CHARGER_TZ='UTC';
+try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
+fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function buildHeatmap(sessions){
   // day[0-6] × hour[0-23] sum of kWh
   var grid=[];for(var d=0;d<7;d++){grid.push([]);for(var h=0;h<24;h++)grid[d].push(0)}
   var max=0;
   sessions.forEach(function(s){
     if(!s.ts||!s.en)return;
-    var dt=new Date(s.ts*1000);var day=dt.getDay();var hr=dt.getHours();
-    var kwh=s.en/100;grid[day][hr]+=kwh;if(grid[day][hr]>max)max=grid[day][hr];
+    var totalKwh=s.en/1000;
+    var dur=s.dur||3600;
+    var step=300;
+    var n=Math.max(1,Math.ceil(dur/step));
+    var kwhPerStep=totalKwh/n;
+    for(var i=0;i<n;i++){
+      var t=s.ts+i*step;
+      if(t>=s.ts+dur)break;
+      var dt=new Date(t*1000);
+      var day,hr;
+      try{var local=new Date(dt.toLocaleString('en-US',{timeZone:CHARGER_TZ}));day=local.getDay();hr=local.getHours()}catch(e){day=dt.getDay();hr=dt.getHours()}
+      grid[day][hr]+=kwhPerStep;
+      if(grid[day][hr]>max)max=grid[day][hr];
+    }
   });
   var hm=document.getElementById('heatmap');hm.innerHTML='';
   // Header row (empty corner + hour labels)
@@ -909,34 +1047,154 @@ function buildHeatmap(sessions){
     }
   }
 }
+function renderTiles(sessions, lifetimeKwh){
+  var nowSec=Date.now()/1000;
+  var weekSec=nowSec-7*86400;
+  var monthSec=nowSec-30*86400;
+  var weekKwh=0,monthKwh=0;
+  sessions.forEach(function(s){
+    if(!s.ts||!s.en)return;
+    var kwh=s.en/1000;
+    if(s.ts>=weekSec)weekKwh+=kwh;
+    if(s.ts>=monthSec)monthKwh+=kwh;
+  });
+  if(lifetimeKwh!=null)document.getElementById('tile-allt').textContent=lifetimeKwh.toFixed(0)+' kWh';
+  document.getElementById('tile-week').textContent=weekKwh.toFixed(1)+' kWh';
+  document.getElementById('tile-month').textContent=monthKwh.toFixed(1)+' kWh';
+}
+function fmtTime(ts){var d=new Date(ts*1000);try{return d.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){return d.toLocaleTimeString()}}
+function fmtDur(sec){var h=Math.floor(sec/3600),m=Math.round((sec%3600)/60);return (h?h+'h ':'')+m+'m'}
+function toggleDay(i){var det=document.getElementById('det-'+i);var ch=document.getElementById('ch-'+i);if(!det)return;if(det.style.display==='none'){det.style.display='block';ch.textContent='\u25B4'}else{det.style.display='none';ch.textContent='\u25BE'}}
+function renderDays(sessions){
+  var byDay={};
+  sessions.forEach(function(s){
+    if(!s.ts||!s.en)return;
+    var d=new Date(s.ts*1000);
+    var key;
+    try{key=d.toLocaleDateString('en-CA',{timeZone:CHARGER_TZ})}catch(e){key=d.toLocaleDateString('en-CA')}
+    if(!byDay[key])byDay[key]={kwh:0,sec:0,n:0,first:s.ts,last:s.ts+(s.dur||0),items:[]};
+    byDay[key].kwh+=(s.en||0)/1000;
+    byDay[key].sec+=(s.dur||0);
+    byDay[key].n++;
+    byDay[key].items.push(s);
+    if(s.ts<byDay[key].first)byDay[key].first=s.ts;
+    var endTs=s.ts+(s.dur||0);
+    if(endTs>byDay[key].last)byDay[key].last=endTs;
+  });
+  var dayKeys=Object.keys(byDay).sort().reverse().slice(0,10);
+  var html='';
+  dayKeys.forEach(function(key,i){
+    var d=byDay[key];
+    var dd=new Date(key+'T12:00:00');
+    var dayLabel;
+    try{dayLabel=dd.toLocaleDateString(undefined,{timeZone:CHARGER_TZ,weekday:'short',month:'short',day:'numeric'})}catch(e){dayLabel=key}
+    var startStr=fmtTime(d.first),endStr=fmtTime(d.last);
+    var durStr=fmtDur(d.sec);
+    var nLabel=d.n>1?' \u00B7 '+d.n+' sessions':'';
+    var detail='';
+    d.items.sort(function(a,b){return a.ts-b.ts}).forEach(function(s){
+      var sStart=fmtTime(s.ts);
+      var sEnd=s.dur?fmtTime(s.ts+s.dur):'?';
+      var sDur=fmtDur(s.dur||0);
+      var sKwh=((s.en||0)/1000).toFixed(2);
+      detail+="<div style='display:flex;justify-content:space-between;padding:6px 4px;border-top:1px solid var(--border);font-size:.8em'><div><div>"+sStart+" \u2013 "+sEnd+"</div><div style='color:var(--text3);font-size:.92em;margin-top:2px'>#"+s.id+" \u00B7 "+sDur+"</div></div><div style='font-weight:500'>"+sKwh+" kWh</div></div>";
+    });
+    html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:4px 0;cursor:pointer;user-select:none' onclick='toggleDay("+i+")'>"+
+      "<div style='display:flex;justify-content:space-between;align-items:center'>"+
+        "<div><div style='font-size:.88em;font-weight:500'>"+dayLabel+" <span id='ch-"+i+"' style='color:var(--text3);font-size:.85em'>\u25BE</span></div>"+
+        "<div style='font-size:.78em;color:var(--text3);margin-top:2px'>"+startStr+" \u2013 "+endStr+nLabel+" \u00B7 "+durStr+"</div></div>"+
+        "<div style='font-weight:600;font-size:1.05em'>"+d.kwh.toFixed(2)+" kWh</div>"+
+      "</div>"+
+      "<div id='det-"+i+"' style='display:none;margin-top:6px'>"+detail+"</div>"+
+    "</div>";
+  });
+  var ids=sessions.map(function(s){return s.id||0}).filter(function(n){return n>0});
+  var minId=ids.length?Math.min.apply(null,ids):0;
+  if(minId>1){html+="<div style='text-align:center;margin-top:10px'><button id='load-older-btn' class='btn btn-outline' onclick='loadOlder()'>Load older sessions</button></div>";}
+  document.getElementById('slist').innerHTML=html||'<span style="color:var(--text3)">No data yet</span>';
+}
+function loadOlder(){
+  var cache;try{cache=JSON.parse(localStorage.getItem('wb-sessions-v1')||'{}')}catch(e){cache={}}
+  if(!cache.s)cache.s={};
+  var sids=Object.keys(cache.s).map(Number);
+  var minCached=sids.length?Math.min.apply(null,sids):0;
+  if(minCached<=1){toast('No older sessions','info');return}
+  var startSid=Math.max(1,minCached-60),endSid=minCached-1;
+  var total=endSid-startSid+1,fetched=0,sid=startSid;
+  var btn=document.getElementById('load-older-btn');
+  function fetchNext(){
+    if(sid>endSid){try{localStorage.setItem('wb-sessions-v1',JSON.stringify(cache))}catch(e){}
+      var allList=Object.keys(cache.s).map(function(k){return cache.s[k]});
+      renderAll(allList,cache.lifetimeKwh);return}
+    if(btn){btn.textContent='Loading '+(fetched+1)+' / '+total+'...';btn.disabled=true}
+    var advanced=false;
+    var advance=function(){if(advanced)return;advanced=true;sid++;fetched++;fetchNext()};
+    var hardTimer=setTimeout(advance,9000);
+    var thisSid=sid;
+    fetch('/api/command?action=bapi&met=r_log&par='+thisSid,{signal:AbortSignal.timeout(8000)})
+      .then(function(x){return x.json()}).then(function(sd){
+        clearTimeout(hardTimer);
+        if(sd.r&&sd.r.start){cache.s[thisSid]={id:thisSid,ts:sd.r.start,dur:sd.r.sec||sd.r.dur||sd.r.duration||0,en:sd.r.en||sd.r.energy||0}}
+        advance();
+      }).catch(function(){clearTimeout(hardTimer);advance()});
+  }
+  fetchNext();
+}
+function renderAll(sessions, lifetimeKwh){
+  renderTiles(sessions, lifetimeKwh);
+  renderDays(sessions);
+  try{buildHeatmap(sessions)}catch(e){console.error('heatmap failed',e)}
+}
 function loadSessions2(){
+  var cache;
+  try{cache=JSON.parse(localStorage.getItem('wb-sessions-v1')||'{}')}catch(e){cache={}}
+  if(!cache.s)cache.s={};
+  var cachedList=Object.keys(cache.s).map(function(k){return cache.s[k]});
+  if(cachedList.length){renderAll(cachedList,cache.lifetimeKwh)}
+  fetch('/api/command?action=bapi&met=r_dca&par=null',{signal:AbortSignal.timeout(10000)})
+    .then(function(x){return x.json()}).then(function(d){
+      if(d.r&&d.r.e){
+        cache.lifetimeKwh=d.r.e/1000;
+        document.getElementById('tile-allt').textContent=cache.lifetimeKwh.toFixed(0)+' kWh';
+      }
+    }).catch(function(){});
   fetch('/api/command?action=bapi&met=r_ses&par=null',{signal:AbortSignal.timeout(15000)})
     .then(function(x){return x.json()}).then(function(d){
-      if(!d.r||!d.r.last){document.getElementById('slist').innerHTML='No sessions yet';return}
-      var last=d.r.last,count=Math.min(30,last);
-      var sessions=[],idx=0,start=last-count+1;
-      function next(){
-        if(idx>=count){
-          buildHeatmap(sessions);
-          var html='';sessions.slice().reverse().slice(0,10).forEach(function(s){
-            var dur=s.dur?Math.round(s.dur/60)+'m':'-';
-            var en=s.en?(s.en/100).toFixed(2)+' kWh':'-';
-            var ts=s.ts?new Date(s.ts*1000).toLocaleString():'#'+s.id;
-            html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:4px 0;display:flex;justify-content:space-between'><div><div style='font-size:.82em'>"+ts+"</div><div style='font-size:.78em;color:var(--text3)'>#"+s.id+" \u00B7 "+dur+"</div></div><div style='font-weight:600'>"+en+"</div></div>";
-          });
-          document.getElementById('slist').innerHTML=html||'No detail data';
+      if(!d.r||!d.r.last){if(!cachedList.length)document.getElementById('slist').innerHTML='No sessions yet';return}
+      var last=d.r.last;
+      var cachedSids=Object.keys(cache.s).map(Number);
+      var maxCached=cachedSids.length?Math.max.apply(null,cachedSids):0;
+      if(maxCached>=last){try{localStorage.setItem('wb-sessions-v1',JSON.stringify(cache))}catch(e){}return}
+      var startSid=maxCached===0?Math.max(1,last-59):maxCached+1;
+      var total=last-startSid+1;
+      var fetched=0,sid=startSid;
+      function fetchNext(){
+        if(sid>last){
+          var allList=Object.keys(cache.s).map(function(k){return cache.s[k]});
+          try{localStorage.setItem('wb-sessions-v1',JSON.stringify(cache))}catch(e){}
+          renderAll(allList,cache.lifetimeKwh);
           return;
         }
-        var sid=start+idx;
-        document.getElementById('slist').innerHTML="<span class='spinner'></span> "+idx+" / "+count;
-        fetch('/api/command?action=bapi&met=r_log&par='+sid,{signal:AbortSignal.timeout(8000)})
+        if(!cachedList.length){
+          document.getElementById('slist').innerHTML="<span class='spinner'></span> Loading "+(fetched+1)+" / "+total+"...";
+        }
+        var advanced=false;
+        var advance=function(){if(advanced)return;advanced=true;sid++;fetched++;fetchNext()};
+        var hardTimer=setTimeout(advance,9000);
+        var thisSid=sid;
+        fetch('/api/command?action=bapi&met=r_log&par='+thisSid,{signal:AbortSignal.timeout(8000)})
           .then(function(x){return x.json()}).then(function(sd){
-            if(sd.r){sessions.push({id:sid,dur:sd.r.dur||sd.r.duration,en:sd.r.en||sd.r.energy,ts:sd.r.ts||sd.r.timestamp||sd.r.start})}
-            idx++;next();
-          }).catch(function(){idx++;next()});
+            clearTimeout(hardTimer);
+            if(sd.r&&sd.r.start){
+              cache.s[thisSid]={id:thisSid,ts:sd.r.start,dur:sd.r.sec||sd.r.dur||sd.r.duration||0,en:sd.r.en||sd.r.energy||0};
+            }
+            advance();
+          }).catch(function(){clearTimeout(hardTimer);advance()});
       }
-      next();
-    }).catch(function(e){document.getElementById('slist').innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'});
+      fetchNext();
+    }).catch(function(e){
+      if(!cachedList.length){document.getElementById('slist').innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'}
+    });
 }
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
 loadSessions2();
@@ -1068,6 +1326,7 @@ static void registerRoutes() {
     http.on("/api/ble-scan", handleBleScan);
     http.on("/api/wifi-scan", handleWifiScan);
     http.on("/api/status", handleApiStatus);
+    http.on("/api/ble/pause", handleBlePause);
     http.on("/api/charger", handleApiCharger);
     http.on("/api/command", handleApiCommand);
     http.on("/ota", handleOtaPage);
