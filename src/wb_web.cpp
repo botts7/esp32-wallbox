@@ -78,7 +78,10 @@ static bool checkAuth() {
 static void handleStyleCss() {
     http.sendHeader("Cache-Control", "no-cache");
     http.send(200, "text/css", R"CSS(
-:root{--bg:#0f1117;--surface:#1a1d28;--elevated:#232736;--primary:#3b82f6;--success:#22c55e;--danger:#ef4444;--warning:#f59e0b;--text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;--border:#2a2d3a;--accent:#4fc3f7}
+:root{--bg:#0f1117;--surface:#1a1d28;--card:#1a1d28;--elevated:#232736;--primary:#3b82f6;--success:#22c55e;--danger:#ef4444;--warning:#f59e0b;--text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;--border:#2a2d3a;--accent:#4fc3f7}
+@media (prefers-color-scheme:light){:root:not([data-theme]){--bg:#f5f7fa;--surface:#ffffff;--card:#ffffff;--elevated:#eef2f7;--text:#1e293b;--text2:#475569;--text3:#64748b;--border:#d8dfe8;--accent:#1d4ed8}}
+:root[data-theme="light"]{--bg:#f5f7fa;--surface:#ffffff;--card:#ffffff;--elevated:#eef2f7;--text:#1e293b;--text2:#475569;--text3:#64748b;--border:#d8dfe8;--accent:#1d4ed8}
+:root[data-theme="dark"]{--bg:#0f1117;--surface:#1a1d28;--card:#1a1d28;--elevated:#232736;--text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;--border:#2a2d3a;--accent:#4fc3f7}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0;padding:16px;padding-bottom:80px;background:var(--bg);color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased}
 .container{max-width:600px;margin:0 auto}
@@ -197,6 +200,8 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
         "html{background:#0f1117}"
         "body{margin:0;padding:16px;padding-bottom:80px;background:#0f1117;color:#e2e8f0;font-family:-apple-system,system-ui,sans-serif;min-height:100vh;visibility:hidden}"
         "body.ready{visibility:visible}"
+        "html[data-theme=\"light\"],html[data-theme=\"light\"] body{background:#f5f7fa;color:#1e293b}"
+        "@media (prefers-color-scheme:light){html:not([data-theme]),html:not([data-theme]) body{background:#f5f7fa;color:#1e293b}}"
         ".container{max-width:600px;margin:0 auto}"
         ".loading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 0;color:#64748b}"
         ".ld-spin{width:32px;height:32px;border:3px solid #3b82f6;border-top:3px solid transparent;border-radius:50%;animation:sp .8s linear infinite;margin-bottom:12px}"
@@ -223,6 +228,7 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
     }
     h += "<link rel='stylesheet' href='/style.css?v=" + buildVer + "'>"
         "<script src='/app.js?v=" + buildVer + "' defer></script>"
+        "<script>(function(){try{var t=localStorage.getItem('wb-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}})();</script>"
         "</head><body><div class='container'>"
         "<div class='ble-bar'><span class='ble-dot'></span>BLE: ";
     h += bleState;
@@ -568,6 +574,7 @@ static void handleSettings() {
       <button class='btn btn-outline' style='padding:12px' onclick='E("tz")'>&#x1F30D; Timezone</button>
       <button class='btn btn-outline' style='padding:12px' onclick='Q("gwsta","WiFi Status")'>&#x1F4F6; WiFi Status</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("halo")'>&#x1F4A1; Halo LED</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='E("theme")'>&#x1F3A8; Theme</button>
       <button id='ble-pause-btn' class='btn btn-outline' style='padding:12px' onclick='pauseBle()'>&#x1F4F4; Release BLE for App</button>
       <button class='btn btn-outline' style='padding:12px' onclick='confirm2("Reboot the charger?",function(){fetch("/api/command?action=reboot").then(function(){toast("Reboot sent","success")})})' style='background:rgba(239,68,68,.08);border-color:var(--danger);color:var(--danger)'>&#x1F504; Reboot</button>
     </div>
@@ -587,7 +594,7 @@ function Q(m,l){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.q
 function F(m,l,r){var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var s={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi',s[r]||'Code '+r)}else if(m==='r_ses'){h+=row('Last Session',r.last);h+=row('Total Sessions',r.size)}else if(m==='r_schs'){var sc=r.schedules||r;if(!Array.isArray(sc)){h+=row('Schedules','None');return h}sc.forEach(function(s,i){var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS[b]+' ';h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'><div style='display:flex;justify-content:space-between'><b>Schedule "+(i+1)+"</b><span class='badge "+(s.enabled?'badge-success':'badge-warning')+"'>"+(s.enabled?'Active':'Off')+"</span></div>";h+=row('Time',utcToLocal(s.start)+' - '+utcToLocal(s.stop));h+=row('Days',ds.trim()||'None');h+=row('Power Limit',(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A');if(s.target&&s.target.type==1)h+=row('Energy Limit',(s.target.value/1000)+' kWh');else h+=row('Energy Limit','No limit');h+="</div>"});if(!sc.length)h+=row('Schedules','None')}else if(m==='r_dca'){if(typeof r==='object'){h+=row('Voltage L1',r.v1+' V');if(r.v2)h+=row('Voltage L2',r.v2+' V');if(r.v3)h+=row('Voltage L3',r.v3+' V');h+=row('Power L1',r.p1+' W');if(r.p2)h+=row('Power L2',r.p2+' W');if(r.p3)h+=row('Power L3',r.p3+' W');h+=row('Current L1',(r.c1/10).toFixed(1)+' A');if(r.c2)h+=row('Current L2',(r.c2/10).toFixed(1)+' A');if(r.c3)h+=row('Current L3',(r.c3/10).toFixed(1)+' A');h+=row('Total Energy',(r.e/1000).toFixed(1)+' kWh')}else{h+=row('Energy Meter',''+r)}}else if(m==='g_alo'){if(typeof r==='object'){h+=row('Auto Lock',r.enabled?'Enabled':'Disabled');if(r.time)h+=row('Lock After',r.time+' seconds')}else{h+=row('Auto Lock',r?'Enabled':'Disabled')}}else if(m==='g_ecos'){var em={0:'Disabled',1:'Full Green (Solar Only)',2:'Eco Smart (Solar + Grid)'};if(typeof r==='object'){h+=row('Status',r.ese?'Active':'Inactive');h+=row('Mode',em[r.esm]||'Mode '+r.esm);h+=row('Solar Power Target',r.esp+'%')}else{h+=row('Eco Smart',em[r]||''+r)}}else if(m==='g_phsw'){if(typeof r==='object'){h+=row('Phase Switch',r.enabled?'Enabled':'Disabled')}else{h+=row('Phase Switch',r?'Enabled':'Disabled')}}else if(m==='read_pin'){if(typeof r==='object'){h+=row('BLE PIN',r.pin||'Not set');h+=row('PIN Version',r.version||'None')}else{h+=row('BLE PIN',''+r)}}else if(m==='r_hsh'){h+=row('ICP Max Current',r+'A')}else if(m==='g_psh'){if(typeof r==='object'){h+=row('Dynamic Power Sharing',r.dyps?'Enabled':'Disabled');h+=row('Max Power Per Charger',r.mcpp?r.mcpp+'W':'Unlimited');h+=row('Min Current',r.minI+'A');h+=row('Chargers in Group',r.nchg)}else{var ps={0:'Disabled',1:'Enabled',2:'Active'};h+=row('Power Sharing',ps[r]||''+r)}}else if(m==='g_tzn'){h+=row('Timezone',r.timezone||r)}else{h+="<pre style='margin:0;white-space:pre-wrap;font-size:.82em'>"+JSON.stringify(r,null,2)+"</pre>"}return h}
 function showTimezone(){E('tz')}
 function saveTz(){var tz=document.getElementById('tz-select').value;var p=JSON.stringify({timezone:tz});toast('Saving timezone...','info');fetch('/api/command?action=bapi&met=s_tzn&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(d.error){toast(d.error,'error')}else{CHARGER_TZ=tz;toast('Timezone set to '+tz,'success')}}).catch(function(e){toast('Error: '+e.message,'error')})}
-function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;r.style.display='block';var h='';if(type==='autolock'){h="<h2>&#x1F510; Auto Lock</h2><label>Enabled</label><select id='al-en'><option value='0'>Disabled</option><option value='1'>Enabled</option></select><label>Lock After (seconds)</label><input type='number' id='al-time' value='60' min='10' max='600'><div class='row' style='margin-top:10px'><button class='btn btn-success' onclick='saveAutoLock()'>Save</button></div><div id='al-result' style='display:none;margin-top:10px'></div>"}else if(type==='ocpp'){h="<h2>&#x1F517; OCPP</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ocpp&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};r.innerHTML="<h2>&#x1F517; OCPP Configuration</h2><label>Server URL</label><input id='ocpp-url' value='"+(o.u||'')+"' placeholder='ws://server:9000'><div class='row'><div><label>Charger ID</label><input id='ocpp-id' value='"+(o.chid||'')+"'></div><div><label>Password</label><input id='ocpp-pw' type='password' value='"+(o.pw||'')+"'></div></div><label>Enabled</label><select id='ocpp-en'><option value='0'"+(o.e?'':' selected')+">Disabled</option><option value='1'"+(o.e?' selected':'')+">Enabled</option></select><button class='btn btn-success' style='margin-top:10px' onclick='saveOcpp()'>Save OCPP</button><div id='ocpp-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='eco'){h="<h2>&#x2600; Eco Smart</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ecos&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};var esm=(typeof o.esm==='number')?o.esm:0;var esp=(typeof o.esp==='number')?o.esp:50;var ese=o.ese?true:false;var modes=[{v:0,t:'Disabled'},{v:1,t:'Full Green (Solar Only)'},{v:2,t:'Eco Smart (Solar + Grid)'}];var opts='';modes.forEach(function(m){opts+="<option value='"+m.v+"'"+(m.v===esm?' selected':'')+">"+m.t+"</option>"});r.innerHTML="<h2>&#x2600; Eco Smart</h2>"+row('Current state',ese?'Active':'Inactive')+"<label style='margin-top:12px'>Mode</label><select id='eco-mode'>"+opts+"</select><label>Solar Power Target (%)</label><input type='number' id='eco-esp' value='"+esp+"' min='0' max='100'><p class='help'>Eco Smart uses solar surplus. Full Green only charges from solar.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveEco()'>Save</button><div id='eco-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='tz'){h="<h2>&#x1F30D; Timezone</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var tz=d.r?d.r.timezone:'Unknown';CHARGER_TZ=tz;var opts='';var zones=['Australia/Sydney','Australia/Melbourne','Australia/Brisbane','Australia/Adelaide','Australia/Perth','Australia/Darwin','Australia/Hobart','Asia/Tokyo','Asia/Shanghai','Asia/Singapore','Asia/Kolkata','Asia/Dubai','Europe/London','Europe/Paris','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','America/Toronto','Pacific/Auckland','UTC'];zones.forEach(function(z){opts+="<option value='"+z+"'"+(z===tz?' selected':'')+">"+z.replace('_',' ')+"</option>"});r.innerHTML="<h2>&#x1F30D; Timezone</h2>"+row('Current',tz)+"<label style='margin-top:12px'>Change To</label><select id='tz-select'>"+opts+"</select><button class='btn btn-success' style='margin-top:10px' onclick='saveTz()'>Save</button><div id='tz-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='phasesw'){h="<h2>&#x1F504; Phase Switch</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_phsw&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var en=d.r&&d.r.enabled?true:false;r.innerHTML="<h2>&#x1F504; Phase Switch</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='phsw-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><p class='help'>Auto-switches between 1 and 3 phase based on solar surplus.</p><button class='btn btn-success' style='margin-top:10px' onclick='savePhaseSw()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='halo'){h="<h2>&#x1F4A1; Halo LED</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_halocfg&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};var bright=(typeof o.bright==='number')?o.bright:100;var mode=(typeof o.mode==='number')?o.mode:1;var ts=(typeof o.time_s==='number')?o.time_s:10;r.innerHTML="<h2>&#x1F4A1; Halo LED</h2>"+row('Current',(mode?'Standby on':'Standby off')+' \u00B7 '+bright+'%')+"<label style='margin-top:12px'>Standby</label><select id='halo-m'><option value='1'"+(mode===1?' selected':'')+">On (dim when idle)</option><option value='0'"+(mode===0?' selected':'')+">Off (always bright)</option></select><label>Brightness (%)</label><input type='range' id='halo-b' min='0' max='100' value='"+bright+"' oninput=\"document.getElementById('halo-bv').textContent=this.value+'%'\"><div id='halo-bv' style='text-align:center;margin-top:-4px;color:var(--text3);font-size:.85em'>"+bright+"%</div><label>Standby Timeout (seconds)</label><input type='number' id='halo-t' value='"+ts+"' min='0' max='3600'><p class='help'>How long to wait before dimming when standby is on.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveHalo()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}r.innerHTML=h}
+function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;r.style.display='block';var h='';if(type==='autolock'){h="<h2>&#x1F510; Auto Lock</h2><label>Enabled</label><select id='al-en'><option value='0'>Disabled</option><option value='1'>Enabled</option></select><label>Lock After (seconds)</label><input type='number' id='al-time' value='60' min='10' max='600'><div class='row' style='margin-top:10px'><button class='btn btn-success' onclick='saveAutoLock()'>Save</button></div><div id='al-result' style='display:none;margin-top:10px'></div>"}else if(type==='ocpp'){h="<h2>&#x1F517; OCPP</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ocpp&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};r.innerHTML="<h2>&#x1F517; OCPP Configuration</h2><label>Server URL</label><input id='ocpp-url' value='"+(o.u||'')+"' placeholder='ws://server:9000'><div class='row'><div><label>Charger ID</label><input id='ocpp-id' value='"+(o.chid||'')+"'></div><div><label>Password</label><input id='ocpp-pw' type='password' value='"+(o.pw||'')+"'></div></div><label>Enabled</label><select id='ocpp-en'><option value='0'"+(o.e?'':' selected')+">Disabled</option><option value='1'"+(o.e?' selected':'')+">Enabled</option></select><button class='btn btn-success' style='margin-top:10px' onclick='saveOcpp()'>Save OCPP</button><div id='ocpp-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='eco'){h="<h2>&#x2600; Eco Smart</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ecos&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};var esm=(typeof o.esm==='number')?o.esm:0;var esp=(typeof o.esp==='number')?o.esp:50;var ese=o.ese?true:false;var modes=[{v:0,t:'Disabled'},{v:1,t:'Full Green (Solar Only)'},{v:2,t:'Eco Smart (Solar + Grid)'}];var opts='';modes.forEach(function(m){opts+="<option value='"+m.v+"'"+(m.v===esm?' selected':'')+">"+m.t+"</option>"});r.innerHTML="<h2>&#x2600; Eco Smart</h2>"+row('Current state',ese?'Active':'Inactive')+"<label style='margin-top:12px'>Mode</label><select id='eco-mode'>"+opts+"</select><label>Solar Power Target (%)</label><input type='number' id='eco-esp' value='"+esp+"' min='0' max='100'><p class='help'>Eco Smart uses solar surplus. Full Green only charges from solar.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveEco()'>Save</button><div id='eco-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='tz'){h="<h2>&#x1F30D; Timezone</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var tz=d.r?d.r.timezone:'Unknown';CHARGER_TZ=tz;var opts='';var zones=['Australia/Sydney','Australia/Melbourne','Australia/Brisbane','Australia/Adelaide','Australia/Perth','Australia/Darwin','Australia/Hobart','Asia/Tokyo','Asia/Shanghai','Asia/Singapore','Asia/Kolkata','Asia/Dubai','Europe/London','Europe/Paris','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','America/Toronto','Pacific/Auckland','UTC'];zones.forEach(function(z){opts+="<option value='"+z+"'"+(z===tz?' selected':'')+">"+z.replace('_',' ')+"</option>"});r.innerHTML="<h2>&#x1F30D; Timezone</h2>"+row('Current',tz)+"<label style='margin-top:12px'>Change To</label><select id='tz-select'>"+opts+"</select><button class='btn btn-success' style='margin-top:10px' onclick='saveTz()'>Save</button><div id='tz-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='phasesw'){h="<h2>&#x1F504; Phase Switch</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_phsw&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var en=d.r&&d.r.enabled?true:false;r.innerHTML="<h2>&#x1F504; Phase Switch</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='phsw-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><p class='help'>Auto-switches between 1 and 3 phase based on solar surplus.</p><button class='btn btn-success' style='margin-top:10px' onclick='savePhaseSw()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='halo'){h="<h2>&#x1F4A1; Halo LED</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_halocfg&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};var bright=(typeof o.bright==='number')?o.bright:100;var mode=(typeof o.mode==='number')?o.mode:1;var ts=(typeof o.time_s==='number')?o.time_s:10;r.innerHTML="<h2>&#x1F4A1; Halo LED</h2>"+row('Current',(mode?'Standby on':'Standby off')+' \u00B7 '+bright+'%')+"<label style='margin-top:12px'>Standby</label><select id='halo-m'><option value='1'"+(mode===1?' selected':'')+">On (dim when idle)</option><option value='0'"+(mode===0?' selected':'')+">Off (always bright)</option></select><label>Brightness (%)</label><input type='range' id='halo-b' min='0' max='100' value='"+bright+"' oninput=\"document.getElementById('halo-bv').textContent=this.value+'%'\"><div id='halo-bv' style='text-align:center;margin-top:-4px;color:var(--text3);font-size:.85em'>"+bright+"%</div><label>Standby Timeout (seconds)</label><input type='number' id='halo-t' value='"+ts+"' min='0' max='3600'><p class='help'>How long to wait before dimming when standby is on.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveHalo()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='theme'){var cur='auto';try{cur=localStorage.getItem('wb-theme')||'auto'}catch(e){}var opts='';[{v:'auto',t:'Auto (follow system)'},{v:'dark',t:'Dark'},{v:'light',t:'Light'}].forEach(function(o){opts+="<option value='"+o.v+"'"+(o.v===cur?' selected':'')+">"+o.t+"</option>"});r.innerHTML="<h2>&#x1F3A8; Theme</h2><label>Appearance</label><select id='theme-sel' onchange='applyTheme(this.value)'>"+opts+"</select><p class='help'>Auto follows your OS or browser preference.</p>";return}r.innerHTML=h}
 function saveAutoLock(){var p=JSON.stringify({enabled:parseInt(document.getElementById('al-en').value),time:parseInt(document.getElementById('al-time').value)});toast('Saving auto lock...','info');fetch('/api/command?action=bapi&met=s_alo&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Auto lock saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function saveEco(){var mode=parseInt(document.getElementById('eco-mode').value);var espEl=document.getElementById('eco-esp');var esp=espEl?parseInt(espEl.value)||0:50;var p=JSON.stringify({mode:mode,esp:esp});toast('Saving eco smart...','info');fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function saveOcpp(){var p=JSON.stringify({u:document.getElementById('ocpp-url').value,chid:document.getElementById('ocpp-id').value,pw:document.getElementById('ocpp-pw').value,e:parseInt(document.getElementById('ocpp-en').value)});toast('Saving OCPP...','info');fetch('/api/command?action=bapi&met=s_ocpp&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'OCPP config saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
@@ -596,6 +603,13 @@ function saveHalo(){var b=parseInt(document.getElementById('halo-b').value);var 
 var allSchedules=[];
 var editingSid=null;
 var DAYS_M=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+function applyTheme(t){
+  try{
+    if(t==='auto'){localStorage.removeItem('wb-theme');document.documentElement.removeAttribute('data-theme')}
+    else{localStorage.setItem('wb-theme',t);document.documentElement.setAttribute('data-theme',t)}
+    toast('Theme: '+(t==='auto'?'Auto':t.charAt(0).toUpperCase()+t.slice(1)),'success');
+  }catch(e){toast('Failed to save theme','error')}
+}
 function loadSchedules(){
   var l=document.getElementById('sch-list');
   if(!l)return;
@@ -997,6 +1011,7 @@ static void handleSessionsPage() {
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F4C8;</span><h2>Daily Charging</h2></div>
   <div id='slist'><span class='spinner'></span> Loading sessions...</div>
+  <button class='btn btn-outline' style='margin-top:12px;width:100%' onclick='exportCsv()'>&#x1F4E5; Export CSV</button>
 </div>
 
 <p style='text-align:center;margin-top:16px'>
@@ -1010,7 +1025,7 @@ try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){
 fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function buildHeatmap(sessions){
   // day[0-6] × hour[0-23] sum of kWh
-  var grid=[];for(var d=0;d<7;d++){grid.push([]);for(var h=0;h<24;h++)grid[d].push(0)}
+  var grid=[];var bucket=[];for(var d=0;d<7;d++){grid.push([]);bucket.push([]);for(var h=0;h<24;h++){grid[d].push(0);bucket[d].push([])}}
   var max=0;
   sessions.forEach(function(s){
     if(!s.ts||!s.en)return;
@@ -1027,6 +1042,7 @@ function buildHeatmap(sessions){
       try{var local=new Date(dt.toLocaleString('en-US',{timeZone:CHARGER_TZ}));day=local.getDay();hr=local.getHours()}catch(e){day=dt.getDay();hr=dt.getHours()}
       grid[day][hr]+=kwhPerStep;
       if(grid[day][hr]>max)max=grid[day][hr];
+      var b=bucket[day][hr];if(b.indexOf(s)<0)b.push(s);
     }
   });
   var hm=document.getElementById('heatmap');hm.innerHTML='';
@@ -1043,9 +1059,10 @@ function buildHeatmap(sessions){
       else if(intensity>0.5)bg='var(--primary)';
       else if(intensity>0.25)bg='rgba(59,130,246,.5)';
       else if(intensity>0)bg='rgba(59,130,246,.2)';
-      hm.innerHTML+="<div title='"+DAYS[d]+" "+h+":00 — "+v.toFixed(1)+" kWh' style='aspect-ratio:1;background:"+bg+";border-radius:2px'></div>";
+      hm.innerHTML+="<div onclick='showHour("+d+","+h+")' title='"+DAYS[d]+" "+h+":00 — "+v.toFixed(1)+" kWh' style='aspect-ratio:1;background:"+bg+";border-radius:2px;cursor:"+(bucket[d][h].length?'pointer':'default')+"'></div>";
     }
   }
+  window._heatmapBuckets=bucket;
 }
 function renderTiles(sessions, lifetimeKwh){
   var nowSec=Date.now()/1000;
@@ -1144,6 +1161,57 @@ function renderAll(sessions, lifetimeKwh){
   renderTiles(sessions, lifetimeKwh);
   renderDays(sessions);
   try{buildHeatmap(sessions)}catch(e){console.error('heatmap failed',e)}
+}
+function closeHeatmapModal(){var m=document.getElementById('heatmap-modal');if(m)m.remove()}
+function showHour(day,hr){
+  var b=(window._heatmapBuckets&&window._heatmapBuckets[day]&&window._heatmapBuckets[day][hr])||[];
+  if(!b.length)return;
+  b=b.slice().sort(function(a,c){return (c.ts||0)-(a.ts||0)});
+  var modal=document.createElement('div');
+  modal.id='heatmap-modal';
+  modal.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:300;display:flex;align-items:center;justify-content:center;padding:16px';
+  modal.onclick=function(e){if(e.target===modal)closeHeatmapModal()};
+  var inner="<div style='background:var(--card);border-radius:12px;max-width:480px;width:100%;max-height:80vh;overflow:auto;padding:16px'><div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0'>"+DAYS[day]+" "+hr+":00 \u2013 "+(hr+1)+":00</h3><button onclick='closeHeatmapModal()' style='background:transparent;border:none;color:var(--text2);font-size:1.6em;cursor:pointer;line-height:1'>\u00D7</button></div>";
+  inner+="<div style='font-size:.78em;color:var(--text3);margin-bottom:8px'>"+b.length+" session"+(b.length===1?'':'s')+" delivered energy in this hour</div>";
+  b.forEach(function(s){
+    var d=new Date(s.ts*1000);
+    var dateStr,startStr,endStr;
+    try{dateStr=d.toLocaleDateString(undefined,{timeZone:CHARGER_TZ,weekday:'short',month:'short',day:'numeric'})}catch(e){dateStr=d.toDateString()}
+    try{startStr=d.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){startStr=d.toLocaleTimeString()}
+    var endD=s.dur?new Date((s.ts+s.dur)*1000):null;
+    if(endD)try{endStr=endD.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){endStr=endD.toLocaleTimeString()}
+    var dur=s.dur?Math.floor(s.dur/3600)+'h '+Math.round((s.dur%3600)/60)+'m':'-';
+    var kwh=s.en?(s.en/1000).toFixed(2)+' kWh':'-';
+    inner+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:center'><div><div style='font-weight:500;font-size:.9em'>"+dateStr+"</div><div style='font-size:.78em;color:var(--text3);margin-top:2px'>"+startStr+(endD?' \u2013 '+endStr:'')+" \u00B7 "+dur+"</div></div><div style='font-weight:600'>"+kwh+"</div></div></div>";
+  });
+  inner+="</div>";
+  modal.innerHTML=inner;
+  document.body.appendChild(modal);
+}
+function exportCsv(){
+  var cache;try{cache=JSON.parse(localStorage.getItem('wb-sessions-v1')||'{}')}catch(e){cache={}}
+  var arr=Object.keys(cache.s||{}).map(function(k){return cache.s[k]});
+  if(!arr.length){toast('No sessions to export','info');return}
+  arr.sort(function(a,c){return (a.ts||0)-(c.ts||0)});
+  var rows=[['Session ID','Date','Start','End','Duration (min)','Energy (kWh)']];
+  arr.forEach(function(s){
+    if(!s.ts)return;
+    var sd=new Date(s.ts*1000);
+    var ed=s.dur?new Date((s.ts+s.dur)*1000):null;
+    var dateStr,startStr,endStr='';
+    try{dateStr=sd.toLocaleDateString('en-CA',{timeZone:CHARGER_TZ})}catch(e){dateStr=sd.toLocaleDateString('en-CA')}
+    try{startStr=sd.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){startStr=sd.toLocaleTimeString()}
+    if(ed)try{endStr=ed.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){endStr=ed.toLocaleTimeString()}
+    var dur=s.dur?Math.round(s.dur/60):'';
+    var kwh=s.en?(s.en/1000).toFixed(2):'';
+    rows.push([s.id,dateStr,startStr,endStr,dur,kwh]);
+  });
+  var csv=rows.map(function(r){return r.join(',')}).join('\n');
+  var blob=new Blob([csv],{type:'text/csv'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');a.href=url;a.download='wallbox-sessions-'+new Date().toISOString().slice(0,10)+'.csv';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+  toast('Downloaded '+(rows.length-1)+' sessions','success');
 }
 function loadSessions2(){
   var cache;

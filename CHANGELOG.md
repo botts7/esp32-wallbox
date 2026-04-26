@@ -4,6 +4,14 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.1.1] - 2026-04-26
+
+### Added
+- Light / Dark / Auto **theme toggle** (Settings → Charger → 🎨 Theme). Auto follows the OS preference; manual choice persists in localStorage.
+- **CSV export** of cached session history (Sessions page → 📥 Export CSV).
+- **Clickable heatmap cells** — tap a cell to see every session that delivered energy in that day×hour.
+- **Backdrop-blur** on the drilldown modal.
+
 ## [2.1.0] - 2026-04-26
 
 ### Added
@@ -114,6 +122,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **MIT License** with Wallbox trademark disclaimer
 - **Confirmed working**: Wallbox Pulsar MAX with u-blox NINA-B22 BLE radio
 
+[2.1.1]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.1.1
 [2.1.0]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.1.0
 [2.0.1]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.0.1
 [2.0.0]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.0.0
