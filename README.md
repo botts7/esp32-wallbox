@@ -6,6 +6,7 @@
   <img src="docs/screenshots/dashboard.png" alt="Wallbox Gateway dashboard" width="320">
 </p>
 
+[![Build](https://img.shields.io/github/actions/workflow/status/botts7/esp32-wallbox/build.yml?branch=main&label=build)](https://github.com/botts7/esp32-wallbox/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/botts7/esp32-wallbox?color=4fc3f7)](https://github.com/botts7/esp32-wallbox/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/botts7/esp32-wallbox?style=flat&color=yellow)](https://github.com/botts7/esp32-wallbox/stargazers)
