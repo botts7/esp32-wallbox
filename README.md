@@ -1,20 +1,30 @@
 # ESP32 Wallbox BLE Gateway
 
-> **Zero-cloud local control of Wallbox EV chargers via Bluetooth LE, bridged to Home Assistant over MQTT.**
+> **Local BLE → MQTT gateway for the Wallbox Pulsar MAX. Full Home Assistant control with zero cloud, in ~$15 of hardware.**
 
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" alt="Wallbox Gateway dashboard" width="320">
+</p>
+
+[![Latest release](https://img.shields.io/github/v/release/botts7/esp32-wallbox?color=4fc3f7)](https://github.com/botts7/esp32-wallbox/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/botts7/esp32-wallbox?style=flat&color=yellow)](https://github.com/botts7/esp32-wallbox/stargazers)
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32--S3-orange)](https://platformio.org/)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-MQTT%20Discovery-blue)](https://www.home-assistant.io/)
 
-> **Disclaimer:** This project is not affiliated with, endorsed by, or connected to Wallbox Chargers SL.
-> It is an independent, open-source project for local charger control via Bluetooth Low Energy.
-> Use at your own risk. Modifying charger settings may void your warranty.
+✓ **No cloud** · talks BLE directly to your charger
+✓ **HA Energy dashboard** ready — lifetime kWh sensor wired
+✓ **~30 entities** auto-discovered (start/stop, schedules, eco-smart, halo, current limit…)
+✓ **Self-hosted web UI** — dashboard, weekly heatmap, daily charging totals, CSV export
+✓ **OTA updates** with rollback, captive-portal first-boot
 
-## Screenshots
+> **Disclaimer:** Independent open-source project. Not affiliated with, endorsed by, or connected to Wallbox Chargers SL. Use at your own risk; modifying charger settings may void your warranty.
 
-| Dashboard | Settings | Home Assistant |
-|---|---|---|
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Settings](docs/screenshots/settings.png) | ![HA Device](docs/screenshots/ha-device.png) |
+## More screenshots
+
+| Sessions / Heatmap | Home Assistant |
+|---|---|
+| ![Settings](docs/screenshots/settings.png) | ![HA Device](docs/screenshots/ha-device.png) |
 
 ## Why this exists
 
