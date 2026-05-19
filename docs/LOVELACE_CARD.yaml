@@ -1,0 +1,115 @@
+# Wallbox Gateway — Lovelace dashboard
+#
+# Drop this into a new Lovelace dashboard, or paste sections into your existing one.
+# Edit entity IDs if you customised the HA device name (defaults assume the
+# discovered device is "Wallbox Pulsar MAX").
+#
+# Requires Home Assistant >= 2024.1 and the built-in Energy dashboard for the
+# bottom statistics card (no custom cards needed).
+
+title: Wallbox
+icon: mdi:ev-station
+cards:
+  # ─── Hero: live status + power ────────────────────────────────────────────
+  - type: vertical-stack
+    cards:
+      - type: glance
+        title: Wallbox Pulsar MAX
+        show_name: true
+        show_state: true
+        show_icon: true
+        columns: 3
+        entities:
+          - entity: sensor.wallbox_pulsar_max_status
+            name: Status
+            icon: mdi:ev-station
+          - entity: sensor.wallbox_pulsar_max_charging_power
+            name: Power
+            icon: mdi:flash
+          - entity: sensor.wallbox_pulsar_max_session_energy
+            name: Session
+            icon: mdi:battery-charging
+
+      - type: gauge
+        entity: sensor.wallbox_pulsar_max_charging_power
+        name: Charging Power
+        unit: kW
+        min: 0
+        max: 7.4              # set to your charger's max (Pulsar MAX 1-phase 32 A ≈ 7.4 kW)
+        severity:
+          green: 0.5
+          yellow: 5
+          red: 7
+
+  # ─── Controls ─────────────────────────────────────────────────────────────
+  - type: entities
+    title: Control
+    show_header_toggle: false
+    entities:
+      - entity: switch.wallbox_pulsar_max_charging_enable
+        name: Charging
+        icon: mdi:play-pause
+      - entity: lock.wallbox_pulsar_max_lock
+        name: Socket Lock
+      - entity: number.wallbox_pulsar_max_max_charging_current
+        name: Max Current
+        icon: mdi:current-ac
+      - entity: select.wallbox_pulsar_max_eco_mode
+        name: Eco Smart
+        icon: mdi:solar-power
+      - entity: switch.wallbox_pulsar_max_phase_switch
+        name: Phase Switch
+        icon: mdi:sine-wave
+
+  # ─── Live data ────────────────────────────────────────────────────────────
+  - type: entities
+    title: Live data
+    show_header_toggle: false
+    entities:
+      - entity: sensor.wallbox_pulsar_max_charging_current_l1
+        name: Current L1
+      - entity: sensor.wallbox_pulsar_max_charging_current_l2
+        name: Current L2
+      - entity: sensor.wallbox_pulsar_max_charging_current_l3
+        name: Current L3
+      - entity: sensor.wallbox_pulsar_max_mains_voltage
+        name: Mains Voltage
+      - entity: sensor.wallbox_pulsar_max_house_power
+        name: House Power
+      - entity: sensor.wallbox_pulsar_max_ble_signal
+        name: BLE Signal
+
+  # ─── Energy graph (last 24h) ──────────────────────────────────────────────
+  - type: history-graph
+    title: Last 24 hours
+    hours_to_show: 24
+    refresh_interval: 60
+    entities:
+      - entity: sensor.wallbox_pulsar_max_charging_power
+        name: Power (kW)
+      - entity: sensor.wallbox_pulsar_max_house_power
+        name: House (W)
+
+  # ─── Energy dashboard statistics ──────────────────────────────────────────
+  # Drop-in mini Energy view using HA's built-in stats. Requires the
+  # Wallbox lifetime energy sensor to be set up in Settings → Dashboards →
+  # Energy → "Individual devices".
+  - type: statistics-graph
+    title: Charging energy
+    chart_type: bar
+    period: day
+    days_to_show: 14
+    stat_types:
+      - change
+    entities:
+      - sensor.wallbox_pulsar_max_meter_total_energy
+
+  # ─── Diagnostics ──────────────────────────────────────────────────────────
+  - type: entities
+    title: Diagnostics
+    show_header_toggle: false
+    entities:
+      - entity: sensor.wallbox_pulsar_max_serial_number
+      - entity: sensor.wallbox_pulsar_max_firmware
+      - entity: sensor.wallbox_pulsar_max_model
+      - entity: sensor.wallbox_pulsar_max_gateway_ip

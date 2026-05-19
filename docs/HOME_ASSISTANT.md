@@ -53,6 +53,18 @@ and reduce responsiveness.
 
 ## Dashboard Examples
 
+### Drop-in full dashboard
+
+A ready-to-paste Lovelace YAML covering hero status, controls, live data, 24h
+graph, and Energy dashboard integration:
+
+→ **[`docs/LOVELACE_CARD.yaml`](LOVELACE_CARD.yaml)** — copy the contents into
+a new Lovelace dashboard (Edit Dashboard → ⋮ → Raw configuration editor).
+No custom cards required; works on any HA ≥ 2024.1.
+
+Adjust the gauge `max` to match your charger (Pulsar MAX 1-phase 32 A ≈ 7.4 kW;
+3-phase ≈ 22 kW) and the entity names if you customised the HA device name.
+
 ### Simple charging card
 
 ```yaml
