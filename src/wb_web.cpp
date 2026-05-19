@@ -229,6 +229,7 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
     h += "<link rel='stylesheet' href='/style.css?v=" + buildVer + "'>"
         "<script src='/app.js?v=" + buildVer + "' defer></script>"
         "<script>(function(){try{var t=localStorage.getItem('wb-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}})();</script>"
+        "<script>(function(){var handlers={};var sock=null;var rd=1000;var open=false;function connect(){try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.hostname+':81/');sock.onopen=function(){open=true;rd=1000;document.documentElement.setAttribute('data-ws','1')};sock.onmessage=function(e){try{var m=JSON.parse(e.data);var h=handlers[m.t];if(h)h(m.d,m)}catch(err){}};sock.onclose=function(){open=false;document.documentElement.removeAttribute('data-ws');sock=null;setTimeout(connect,rd);rd=Math.min(rd*2,30000)};sock.onerror=function(){}}catch(e){setTimeout(connect,rd)}}window.wbws={subscribe:function(t,fn){handlers[t]=fn},isOpen:function(){return open},send:function(s){if(sock&&open)sock.send(s)}};connect();})();</script>"
         "</head><body><div class='container'>"
         "<div class='ble-bar'><span class='ble-dot'></span>BLE: ";
     h += bleState;
@@ -339,6 +340,7 @@ static void handleApiStatus() {
     json += ",\"dev_name\":\"" + wallboxBLE.deviceName() + "\"";
     json += ",\"ble_paused\":" + String(wallboxBLE.isPaused() ? "true" : "false");
     json += ",\"ble_pause_remaining\":" + String(wallboxBLE.pauseRemainingMs() / 1000);
+    json += ",\"ble_last_activity_s\":" + String(wallboxBLE.lastActivityAge() / 1000);
     json += "}";
     http.send(200, "application/json", json);
 }
@@ -423,6 +425,9 @@ static void handleDashboard() {
 <div id='pg' style='display:none'>
 <h1>&#x26A1; Wallbox</h1>
 <div id='pin-warn' style='display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#f59e0b'>&#x26A0; No BLE PIN set — anyone nearby can control your charger. <a href='/settings' style='color:#f59e0b;text-decoration:underline'>Set a PIN</a></div>
+<div id='ble-health' style='display:none;border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em'></div>
+<div id='notif-bar' style='display:none;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#ef4444;cursor:pointer' onclick='showNotifs()'>&#x1F514; <span id='notif-count'></span> charger notification(s) — tap to view</div>
+<div id='notif-modal' style='display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:300;align-items:center;justify-content:center;padding:16px' onclick='if(event.target===this)this.style.display=\"none\"'><div id='notif-modal-inner' style='background:var(--card);border-radius:12px;max-width:480px;width:100%;max-height:80vh;overflow:auto;padding:16px'></div></div>
 
 <div class='card'>
   <div id='sg' style='display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px'>
@@ -457,13 +462,30 @@ static void handleDashboard() {
 
 <script>
 var SN={0:'Disconnected',1:'Connected',2:'Charging',3:'Paused',4:'Scheduled',5:'Discharging',6:'Error',7:'Disconnected',8:'Locked',9:'Updating',10:'Queue (Power)',13:'Waiting for Car',14:'Error',16:'Ready',17:'Connected',18:'Waiting for Schedule',19:'Scheduled',20:'Charging',21:'Charge Complete',22:'Paused by User',23:'Queue (Power Share)',24:'Queue (Eco Smart)',25:'Waiting for Schedule',26:'Discharging',161:'Ready',178:'Paused',179:'Charging',180:'Scheduled',189:'Ready',193:'Paused',194:'Locked',209:'Reserved (OCPP)',210:'Updating'};
-function P(){fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null')return;var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;if(s){var n=SN[s.st];if(!n&&rt)n=SN[rt.charger_status];document.getElementById('v-st').textContent=n||'Code '+s.st;document.getElementById('v-pw').textContent=(+s.cp).toFixed(2)+' kW';var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));var l1=(s.L1/10).toFixed(1),l2=(s.L2/10).toFixed(1),l3=(s.L3/10).toFixed(1);if(threePhase){document.getElementById('l-cr').textContent='L1 / L2 / L3';document.getElementById('v-cr').textContent=l1+' / '+l2+' / '+l3+' A'}else{document.getElementById('l-cr').textContent='Charging Current';document.getElementById('v-cr').textContent=l1+' A'}document.getElementById('v-en').textContent=(s.en/100).toFixed(2)+' kWh';document.getElementById('v-mc').textContent=s.cur+' A';document.getElementById('sl').value=s.cur;document.getElementById('sv').textContent=s.cur+'A'}if(rt){document.getElementById('v-lk').textContent=rt.lock_status==0?'Unlocked':'Locked';var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};var oe=document.getElementById('v-oc');if(oe)oe.textContent=os[rt.ocpp_status]||'Code '+rt.ocpp_status}}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(d.r){document.getElementById('v-vt').textContent=d.r.v1+' V';document.getElementById('v-gp').textContent=d.r.p1+' W'}}).catch(function(){})}
+var CHARGER_TZ='UTC';try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
+fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
+function _setText(id,txt){var el=document.getElementById(id);if(el)el.textContent=txt}
+function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;var el=document.getElementById(id);if(!el)return;el.textContent=(fmt?fmt(val):val)+(suffix||'')}
+function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];if(!n&&rt&&typeof rt.charger_status==='number')n=SN[rt.charger_status];_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
+function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
+function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null')return;var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){applyMeterData(d.r)}).catch(function(){})}
+// Hook WS push handlers
+if(window.wbws){window.wbws.subscribe('status',function(d){applyStatusData(d&&d.r?d.r:d,null)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});}
+// Render cached values immediately (no spinners)
+try{var c=JSON.parse(localStorage.getItem('wb-last-status')||'null');if(c)applyStatusData(c.s,c.rt)}catch(e){}
+try{var cm=JSON.parse(localStorage.getItem('wb-last-meter')||'null');if(cm)applyMeterData(cm.d)}catch(e){}
 function C(a){toast('Sending '+a.split('&')[0]+'...','info');fetch('/api/command?action='+a).then(function(x){return x.json()}).then(function(d){if(d.error)toast(d.error,'error');else toast('Command sent','success');setTimeout(P,1000)}).catch(function(e){toast('Error: '+e,'error')})}
 var _curTimer=null;
 function setCurrent(v){if(_curTimer)clearTimeout(_curTimer);_curTimer=setTimeout(function(){toast('Setting '+v+'A','info');fetch('/api/command?action=current&value='+v).then(function(x){return x.json()}).then(function(d){if(d.error)toast(d.error,'error');else toast('Max current set to '+v+'A','success');setTimeout(P,1000)}).catch(function(e){toast('Error: '+e,'error')})},300)}
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
 P();setInterval(P,10000);
 fetch('/api/command?action=bapi&met=read_pin&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&!d.r.pin)document.getElementById('pin-warn').style.display='block'}).catch(function(){});
+var _notifs=[];
+function loadNotifs(){fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.ble!=='connected')return;return fetch('/api/command?action=bapi&met=r_not&par=null',{signal:AbortSignal.timeout(10000)}).then(function(r){return r.json()}).then(function(d){var v=d.r;if(!Array.isArray(v))return;_notifs=v;var bar=document.getElementById('notif-bar');if(!bar)return;if(v.length>0){document.getElementById('notif-count').textContent=v.length;bar.style.display='block'}else{bar.style.display='none'}})}).catch(function(){})}
+function showNotifs(){var m=document.getElementById('notif-modal');var inner=document.getElementById('notif-modal-inner');var html="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0'>&#x1F514; Notifications</h3><button onclick='document.getElementById(\"notif-modal\").style.display=\"none\"' style='background:transparent;border:none;color:var(--text2);font-size:1.6em;cursor:pointer;line-height:1'>×</button></div>";if(!_notifs.length){html+="<div style='color:var(--text3)'>No notifications</div>"}else{_notifs.forEach(function(n,i){var msg=n.message||n.msg||n.text||JSON.stringify(n);var ts=(n.timestamp||n.ts)?new Date((n.timestamp||n.ts)*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ}):'';html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='font-weight:500;font-size:.9em'>#"+(i+1)+" "+msg+"</div>"+(ts?"<div style='font-size:.78em;color:var(--text3);margin-top:4px'>"+ts+"</div>":'')+"</div>"})}inner.innerHTML=html;m.style.display='flex'}
+function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
+loadNotifs();setInterval(loadNotifs,60000);
+updateBleHealth();setInterval(updateBleHealth,15000);
 </script>
 </div>
 )HTML";
@@ -575,6 +597,7 @@ static void handleSettings() {
       <button class='btn btn-outline' style='padding:12px' onclick='Q("gwsta","WiFi Status")'>&#x1F4F6; WiFi Status</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("halo")'>&#x1F4A1; Halo LED</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("theme")'>&#x1F3A8; Theme</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='E("cost")'>&#x1F4B0; Charging Cost</button>
       <button id='ble-pause-btn' class='btn btn-outline' style='padding:12px' onclick='pauseBle()'>&#x1F4F4; Release BLE for App</button>
       <button class='btn btn-outline' style='padding:12px' onclick='confirm2("Reboot the charger?",function(){fetch("/api/command?action=reboot").then(function(){toast("Reboot sent","success")})})' style='background:rgba(239,68,68,.08);border-color:var(--danger);color:var(--danger)'>&#x1F504; Reboot</button>
     </div>
@@ -594,7 +617,13 @@ function Q(m,l){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.q
 function F(m,l,r){var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var s={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi',s[r]||'Code '+r)}else if(m==='r_ses'){h+=row('Last Session',r.last);h+=row('Total Sessions',r.size)}else if(m==='r_schs'){var sc=r.schedules||r;if(!Array.isArray(sc)){h+=row('Schedules','None');return h}sc.forEach(function(s,i){var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS[b]+' ';h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'><div style='display:flex;justify-content:space-between'><b>Schedule "+(i+1)+"</b><span class='badge "+(s.enabled?'badge-success':'badge-warning')+"'>"+(s.enabled?'Active':'Off')+"</span></div>";h+=row('Time',utcToLocal(s.start)+' - '+utcToLocal(s.stop));h+=row('Days',ds.trim()||'None');h+=row('Power Limit',(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A');if(s.target&&s.target.type==1)h+=row('Energy Limit',(s.target.value/1000)+' kWh');else h+=row('Energy Limit','No limit');h+="</div>"});if(!sc.length)h+=row('Schedules','None')}else if(m==='r_dca'){if(typeof r==='object'){h+=row('Voltage L1',r.v1+' V');if(r.v2)h+=row('Voltage L2',r.v2+' V');if(r.v3)h+=row('Voltage L3',r.v3+' V');h+=row('Power L1',r.p1+' W');if(r.p2)h+=row('Power L2',r.p2+' W');if(r.p3)h+=row('Power L3',r.p3+' W');h+=row('Current L1',(r.c1/10).toFixed(1)+' A');if(r.c2)h+=row('Current L2',(r.c2/10).toFixed(1)+' A');if(r.c3)h+=row('Current L3',(r.c3/10).toFixed(1)+' A');h+=row('Total Energy',(r.e/1000).toFixed(1)+' kWh')}else{h+=row('Energy Meter',''+r)}}else if(m==='g_alo'){if(typeof r==='object'){h+=row('Auto Lock',r.enabled?'Enabled':'Disabled');if(r.time)h+=row('Lock After',r.time+' seconds')}else{h+=row('Auto Lock',r?'Enabled':'Disabled')}}else if(m==='g_ecos'){var em={0:'Disabled',1:'Full Green (Solar Only)',2:'Eco Smart (Solar + Grid)'};if(typeof r==='object'){h+=row('Status',r.ese?'Active':'Inactive');h+=row('Mode',em[r.esm]||'Mode '+r.esm);h+=row('Solar Power Target',r.esp+'%')}else{h+=row('Eco Smart',em[r]||''+r)}}else if(m==='g_phsw'){if(typeof r==='object'){h+=row('Phase Switch',r.enabled?'Enabled':'Disabled')}else{h+=row('Phase Switch',r?'Enabled':'Disabled')}}else if(m==='read_pin'){if(typeof r==='object'){h+=row('BLE PIN',r.pin||'Not set');h+=row('PIN Version',r.version||'None')}else{h+=row('BLE PIN',''+r)}}else if(m==='r_hsh'){h+=row('ICP Max Current',r+'A')}else if(m==='g_psh'){if(typeof r==='object'){h+=row('Dynamic Power Sharing',r.dyps?'Enabled':'Disabled');h+=row('Max Power Per Charger',r.mcpp?r.mcpp+'W':'Unlimited');h+=row('Min Current',r.minI+'A');h+=row('Chargers in Group',r.nchg)}else{var ps={0:'Disabled',1:'Enabled',2:'Active'};h+=row('Power Sharing',ps[r]||''+r)}}else if(m==='g_tzn'){h+=row('Timezone',r.timezone||r)}else{h+="<pre style='margin:0;white-space:pre-wrap;font-size:.82em'>"+JSON.stringify(r,null,2)+"</pre>"}return h}
 function showTimezone(){E('tz')}
 function saveTz(){var tz=document.getElementById('tz-select').value;var p=JSON.stringify({timezone:tz});toast('Saving timezone...','info');fetch('/api/command?action=bapi&met=s_tzn&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(d.error){toast(d.error,'error')}else{CHARGER_TZ=tz;toast('Timezone set to '+tz,'success')}}).catch(function(e){toast('Error: '+e.message,'error')})}
-function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;r.style.display='block';var h='';if(type==='autolock'){h="<h2>&#x1F510; Auto Lock</h2><label>Enabled</label><select id='al-en'><option value='0'>Disabled</option><option value='1'>Enabled</option></select><label>Lock After (seconds)</label><input type='number' id='al-time' value='60' min='10' max='600'><div class='row' style='margin-top:10px'><button class='btn btn-success' onclick='saveAutoLock()'>Save</button></div><div id='al-result' style='display:none;margin-top:10px'></div>"}else if(type==='ocpp'){h="<h2>&#x1F517; OCPP</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ocpp&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};r.innerHTML="<h2>&#x1F517; OCPP Configuration</h2><label>Server URL</label><input id='ocpp-url' value='"+(o.u||'')+"' placeholder='ws://server:9000'><div class='row'><div><label>Charger ID</label><input id='ocpp-id' value='"+(o.chid||'')+"'></div><div><label>Password</label><input id='ocpp-pw' type='password' value='"+(o.pw||'')+"'></div></div><label>Enabled</label><select id='ocpp-en'><option value='0'"+(o.e?'':' selected')+">Disabled</option><option value='1'"+(o.e?' selected':'')+">Enabled</option></select><button class='btn btn-success' style='margin-top:10px' onclick='saveOcpp()'>Save OCPP</button><div id='ocpp-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='eco'){h="<h2>&#x2600; Eco Smart</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ecos&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};var esm=(typeof o.esm==='number')?o.esm:0;var esp=(typeof o.esp==='number')?o.esp:50;var ese=o.ese?true:false;var modes=[{v:0,t:'Disabled'},{v:1,t:'Full Green (Solar Only)'},{v:2,t:'Eco Smart (Solar + Grid)'}];var opts='';modes.forEach(function(m){opts+="<option value='"+m.v+"'"+(m.v===esm?' selected':'')+">"+m.t+"</option>"});r.innerHTML="<h2>&#x2600; Eco Smart</h2>"+row('Current state',ese?'Active':'Inactive')+"<label style='margin-top:12px'>Mode</label><select id='eco-mode'>"+opts+"</select><label>Solar Power Target (%)</label><input type='number' id='eco-esp' value='"+esp+"' min='0' max='100'><p class='help'>Eco Smart uses solar surplus. Full Green only charges from solar.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveEco()'>Save</button><div id='eco-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='tz'){h="<h2>&#x1F30D; Timezone</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var tz=d.r?d.r.timezone:'Unknown';CHARGER_TZ=tz;var opts='';var zones=['Australia/Sydney','Australia/Melbourne','Australia/Brisbane','Australia/Adelaide','Australia/Perth','Australia/Darwin','Australia/Hobart','Asia/Tokyo','Asia/Shanghai','Asia/Singapore','Asia/Kolkata','Asia/Dubai','Europe/London','Europe/Paris','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','America/Toronto','Pacific/Auckland','UTC'];zones.forEach(function(z){opts+="<option value='"+z+"'"+(z===tz?' selected':'')+">"+z.replace('_',' ')+"</option>"});r.innerHTML="<h2>&#x1F30D; Timezone</h2>"+row('Current',tz)+"<label style='margin-top:12px'>Change To</label><select id='tz-select'>"+opts+"</select><button class='btn btn-success' style='margin-top:10px' onclick='saveTz()'>Save</button><div id='tz-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='phasesw'){h="<h2>&#x1F504; Phase Switch</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_phsw&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var en=d.r&&d.r.enabled?true:false;r.innerHTML="<h2>&#x1F504; Phase Switch</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='phsw-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><p class='help'>Auto-switches between 1 and 3 phase based on solar surplus.</p><button class='btn btn-success' style='margin-top:10px' onclick='savePhaseSw()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='halo'){h="<h2>&#x1F4A1; Halo LED</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_halocfg&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){var o=d.r||{};var bright=(typeof o.bright==='number')?o.bright:100;var mode=(typeof o.mode==='number')?o.mode:1;var ts=(typeof o.time_s==='number')?o.time_s:10;r.innerHTML="<h2>&#x1F4A1; Halo LED</h2>"+row('Current',(mode?'Standby on':'Standby off')+' \u00B7 '+bright+'%')+"<label style='margin-top:12px'>Standby</label><select id='halo-m'><option value='1'"+(mode===1?' selected':'')+">On (dim when idle)</option><option value='0'"+(mode===0?' selected':'')+">Off (always bright)</option></select><label>Brightness (%)</label><input type='range' id='halo-b' min='0' max='100' value='"+bright+"' oninput=\"document.getElementById('halo-bv').textContent=this.value+'%'\"><div id='halo-bv' style='text-align:center;margin-top:-4px;color:var(--text3);font-size:.85em'>"+bright+"%</div><label>Standby Timeout (seconds)</label><input type='number' id='halo-t' value='"+ts+"' min='0' max='3600'><p class='help'>How long to wait before dimming when standby is on.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveHalo()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='theme'){var cur='auto';try{cur=localStorage.getItem('wb-theme')||'auto'}catch(e){}var opts='';[{v:'auto',t:'Auto (follow system)'},{v:'dark',t:'Dark'},{v:'light',t:'Light'}].forEach(function(o){opts+="<option value='"+o.v+"'"+(o.v===cur?' selected':'')+">"+o.t+"</option>"});r.innerHTML="<h2>&#x1F3A8; Theme</h2><label>Appearance</label><select id='theme-sel' onchange='applyTheme(this.value)'>"+opts+"</select><p class='help'>Auto follows your OS or browser preference.</p>";return}r.innerHTML=h}
+function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;r.style.display='block';var h='';if(type==='autolock'){h="<h2>&#x1F510; Auto Lock</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_alo&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn’t read Auto Lock state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("autolock")\'>Retry</button></div>';return}var o=d.r;var en=o.enabled?true:false;var tm=(typeof o.time==='number')?o.time:60;r.innerHTML="<h2>&#x1F510; Auto Lock</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='al-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><label>Lock After (seconds)</label><input type='number' id='al-time' value='"+tm+"' min='10' max='600'><div class='row' style='margin-top:10px'><button class='btn btn-success' onclick='saveAutoLock()'>Save</button></div><div id='al-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='ocpp'){h="<h2>&#x1F517; OCPP</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ocpp&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read OCPP state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("ocpp")\'>Retry</button></div>';return}var o=d.r;r.innerHTML="<h2>&#x1F517; OCPP Configuration</h2><label>Server URL</label><input id='ocpp-url' value='"+(o.u||'')+"' placeholder='ws://server:9000'><div class='row'><div><label>Charger ID</label><input id='ocpp-id' value='"+(o.chid||'')+"'></div><div><label>Password</label><input id='ocpp-pw' type='password' value='"+(o.pw||'')+"'></div></div><label>Enabled</label><select id='ocpp-en'><option value='0'"+(o.e?'':' selected')+">Disabled</option><option value='1'"+(o.e?' selected':'')+">Enabled</option></select><button class='btn btn-success' style='margin-top:10px' onclick='saveOcpp()'>Save OCPP</button><div id='ocpp-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='eco'){h="<h2>&#x2600; Eco Smart</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ecos&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read current Eco Smart state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("eco")\'>Retry</button></div>';return}var o=d.r;var esm=(typeof o.esm==='number')?o.esm:0;var esp=(typeof o.esp==='number')?o.esp:50;var ese=o.ese?true:false;var modes=[{v:0,t:'Disabled'},{v:1,t:'Full Green (Solar Only)'},{v:2,t:'Eco Smart (Solar + Grid)'}];var opts='';modes.forEach(function(m){opts+="<option value='"+m.v+"'"+(m.v===esm?' selected':'')+">"+m.t+"</option>"});r.innerHTML="<h2>&#x2600; Eco Smart</h2>"+row('Current state',ese?'Active':'Inactive')+"<label style='margin-top:12px'>Mode</label><select id='eco-mode'>"+opts+"</select><label>Solar Power Target (%)</label><input type='number' id='eco-esp' value='"+esp+"' min='0' max='100'><p class='help'>Eco Smart uses solar surplus. Full Green only charges from solar.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveEco()'>Save</button><div id='eco-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='tz'){h="<h2>&#x1F30D; Timezone</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'||!d.r.timezone){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read timezone. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("tz")\'>Retry</button></div>';return}var tz=d.r.timezone;CHARGER_TZ=tz;var opts='';var zones=['Australia/Sydney','Australia/Melbourne','Australia/Brisbane','Australia/Adelaide','Australia/Perth','Australia/Darwin','Australia/Hobart','Asia/Tokyo','Asia/Shanghai','Asia/Singapore','Asia/Kolkata','Asia/Dubai','Europe/London','Europe/Paris','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','America/Toronto','Pacific/Auckland','UTC'];zones.forEach(function(z){opts+="<option value='"+z+"'"+(z===tz?' selected':'')+">"+z.replace('_',' ')+"</option>"});r.innerHTML="<h2>&#x1F30D; Timezone</h2>"+row('Current',tz)+"<label style='margin-top:12px'>Change To</label><select id='tz-select'>"+opts+"</select><button class='btn btn-success' style='margin-top:10px' onclick='saveTz()'>Save</button><div id='tz-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='phasesw'){h="<h2>&#x1F504; Phase Switch</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_phsw&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read Phase Switch state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("phasesw")\'>Retry</button></div>';return}var en=d.r.enabled?true:false;r.innerHTML="<h2>&#x1F504; Phase Switch</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='phsw-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><p class='help'>Auto-switches between 1 and 3 phase based on solar surplus.</p><button class='btn btn-success' style='margin-top:10px' onclick='savePhaseSw()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='halo'){h="<h2>&#x1F4A1; Halo LED</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_halocfg&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read Halo state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("halo")\'>Retry</button></div>';return}var o=d.r;var bright=(typeof o.bright==='number')?o.bright:100;var mode=(typeof o.mode==='number')?o.mode:1;var ts=(typeof o.time_s==='number')?o.time_s:10;r.innerHTML="<h2>&#x1F4A1; Halo LED</h2>"+row('Current',(mode?'Standby on':'Standby off')+' \u00B7 '+bright+'%')+"<label style='margin-top:12px'>Standby</label><select id='halo-m'><option value='1'"+(mode===1?' selected':'')+">On (dim when idle)</option><option value='0'"+(mode===0?' selected':'')+">Off (always bright)</option></select><label>Brightness (%)</label><input type='range' id='halo-b' min='0' max='100' value='"+bright+"' oninput=\"document.getElementById('halo-bv').textContent=this.value+'%'\"><div id='halo-bv' style='text-align:center;margin-top:-4px;color:var(--text3);font-size:.85em'>"+bright+"%</div><label>Standby Timeout (seconds)</label><input type='number' id='halo-t' value='"+ts+"' min='0' max='3600'><p class='help'>How long to wait before dimming when standby is on.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveHalo()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='theme'){var cur='auto';try{cur=localStorage.getItem('wb-theme')||'auto'}catch(e){}var opts='';[{v:'auto',t:'Auto (follow system)'},{v:'dark',t:'Dark'},{v:'light',t:'Light'}].forEach(function(o){opts+="<option value='"+o.v+"'"+(o.v===cur?' selected':'')+">"+o.t+"</option>"});r.innerHTML="<h2>&#x1F3A8; Theme</h2><label>Appearance</label><select id='theme-sel' onchange='applyTheme(this.value)'>"+opts+"</select><p class='help'>Auto follows your OS or browser preference.</p>";return}else if(type==='cost'){
+  var T;try{T=JSON.parse(localStorage.getItem('wb-tariff')||'null')}catch(e){T=null}
+  if(!T)T={enabled:false,currency:'$',baseRate:0.30,greenRate:0,tiers:[]};
+  window._editTariff=T;
+  r.innerHTML=renderCostPanel(T);
+  return
+}r.innerHTML=h}
 function saveAutoLock(){var p=JSON.stringify({enabled:parseInt(document.getElementById('al-en').value),time:parseInt(document.getElementById('al-time').value)});toast('Saving auto lock...','info');fetch('/api/command?action=bapi&met=s_alo&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Auto lock saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function saveEco(){var mode=parseInt(document.getElementById('eco-mode').value);var espEl=document.getElementById('eco-esp');var esp=espEl?parseInt(espEl.value)||0:50;var p=JSON.stringify({mode:mode,esp:esp});toast('Saving eco smart...','info');fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function saveOcpp(){var p=JSON.stringify({u:document.getElementById('ocpp-url').value,chid:document.getElementById('ocpp-id').value,pw:document.getElementById('ocpp-pw').value,e:parseInt(document.getElementById('ocpp-en').value)});toast('Saving OCPP...','info');fetch('/api/command?action=bapi&met=s_ocpp&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'OCPP config saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
@@ -603,6 +632,71 @@ function saveHalo(){var b=parseInt(document.getElementById('halo-b').value);var 
 var allSchedules=[];
 var editingSid=null;
 var DAYS_M=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+function renderCostPanel(T){
+  var DAYNAMES=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  var h="<h2>\u{1F4B0} Charging Cost</h2>";
+  h+="<label style='display:flex;align-items:center;gap:8px;cursor:pointer'><input type='checkbox' id='cost-en' "+(T.enabled?'checked':'')+" style='width:auto'> Enable cost tracking</label>";
+  h+="<div class='row' style='margin-top:8px'><div><label>Currency</label><input id='cost-cur' value='"+(T.currency||'$')+"' maxlength='4' style='max-width:80px'></div><div><label>Base rate ($/kWh)</label><input type='number' id='cost-base' value='"+T.baseRate+"' min='0' max='10' step='0.01'></div></div>";
+  h+="<label>Solar (green) rate ($/kWh)</label><input type='number' id='cost-green' value='"+T.greenRate+"' min='0' max='10' step='0.01'>";
+  h+="<h3 style='font-size:.95em;margin:16px 0 6px;color:var(--text2)'>Tariff periods (first match wins)</h3>";
+  h+="<div id='tier-list'>";
+  (T.tiers||[]).forEach(function(t,i){h+=renderTierRow(t,i,DAYNAMES)});
+  h+="</div>";
+  h+="<button class='btn btn-outline' style='margin-top:8px;width:100%' onclick='addTier()'>+ Add Period</button>";
+  h+="<div class='row' style='margin-top:14px'><button class='btn btn-success' onclick='saveCost()'>Save</button><button class='btn btn-outline' onclick='cancelCost()'>Cancel</button></div>";
+  h+="<p class='help' style='margin-top:12px'>Times use the charger's configured timezone. Periods are matched top-down. If no period matches, the base rate applies.</p>";
+  return h;
+}
+function renderTierRow(t,i,DAYNAMES){
+  var h="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'>";
+  h+="<div style='display:flex;justify-content:space-between;align-items:center;gap:8px'><input value='"+(t.name||'Tier '+(i+1))+"' data-tname='"+i+"' placeholder='Name' style='flex:1;margin:0'><input type='number' value='"+t.rate+"' data-trate='"+i+"' min='0' step='0.01' style='width:90px;margin:0' placeholder='$/kWh'><button class='btn btn-outline' style='padding:6px 10px;color:var(--danger)' onclick='removeTier("+i+")'>\u2716</button></div>";
+  h+="<div style='display:flex;flex-wrap:wrap;gap:4px;margin:8px 0 4px'>";
+  for(var b=0;b<7;b++){var on=(t.days&(1<<b))!==0;h+="<label style='display:flex;align-items:center;gap:3px;background:"+(on?'rgba(59,130,246,.15)':'var(--elevated)')+";padding:6px 10px;border-radius:6px;cursor:pointer;font-size:.82em'><input type='checkbox' data-tday='"+i+":"+b+"' value='"+(1<<b)+"' "+(on?'checked':'')+" style='width:auto'>"+DAYNAMES[b]+"</label>"}
+  h+="</div>";
+  h+="<div class='row' style='margin-top:6px'><div><label style='font-size:.75em'>From hour</label><input type='number' value='"+t.fromH+"' data-tfrom='"+i+"' min='0' max='23'></div><div><label style='font-size:.75em'>To hour</label><input type='number' value='"+t.toH+"' data-tto='"+i+"' min='0' max='23'></div></div>";
+  h+="</div>";
+  return h;
+}
+function readTiersFromUI(){
+  var tiers=[];
+  document.querySelectorAll('[data-tname]').forEach(function(el){
+    var i=parseInt(el.getAttribute('data-tname'));
+    var rate=parseFloat(document.querySelector('[data-trate="'+i+'"]').value)||0;
+    var fromH=parseInt(document.querySelector('[data-tfrom="'+i+'"]').value)||0;
+    var toH=parseInt(document.querySelector('[data-tto="'+i+'"]').value)||0;
+    var days=0;
+    document.querySelectorAll('[data-tday^="'+i+':"]:checked').forEach(function(c){days+=parseInt(c.value)});
+    tiers.push({name:el.value||('Tier '+(i+1)),rate:rate,days:days,fromH:fromH,toH:toH});
+  });
+  return tiers;
+}
+function addTier(){
+  var T=window._editTariff;
+  T.tiers=readTiersFromUI();
+  T.tiers.push({name:'New period',rate:T.baseRate||0.30,days:127,fromH:0,toH:24});
+  var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;
+  if(r)r.innerHTML=renderCostPanel(T);
+}
+function removeTier(i){
+  var T=window._editTariff;
+  T.tiers=readTiersFromUI();
+  T.tiers.splice(i,1);
+  var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;
+  if(r)r.innerHTML=renderCostPanel(T);
+}
+function saveCost(){
+  var T=window._editTariff||{};
+  T.enabled=document.getElementById('cost-en').checked;
+  T.currency=document.getElementById('cost-cur').value||'$';
+  T.baseRate=parseFloat(document.getElementById('cost-base').value)||0;
+  T.greenRate=parseFloat(document.getElementById('cost-green').value)||0;
+  T.tiers=readTiersFromUI();
+  try{localStorage.setItem('wb-tariff',JSON.stringify(T));toast('Cost settings saved','success')}catch(e){toast('Failed to save: '+e.message,'error')}
+}
+function cancelCost(){
+  var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;
+  if(r){r.style.display='none';r.innerHTML=''}
+}
 function applyTheme(t){
   try{
     if(t==='auto'){localStorage.removeItem('wb-theme');document.documentElement.removeAttribute('data-theme')}
@@ -615,10 +709,13 @@ function loadSchedules(){
   if(!l)return;
   l.innerHTML="<span class='spinner'></span> Loading...";
   fetch('/api/command?action=bapi&met=r_schs&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){
-    if(d.error){l.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}
-    var sc=(d.r&&d.r.schedules)||(Array.isArray(d.r)?d.r:[]);
+    if(d.error){l.innerHTML='<span style="color:var(--danger)">'+d.error+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>';return}
+    var sc=null;
+    if(d.r&&Array.isArray(d.r.schedules))sc=d.r.schedules;
+    else if(Array.isArray(d.r))sc=d.r;
+    if(sc===null){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return}
     allSchedules=sc;
-    if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules. Tap + Add New.</div>';return}
+    if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules yet. Tap + Add New to create one.</div>';return}
     var html='';
     sc.forEach(function(s){
       var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS_M[b]+' ';
@@ -987,6 +1084,16 @@ static void handleSessionsPage() {
       <div id='tile-month' style='font-size:1.1em;font-weight:600;margin-top:4px'>–</div>
     </div>
   </div>
+  <div id='cost-row' style='display:none;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px'>
+    <div style='background:var(--bg);border-radius:8px;padding:10px;text-align:center'>
+      <div style='font-size:.68em;color:var(--text3);text-transform:uppercase;letter-spacing:.5px'>Week Cost</div>
+      <div id='tile-week-cost' style='font-size:1.1em;font-weight:600;margin-top:4px;color:#22c55e'>–</div>
+    </div>
+    <div style='background:var(--bg);border-radius:8px;padding:10px;text-align:center'>
+      <div style='font-size:.68em;color:var(--text3);text-transform:uppercase;letter-spacing:.5px'>Month Cost</div>
+      <div id='tile-month-cost' style='font-size:1.1em;font-weight:600;margin-top:4px;color:#22c55e'>–</div>
+    </div>
+  </div>
   <div style='text-align:center;font-size:.7em;color:var(--text3);margin-top:8px'>Long-term graphs: use the HA Energy dashboard</div>
 </div>
 
@@ -1064,6 +1171,50 @@ function buildHeatmap(sessions){
   }
   window._heatmapBuckets=bucket;
 }
+// ---- Charging cost engine ----
+var TARIFF=null;
+function loadTariff(){try{TARIFF=JSON.parse(localStorage.getItem('wb-tariff')||'null')}catch(e){TARIFF=null}}
+function saveTariff(t){try{localStorage.setItem('wb-tariff',JSON.stringify(t));TARIFF=t}catch(e){}}
+function defaultTariff(){return{enabled:false,currency:'$',baseRate:0.30,greenRate:0,tiers:[]}}
+function getRateAt(ts){
+  if(!TARIFF||!TARIFF.enabled)return null;
+  var d=new Date(ts*1000);
+  var hr=0,day=0;
+  try{var local=new Date(d.toLocaleString('en-US',{timeZone:CHARGER_TZ}));hr=local.getHours();day=local.getDay()}catch(e){hr=d.getHours();day=d.getDay()}
+  // JS getDay: 0=Sun..6=Sat. Our bitmask: bit0=Mon..bit6=Sun. Convert.
+  var bit=(day===0)?6:(day-1);
+  for(var i=0;i<(TARIFF.tiers||[]).length;i++){
+    var t=TARIFF.tiers[i];
+    if(!(t.days&(1<<bit)))continue;
+    var inRange=(t.fromH<=t.toH)?(hr>=t.fromH&&hr<t.toH):(hr>=t.fromH||hr<t.toH);
+    if(inRange)return t.rate;
+  }
+  return TARIFF.baseRate;
+}
+function costOf(session){
+  if(!TARIFF||!TARIFF.enabled)return null;
+  if(!session.ts||!session.en)return 0;
+  var totalKwh=session.en/1000;
+  var greenKwh=(session.gen||0)/1000;
+  if(greenKwh>totalKwh)greenKwh=totalKwh;
+  var gridKwh=totalKwh-greenKwh;
+  var dur=session.dur||3600;
+  var step=300;
+  var n=Math.max(1,Math.ceil(dur/step));
+  var gridPerStep=gridKwh/n;
+  var cost=greenKwh*TARIFF.greenRate;
+  for(var i=0;i<n;i++){
+    var t=session.ts+i*step;
+    if(t>=session.ts+dur)break;
+    var rate=getRateAt(t);
+    if(rate==null)rate=TARIFF.baseRate;
+    cost+=gridPerStep*rate;
+  }
+  return cost;
+}
+function fmt$(amt){if(amt==null||isNaN(amt))return'-';var sym=(TARIFF&&TARIFF.currency)||'$';return sym+amt.toFixed(2)}
+loadTariff();
+
 function renderTiles(sessions, lifetimeKwh){
   var nowSec=Date.now()/1000;
   var weekSec=nowSec-7*86400;
@@ -1078,6 +1229,16 @@ function renderTiles(sessions, lifetimeKwh){
   if(lifetimeKwh!=null)document.getElementById('tile-allt').textContent=lifetimeKwh.toFixed(0)+' kWh';
   document.getElementById('tile-week').textContent=weekKwh.toFixed(1)+' kWh';
   document.getElementById('tile-month').textContent=monthKwh.toFixed(1)+' kWh';
+  // Cost tiles (computed if tariff enabled)
+  if(TARIFF&&TARIFF.enabled){
+    var weekCost=0,monthCost=0;
+    sessions.forEach(function(s){if(!s.ts)return;var c=costOf(s);if(c==null)return;if(s.ts>=weekSec)weekCost+=c;if(s.ts>=monthSec)monthCost+=c});
+    var costRow=document.getElementById('cost-row');if(costRow)costRow.style.display='grid';
+    var w=document.getElementById('tile-week-cost');if(w)w.textContent=fmt$(weekCost);
+    var m=document.getElementById('tile-month-cost');if(m)m.textContent=fmt$(monthCost);
+  }else{
+    var costRow=document.getElementById('cost-row');if(costRow)costRow.style.display='none';
+  }
 }
 function fmtTime(ts){var d=new Date(ts*1000);try{return d.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){return d.toLocaleTimeString()}}
 function fmtDur(sec){var h=Math.floor(sec/3600),m=Math.round((sec%3600)/60);return (h?h+'h ':'')+m+'m'}
@@ -1114,13 +1275,13 @@ function renderDays(sessions){
       var sEnd=s.dur?fmtTime(s.ts+s.dur):'?';
       var sDur=fmtDur(s.dur||0);
       var sKwh=((s.en||0)/1000).toFixed(2);
-      detail+="<div style='display:flex;justify-content:space-between;padding:6px 4px;border-top:1px solid var(--border);font-size:.8em'><div><div>"+sStart+" \u2013 "+sEnd+"</div><div style='color:var(--text3);font-size:.92em;margin-top:2px'>#"+s.id+" \u00B7 "+sDur+"</div></div><div style='font-weight:500'>"+sKwh+" kWh</div></div>";
+      detail+="<div style='display:flex;justify-content:space-between;padding:6px 4px;border-top:1px solid var(--border);font-size:.8em'><div><div>"+sStart+" \u2013 "+sEnd+"</div><div style='color:var(--text3);font-size:.92em;margin-top:2px'>#"+s.id+" \u00B7 "+sDur+"</div></div><div style='text-align:right'><div style='font-weight:500'>"+sKwh+" kWh</div>"+(TARIFF&&TARIFF.enabled?"<div style='font-size:.75em;color:#22c55e'>"+fmt$(costOf(s))+"</div>":"")+"</div></div>";
     });
     html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:4px 0;cursor:pointer;user-select:none' onclick='toggleDay("+i+")'>"+
       "<div style='display:flex;justify-content:space-between;align-items:center'>"+
         "<div><div style='font-size:.88em;font-weight:500'>"+dayLabel+" <span id='ch-"+i+"' style='color:var(--text3);font-size:.85em'>\u25BE</span></div>"+
         "<div style='font-size:.78em;color:var(--text3);margin-top:2px'>"+startStr+" \u2013 "+endStr+nLabel+" \u00B7 "+durStr+"</div></div>"+
-        "<div style='font-weight:600;font-size:1.05em'>"+d.kwh.toFixed(2)+" kWh</div>"+
+        "<div style='text-align:right'><div style='font-weight:600;font-size:1.05em'>"+d.kwh.toFixed(2)+" kWh</div>"+(TARIFF&&TARIFF.enabled?"<div style='font-size:.78em;color:#22c55e;margin-top:2px'>"+fmt$(d.items.reduce(function(a,s){return a+(costOf(s)||0)},0))+"</div>":"")+"</div>"+
       "</div>"+
       "<div id='det-"+i+"' style='display:none;margin-top:6px'>"+detail+"</div>"+
     "</div>";
@@ -1151,7 +1312,7 @@ function loadOlder(){
     fetch('/api/command?action=bapi&met=r_log&par='+thisSid,{signal:AbortSignal.timeout(8000)})
       .then(function(x){return x.json()}).then(function(sd){
         clearTimeout(hardTimer);
-        if(sd.r&&sd.r.start){cache.s[thisSid]={id:thisSid,ts:sd.r.start,dur:sd.r.sec||sd.r.dur||sd.r.duration||0,en:sd.r.en||sd.r.energy||0}}
+        if(sd.r&&sd.r.start){cache.s[thisSid]={id:thisSid,ts:sd.r.start,dur:sd.r.sec||sd.r.dur||sd.r.duration||0,en:sd.r.en||sd.r.energy||0,gen:sd.r.gen||0}}
         advance();
       }).catch(function(){clearTimeout(hardTimer);advance()});
   }
@@ -1193,7 +1354,7 @@ function exportCsv(){
   var arr=Object.keys(cache.s||{}).map(function(k){return cache.s[k]});
   if(!arr.length){toast('No sessions to export','info');return}
   arr.sort(function(a,c){return (a.ts||0)-(c.ts||0)});
-  var rows=[['Session ID','Date','Start','End','Duration (min)','Energy (kWh)']];
+  var rows=[['Session ID','Date','Start','End','Duration (min)','Energy (kWh)','Cost']];
   arr.forEach(function(s){
     if(!s.ts)return;
     var sd=new Date(s.ts*1000);
@@ -1204,7 +1365,7 @@ function exportCsv(){
     if(ed)try{endStr=ed.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){endStr=ed.toLocaleTimeString()}
     var dur=s.dur?Math.round(s.dur/60):'';
     var kwh=s.en?(s.en/1000).toFixed(2):'';
-    rows.push([s.id,dateStr,startStr,endStr,dur,kwh]);
+    rows.push([s.id,dateStr,startStr,endStr,dur,kwh,(TARIFF&&TARIFF.enabled)?costOf(s).toFixed(2):'']);
   });
   var csv=rows.map(function(r){return r.join(',')}).join('\n');
   var blob=new Blob([csv],{type:'text/csv'});
@@ -1254,7 +1415,7 @@ function loadSessions2(){
           .then(function(x){return x.json()}).then(function(sd){
             clearTimeout(hardTimer);
             if(sd.r&&sd.r.start){
-              cache.s[thisSid]={id:thisSid,ts:sd.r.start,dur:sd.r.sec||sd.r.dur||sd.r.duration||0,en:sd.r.en||sd.r.energy||0};
+              cache.s[thisSid]={id:thisSid,ts:sd.r.start,dur:sd.r.sec||sd.r.dur||sd.r.duration||0,en:sd.r.en||sd.r.energy||0,gen:sd.r.gen||0};
             }
             advance();
           }).catch(function(){clearTimeout(hardTimer);advance()});
