@@ -1,6 +1,7 @@
 #include "wb_mqtt.h"
 #include "wb_ble.h"
 #include "wb_config.h"
+#include "wb_log.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
 
@@ -213,7 +214,7 @@ bool WallboxMQTT::isConnected() const {
 
 void WallboxMQTT::_connect() {
     _lastConnectAttempt = millis();
-    Serial.println("[MQTT] Connecting...");
+    Log.println("[MQTT] Connecting...");
 
     const WBConfig& cfg = configMgr.get();
     const char* user = cfg.mqttUser.length() > 0 ? cfg.mqttUser.c_str() : nullptr;
@@ -222,7 +223,7 @@ void WallboxMQTT::_connect() {
 
     // LWT: set availability to offline on disconnect
     if (_client->connect(cfg.mqttClientId.c_str(), user, pass, avail.c_str(), 0, true, "offline")) {
-        Serial.println("[MQTT] Connected");
+        Log.println("[MQTT] Connected");
         _subscribe();
         publishAvailability(true);
         if (!_discoveryPublished) {
@@ -230,7 +231,7 @@ void WallboxMQTT::_connect() {
             _discoveryPublished = true;
         }
     } else {
-        Serial.printf("[MQTT] Failed, rc=%d\n", _client->state());
+        Log.printf("[MQTT] Failed, rc=%d\n", _client->state());
     }
 }
 
@@ -238,7 +239,7 @@ void WallboxMQTT::_subscribe() {
     String base = baseTopic();
     String cmdWild = cmdPrefix() + "#";
     _client->subscribe(cmdWild.c_str());
-    Serial.printf("[MQTT] Subscribed to %s\n", cmdWild.c_str());
+    Log.printf("[MQTT] Subscribed to %s\n", cmdWild.c_str());
 
     _client->subscribe((base + "/config/pin").c_str());
     _client->subscribe((base + "/bapi").c_str());
@@ -250,7 +251,7 @@ void WallboxMQTT::_mqttCallback(char* topic, byte* payload, unsigned int len) {
     p.reserve(len);
     for (unsigned int i = 0; i < len; i++) p += (char)payload[i];
 
-    Serial.printf("[MQTT] Received: %s = %s\n", topic, p.c_str());
+    Log.printf("[MQTT] Received: %s = %s\n", topic, p.c_str());
 
     String prefix = cmdPrefix();
     String base = baseTopic();
@@ -259,7 +260,7 @@ void WallboxMQTT::_mqttCallback(char* topic, byte* payload, unsigned int len) {
         wallboxMQTT._handleCommand(subtopic.c_str(), p.c_str());
     } else if (t == base + "/config/pin") {
         wallboxBLE.setPin(p.c_str());
-        Serial.printf("[MQTT] PIN updated to: %s\n", p.c_str());
+        Log.printf("[MQTT] PIN updated to: %s\n", p.c_str());
     } else if (t == base + "/bapi") {
         // Raw BAPI command: {"met":"r_dat","par":null}
         JsonDocument doc;
@@ -281,7 +282,7 @@ void WallboxMQTT::_mqttCallback(char* topic, byte* payload, unsigned int len) {
 
 void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
     if (!wallboxBLE.isConnected()) {
-        Serial.println("[MQTT] BLE not connected, ignoring command");
+        Log.println("[MQTT] BLE not connected, ignoring command");
         return;
     }
 
@@ -297,7 +298,7 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         if (action == "start" || action == "resume" || action == "1") val = 1;
         else if (action == "stop" || action == "pause" || action == "2") val = 2;
         else {
-            Serial.printf("[CMD] Unknown charging action: %s\n", payload);
+            Log.printf("[CMD] Unknown charging action: %s\n", payload);
             return;
         }
         par = String(val);
@@ -307,7 +308,7 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         // payload: integer 6-32
         int amps = atoi(payload);
         if (amps < 6 || amps > 32) {
-            Serial.printf("[CMD] Invalid current: %d (must be 6-32)\n", amps);
+            Log.printf("[CMD] Invalid current: %d (must be 6-32)\n", amps);
             return;
         }
         par = String(amps);
@@ -388,7 +389,7 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         wallboxBLE.sendCommand(bapi::MET_SET_TIMEZONE, p.c_str());
 
     } else {
-        Serial.printf("[CMD] Unknown command: %s\n", subtopic);
+        Log.printf("[CMD] Unknown command: %s\n", subtopic);
     }
 }
 
@@ -433,7 +434,7 @@ void WallboxMQTT::publishResponse(const char* method, const String& json) {
 // ---- HA Auto-Discovery ----
 
 void WallboxMQTT::sendDiscovery() {
-    Serial.println("[MQTT] Publishing HA discovery...");
+    Log.println("[MQTT] Publishing HA discovery...");
 
     String sTopic = statusTopic();
     String rTopic = realtimeTopic();
@@ -666,5 +667,5 @@ void WallboxMQTT::sendDiscovery() {
     publishDiscoveryEntity(*_client, "sensor", "dev_fw", "BLE Firmware",
         "mdi:cog", gTopic.c_str(), "{{ value_json.dev_fw | default('') }}");
 
-    Serial.println("[MQTT] HA discovery published (sensors + settings + diagnostics)");
+    Log.println("[MQTT] HA discovery published (sensors + settings + diagnostics)");
 }

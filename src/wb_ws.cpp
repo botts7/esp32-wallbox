@@ -1,4 +1,5 @@
 #include "wb_ws.h"
+#include "wb_log.h"
 #include <WebSocketsServer.h>
 
 namespace wbws {
@@ -8,9 +9,9 @@ static WebSocketsServer _ws(81);
 static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
     if (type == WStype_CONNECTED) {
         IPAddress ip = _ws.remoteIP(num);
-        Serial.printf("[WS] client %u connected from %s\n", num, ip.toString().c_str());
+        Log.printf("[WS] client %u connected from %s\n", num, ip.toString().c_str());
     } else if (type == WStype_DISCONNECTED) {
-        Serial.printf("[WS] client %u disconnected\n", num);
+        Log.printf("[WS] client %u disconnected\n", num);
     } else if (type == WStype_PING || type == WStype_PONG) {
         // ignore — library handles automatically
     }
@@ -19,7 +20,7 @@ static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
 void begin() {
     _ws.begin();
     _ws.onEvent(onEvent);
-    Serial.println("[WS] server listening on :81");
+    Log.println("[WS] server listening on :81");
 }
 
 void loop() {
