@@ -192,6 +192,8 @@ void setup() {
     NimBLEDevice::init("WallboxGW");
     NimBLEDevice::setMTU(247);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);  // +9dBm max range
+    NimBLEDevice::setSecurityAuth(true, true, true);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_ONLY);
     Serial.println("[BLE] TX power: +9 dBm");
 
     // Check if WiFi is configured

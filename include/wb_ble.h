@@ -40,6 +40,7 @@ public:
     // PIN
     void setPin(const char* pin) { _pin = pin; }
     bool pinRequired() const { return _pinRequired; }
+    uint32_t blePasskey() const { return _pin.isEmpty() ? 0 : (uint32_t)_pin.toInt(); }
 
     // UUID override
     void setUUIDs(const char* svc, const char* chr) { _svcUUID = svc; _chrUUID = chr; }

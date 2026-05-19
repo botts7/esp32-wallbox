@@ -8,6 +8,23 @@ WallboxBLE* WallboxBLE::_instance = nullptr;
 static const char* DEF_SVC = "2456e1b9-26e2-8f83-e744-f34f01e9d701";
 static const char* DEF_CHR = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
 
+class WBClientCallbacks : public NimBLEClientCallbacks {
+    uint32_t onPassKeyRequest() override {
+        uint32_t pk = wallboxBLE.blePasskey();
+        Serial.printf("[BLE] SMP passkey request → %06u\n", pk);
+        return pk;
+    }
+    bool onConfirmPIN(uint32_t pin) override {
+        Serial.printf("[BLE] SMP confirm PIN %06u → yes\n", pin);
+        return true;
+    }
+    void onAuthenticationComplete(ble_gap_conn_desc* desc) override {
+        Serial.printf("[BLE] SMP auth complete: encrypted=%d bonded=%d\n",
+            desc->sec_state.encrypted, desc->sec_state.bonded);
+    }
+};
+static WBClientCallbacks _secCallbacks;
+
 void WallboxBLE::begin(const char* addr) {
     _instance = this;
     _addr = addr;
@@ -140,6 +157,7 @@ void WallboxBLE::_connect() {
     if (!_client) {
         _client = NimBLEDevice::createClient();
         _client->setConnectTimeout(10);
+        _client->setClientCallbacks(&_secCallbacks, false);
     }
 
     // Use the address from scan (preserves correct type) or try both
@@ -191,15 +209,24 @@ void WallboxBLE::_connect() {
         return;
     }
 
-    // Subscribe to notifications
-    if (_chr->canNotify()) {
-        if (!_chr->registerForNotify(_notifyCb)) {
-            Serial.println("[BLE] Failed to register for notifications");
-            _client->disconnect();
-            _state = State::ERROR;
-            esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
-            return;
+    // Subscribe to notifications — if CCCD write is rejected, encrypt and retry
+    bool notifyOk = _chr->canNotify() && _chr->registerForNotify(_notifyCb);
+    if (!notifyOk && _chr->canNotify()) {
+        Serial.println("[BLE] CCCD rejected, trying SMP encryption...");
+        delay(200);
+        if (_client->secureConnection()) {
+            Serial.println("[BLE] Encrypted, retrying notifications...");
+            notifyOk = _chr->registerForNotify(_notifyCb);
+        } else {
+            Serial.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
         }
+    }
+    if (!notifyOk) {
+        Serial.println("[BLE] Failed to register for notifications");
+        _client->disconnect();
+        _state = State::ERROR;
+        esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+        return;
     }
 
     Serial.println("[BLE] Notifications enabled");
