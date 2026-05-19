@@ -4,6 +4,11 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.1.2] - 2026-05-19
+
+### Fixed
+- Schedule times were ±1 hour off when the user's timezone DST status differed from the hardcoded `Jan 1, 2024` reference date used in `utcToLocal` / `localToUtc`. Both conversion functions now use today's date so the offset is correct year-round (matters most for southern-hemisphere users after their DST ends in April).
+
 ## [2.1.1] - 2026-04-26
 
 ### Added
@@ -122,6 +127,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **MIT License** with Wallbox trademark disclaimer
 - **Confirmed working**: Wallbox Pulsar MAX with u-blox NINA-B22 BLE radio
 
+[2.1.2]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.1.2
 [2.1.1]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.1.1
 [2.1.0]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.1.0
 [2.0.1]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.0.1
