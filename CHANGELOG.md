@@ -4,6 +4,22 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.2.0] - 2026-05-19
+
+### Added
+- **Cost tracking** with time-of-use tariffs. Local tariff editor in Settings → Charger → 💰 Charging Cost. Configure base $/kWh, optional solar (green) rate, and any number of TOU periods (name, rate, day-of-week chips, from/to hours). Top-down match; first tier wins. Stored in `localStorage`. Costs displayed on `/sessions` as Week/Month tiles, $ per day, $ per session (in expanded view), and a new Cost column in CSV export.
+- **WebSocket live dashboard** on `:81/`. Server pushes `status` / `meter` / `settings` / `ble` updates as they happen — no polling. Dashboard tiles update in real time. Falls back to HTTP polling automatically.
+- **Cache-first rendering** — dashboard tiles paint last-known values from `localStorage` immediately, before any network activity.
+- **Charger notifications** surfaced on dashboard — red bell tile + click-through modal with timestamps.
+- **BLE health banner** with five tiers (disconnected / very-weak / unresponsive / weak / struggling) using both RSSI and "seconds since last reply".
+- New `/api/status` field: `ble_last_activity_s`.
+
+### Fixed
+- **All 6 settings panels** (Auto Lock, OCPP, Eco Smart, Timezone, Phase Switch, Halo LED) refuse to render their form if they couldn't read the current state from the charger. Previously fell back to default values that could silently overwrite real config when Saved.
+- **Schedule list** distinguishes "empty" (charger has none) from "couldn't load" (BLE blip → Retry button). Was showing "No schedules. Tap + Add New." in both cases.
+- **Dashboard `undefined` / `NaN` tiles** — Status / Charging Power / Charging Current / Session Energy / Max Current would render garbage when a field was missing in the WS push payload. Root cause: handler wasn't unwrapping the `{id, r:{…}}` BAPI envelope. Fix: unwrap + per-field numeric guards. If a value isn't a number, keep the last-known value instead of overwriting with junk.
+- BLE health/notification polling skips when BLE state is not `connected` — stops the per-minute hammer on a dead link.
+
 ## [2.1.2] - 2026-05-19
 
 ### Fixed
@@ -127,6 +143,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **MIT License** with Wallbox trademark disclaimer
 - **Confirmed working**: Wallbox Pulsar MAX with u-blox NINA-B22 BLE radio
 
+[2.2.0]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.2.0
 [2.1.2]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.1.2
 [2.1.1]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.1.1
 [2.1.0]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.1.0

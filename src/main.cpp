@@ -9,6 +9,7 @@
 #include "wb_ble.h"
 #include "wb_mqtt.h"
 #include "wb_web.h"
+#include "wb_ws.h"
 #include "bapi.h"
 #include <ArduinoJson.h>
 
@@ -58,6 +59,7 @@ static void pollMeter() {
     if (!resp.isEmpty()) {
         lastMeter = resp;
         wallboxMQTT.publishResponse("meter", resp);
+        wbws::broadcast("meter", resp);
     }
 }
 
@@ -117,6 +119,7 @@ static void pollSettings() {
     String out;
     serializeJson(merged, out);
     wallboxMQTT.publishSettings(out);
+    wbws::broadcast("settings", out);
 }
 
 static void pollStatus() {
@@ -126,6 +129,7 @@ static void pollStatus() {
         lastStatus = resp;
         wallboxMQTT.publishStatus(resp);
         webServer.updateCache(lastStatus, lastRealtime);
+        wbws::broadcast("status", resp);
     }
     // Energy meter on same cycle (lightweight, useful for live monitoring)
     pollMeter();
@@ -241,6 +245,7 @@ void setup() {
     // WiFi connected — start services
     webServer.beginSTA();
     wallboxMQTT.begin();
+    wbws::begin();
 
     // OTA updates — hostname identifies this device on the network
     ArduinoOTA.setHostname("wallbox-gw");
@@ -314,6 +319,17 @@ void loop() {
 
     // Run MQTT loop
     wallboxMQTT.loop();
+
+    // Run WS loop (handle client connects/disconnects + frames)
+    wbws::loop();
+
+    // Broadcast BLE health every 5s to any connected WS clients
+    static uint32_t lastHealth = 0;
+    if (millis() - lastHealth >= 5000 && wbws::clientCount() > 0) {
+        lastHealth = millis();
+        wbws::broadcastBleHealth(wallboxBLE.stateStr(), wallboxBLE.rssi(),
+                                 wallboxBLE.lastActivityAge() / 1000);
+    }
 
     // Run BLE loop — skip during OTA to free radio + CPU
     extern bool otaInProgress;
