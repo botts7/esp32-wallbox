@@ -12,11 +12,11 @@ static const char* DEF_CHR = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
 class WBClientCallbacks : public NimBLEClientCallbacks {
     uint32_t onPassKeyRequest() override {
         uint32_t pk = wallboxBLE.blePasskey();
-        Log.printf("[BLE] SMP passkey request → %06u\n", pk);
+        Log.println("[BLE] SMP passkey request — sending configured PIN");
         return pk;
     }
     bool onConfirmPIN(uint32_t pin) override {
-        Log.printf("[BLE] SMP confirm PIN %06u → yes\n", pin);
+        Log.println("[BLE] SMP PIN confirmed");
         return true;
     }
     void onAuthenticationComplete(ble_gap_conn_desc* desc) override {
