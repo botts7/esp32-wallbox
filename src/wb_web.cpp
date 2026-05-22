@@ -1,6 +1,7 @@
 #include "wb_web.h"
 #include "wb_config.h"
 #include "wb_ble.h"
+#include "wb_log.h"
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -62,10 +63,10 @@ static bool checkAuth() {
         authFailCount++;
         if (authFailCount >= 5) {
             authLockoutUntil = millis() + 30000;
-            Serial.printf("[Auth] LOCKED OUT after %d failures\n", authFailCount);
+            Log.printf("[Auth] LOCKED OUT after %d failures\n", authFailCount);
         } else {
             delay(1000);  // 1s delay per failure — slows brute force
-            Serial.printf("[Auth] Failed %d/5\n", authFailCount);
+            Log.printf("[Auth] Failed %d/5\n", authFailCount);
         }
         http.requestAuthentication();
         return false;
@@ -1472,7 +1473,7 @@ static void handleOtaUpload() {
     static bool otaError = false;
 
     if (upload.status == UPLOAD_FILE_START) {
-        Serial.printf("[OTA] Upload start: %s\n", upload.filename.c_str());
+        Log.printf("[OTA] Upload start: %s\n", upload.filename.c_str());
         totalSize = 0;
         otaError = false;
         otaInProgress = true;
@@ -1480,26 +1481,26 @@ static void handleOtaUpload() {
         // Check partition size
         const esp_partition_t* partition = esp_ota_get_next_update_partition(NULL);
         if (partition) {
-            Serial.printf("[OTA] Target partition: %s (%u bytes)\n", partition->label, partition->size);
+            Log.printf("[OTA] Target partition: %s (%u bytes)\n", partition->label, partition->size);
         }
 
         if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-            Serial.printf("[OTA] Begin failed: %s\n", Update.errorString());
+            Log.printf("[OTA] Begin failed: %s\n", Update.errorString());
             otaError = true;
         }
     } else if (upload.status == UPLOAD_FILE_WRITE && !otaError) {
         // First chunk — validate ESP32 magic byte
         if (totalSize == 0 && upload.currentSize > 0) {
             if (upload.buf[0] != 0xE9) {
-                Serial.println("[OTA] REJECTED: not ESP32 firmware (magic byte != 0xE9)");
+                Log.println("[OTA] REJECTED: not ESP32 firmware (magic byte != 0xE9)");
                 Update.abort();
                 otaError = true;
                 return;
             }
-            Serial.println("[OTA] Firmware magic byte OK");
+            Log.println("[OTA] Firmware magic byte OK");
         }
         if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-            Serial.printf("[OTA] Write failed: %s\n", Update.errorString());
+            Log.printf("[OTA] Write failed: %s\n", Update.errorString());
             otaError = true;
         }
         totalSize += upload.currentSize;
@@ -1507,15 +1508,15 @@ static void handleOtaUpload() {
         otaInProgress = false;
         if (otaError) {
             Update.abort();
-            Serial.println("[OTA] Aborted due to errors");
+            Log.println("[OTA] Aborted due to errors");
             http.send(500, "text/plain", "Upload failed");
         } else if (Update.end(true)) {
-            Serial.printf("[OTA] Success! %u bytes written to partition\n", totalSize);
+            Log.printf("[OTA] Success! %u bytes written to partition\n", totalSize);
             http.send(200, "text/plain", "OK");
             delay(1000);
             ESP.restart();
         } else {
-            Serial.printf("[OTA] End failed: %s\n", Update.errorString());
+            Log.printf("[OTA] End failed: %s\n", Update.errorString());
             http.send(500, "text/plain", Update.errorString());
         }
     }
@@ -1570,7 +1571,7 @@ void WBWebServer::beginAP() {
     _apMode = true;
     WiFi.mode(WIFI_AP_STA);
     WiFi.softAP(AP_SSID, AP_PASS);
-    Serial.printf("[Web] AP: %s (pass: %s) IP: %s\n", AP_SSID, AP_PASS, WiFi.softAPIP().toString().c_str());
+    Log.printf("[Web] AP: %s (pass: %s) IP: %s\n", AP_SSID, AP_PASS, WiFi.softAPIP().toString().c_str());
     dns.start(53, "*", WiFi.softAPIP());
 
     registerRoutes();
@@ -1581,7 +1582,7 @@ void WBWebServer::beginAP() {
     http.on("/info", handleInfo);
     http.onNotFound(handleNotFound);
     http.begin();
-    Serial.println("[Web] AP captive portal ready");
+    Log.println("[Web] AP captive portal ready");
 }
 
 void WBWebServer::beginSTA() {
@@ -1592,7 +1593,7 @@ void WBWebServer::beginSTA() {
     http.on("/settings", handleSettings);
     http.on("/info", handleInfo);
     http.begin();
-    Serial.printf("[Web] http://%s/ (dashboard)\n", WiFi.localIP().toString().c_str());
+    Log.printf("[Web] http://%s/ (dashboard)\n", WiFi.localIP().toString().c_str());
 }
 
 void WBWebServer::loop() {
@@ -1601,6 +1602,6 @@ void WBWebServer::loop() {
     if (_rebootRequested) {
         static uint32_t rt = 0;
         if (rt == 0) rt = millis();
-        if (millis() - rt > 2000) { Serial.println("[Web] Rebooting..."); ESP.restart(); }
+        if (millis() - rt > 2000) { Log.println("[Web] Rebooting..."); ESP.restart(); }
     }
 }

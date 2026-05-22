@@ -10,6 +10,7 @@
 #include "wb_mqtt.h"
 #include "wb_web.h"
 #include "wb_ws.h"
+#include "wb_log.h"
 #include "bapi.h"
 #include <ArduinoJson.h>
 
@@ -23,29 +24,29 @@ static bool connectWiFi() {
     const WBConfig& cfg = configMgr.get();
     if (cfg.wifiSSID.length() == 0) return false;
 
-    Serial.printf("[WiFi] Connecting to %s", cfg.wifiSSID.c_str());
+    Log.printf("[WiFi] Connecting to %s", cfg.wifiSSID.c_str());
     WiFi.mode(WIFI_STA);
     WiFi.begin(cfg.wifiSSID.c_str(), cfg.wifiPass.c_str());
 
     int tries = 0;
     while (WiFi.status() != WL_CONNECTED && tries < 40) {
         delay(500);
-        Serial.print(".");
+        Log.print(".");
         tries++;
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("\n[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
+        Log.printf("\n[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
         return true;
     }
 
-    Serial.println("\n[WiFi] Failed to connect");
+    Log.println("\n[WiFi] Failed to connect");
     return false;
 }
 
 static void checkWiFi() {
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[WiFi] Reconnecting...");
+        Log.println("[WiFi] Reconnecting...");
         WiFi.reconnect();
     }
 }
@@ -179,14 +180,14 @@ void setup() {
     // Smart rollback — don't validate until WiFi connects successfully
     // If firmware is broken and can't connect, bootloader reverts after 3 failed boots
 
-    Serial.println("\n============================");
-    Serial.println("  Wallbox BLE Gateway v1.0");
-    Serial.println("============================\n");
+    Log.println("\n============================");
+    Log.println("  Wallbox BLE Gateway v1.0");
+    Log.println("============================\n");
 
     // Log OTA partition info
     const esp_partition_t* running = esp_ota_get_running_partition();
     if (running) {
-        Serial.printf("[OTA] Running from: %s (0x%x)\n", running->label, running->address);
+        Log.printf("[OTA] Running from: %s (0x%x)\n", running->label, running->address);
     }
 
     // Load config from NVS
@@ -196,12 +197,14 @@ void setup() {
     NimBLEDevice::init("WallboxGW");
     NimBLEDevice::setMTU(247);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);  // +9dBm max range
-    Serial.println("[BLE] TX power: +9 dBm");
+    NimBLEDevice::setSecurityAuth(true, true, true);
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_ONLY);
+    Log.println("[BLE] TX power: +9 dBm");
 
     // Check if WiFi is configured
     if (!configMgr.hasWiFi()) {
         // First boot — AP mode for setup
-        Serial.println("[Main] No WiFi configured — starting AP setup mode");
+        Log.println("[Main] No WiFi configured — starting AP setup mode");
         webServer.beginAP();
         return;  // loop() will only run web server
     }
@@ -209,19 +212,19 @@ void setup() {
     // ---- Radio coexistence (WiFi + BLE share 2.4GHz) ----
     esp_wifi_set_ps(WIFI_PS_NONE);              // no WiFi power save — prevents BLE stalls
     esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  // fair share between WiFi and BLE
-    Serial.println("[Radio] Coexistence: BALANCE, WiFi PS: OFF");
+    Log.println("[Radio] Coexistence: BALANCE, WiFi PS: OFF");
 
     // Try connecting to WiFi
     if (!connectWiFi()) {
         // WiFi failed — start AP mode so user can fix settings
-        Serial.println("[Main] WiFi failed — starting AP mode for reconfiguration");
+        Log.println("[Main] WiFi failed — starting AP mode for reconfiguration");
         webServer.beginAP();
         return;
     }
 
     // WiFi connected — mark OTA partition as valid (smart rollback)
     esp_ota_mark_app_valid_cancel_rollback();
-    Serial.println("[OTA] Firmware validated (WiFi OK)");
+    Log.println("[OTA] Firmware validated (WiFi OK)");
 
     // mDNS — access at http://wallbox-gw.local
     // Retry a few times as mDNS init sometimes fails on first attempt
@@ -235,15 +238,17 @@ void setup() {
         MDNS.addServiceTxt("http", "tcp", "device", "wallbox-gateway");
         MDNS.addServiceTxt("http", "tcp", "version", "v2.0");
         MDNS.addServiceTxt("http", "tcp", "path", "/");
-        Serial.printf("[mDNS] http://wallbox-gw.local (IP: %s)\n", WiFi.localIP().toString().c_str());
+        MDNS.addService("telnet", "tcp", 23);
+        Log.printf("[mDNS] http://wallbox-gw.local (IP: %s)\n", WiFi.localIP().toString().c_str());
     } else {
-        Serial.println("[mDNS] Failed to start — use IP address directly");
+        Log.println("[mDNS] Failed to start — use IP address directly");
     }
 
     // WiFi connected — start services
     webServer.beginSTA();
     wallboxMQTT.begin();
     wbws::begin();
+    Log.begin();
 
     // OTA updates — hostname identifies this device on the network
     ArduinoOTA.setHostname("wallbox-gw");
@@ -259,21 +264,21 @@ void setup() {
         otaPass = "wb-" + String(buf).substring(6);  // device-unique default
     }
     ArduinoOTA.setPassword(otaPass.c_str());
-    Serial.printf("[OTA] Password: %s (use web auth pass, or shown here for espota)\n", otaPass.c_str());
+    Log.printf("[OTA] Password: %s (use web auth pass, or shown here for espota)\n", otaPass.c_str());
     ArduinoOTA.onStart([]() {
-        Serial.println("[OTA] Update starting...");
+        Log.println("[OTA] Update starting...");
     });
     ArduinoOTA.onEnd([]() {
-        Serial.println("[OTA] Update complete!");
+        Log.println("[OTA] Update complete!");
     });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("[OTA] %u%%\r", (progress * 100) / total);
+        Log.printf("[OTA] %u%%\r", (progress * 100) / total);
     });
     ArduinoOTA.onError([](ota_error_t error) {
-        Serial.printf("[OTA] Error: %u\n", error);
+        Log.printf("[OTA] Error: %u\n", error);
     });
     ArduinoOTA.begin();
-    Serial.println("[OTA] Ready");
+    Log.println("[OTA] Ready");
 
     if (configMgr.hasBLE()) {
         const WBConfig& cfg = configMgr.get();
@@ -291,16 +296,17 @@ void setup() {
             wallboxBLE.setPin(cfg.blePin.c_str());
         }
     } else {
-        Serial.println("[Main] No BLE address configured — set via web UI or MQTT");
+        Log.println("[Main] No BLE address configured — set via web UI or MQTT");
     }
 
-    Serial.println("[Main] Setup complete\n");
+    Log.println("[Main] Setup complete\n");
 }
 
 void loop() {
-    // Always run web server + OTA
+    // Always run web server + OTA + telnet
     ArduinoOTA.handle();
     webServer.loop();
+    Log.loop();
 
     // If in AP-only mode (no WiFi configured), just serve the portal
     if (!configMgr.hasWiFi() || WiFi.status() != WL_CONNECTED) {

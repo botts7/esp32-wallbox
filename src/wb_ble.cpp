@@ -1,4 +1,5 @@
 #include "wb_ble.h"
+#include "wb_log.h"
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 
@@ -8,6 +9,23 @@ WallboxBLE* WallboxBLE::_instance = nullptr;
 static const char* DEF_SVC = "2456e1b9-26e2-8f83-e744-f34f01e9d701";
 static const char* DEF_CHR = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
 
+class WBClientCallbacks : public NimBLEClientCallbacks {
+    uint32_t onPassKeyRequest() override {
+        uint32_t pk = wallboxBLE.blePasskey();
+        Log.println("[BLE] SMP passkey request — sending configured PIN");
+        return pk;
+    }
+    bool onConfirmPIN(uint32_t pin) override {
+        Log.println("[BLE] SMP PIN confirmed");
+        return true;
+    }
+    void onAuthenticationComplete(ble_gap_conn_desc* desc) override {
+        Log.printf("[BLE] SMP auth complete: encrypted=%d bonded=%d\n",
+            desc->sec_state.encrypted, desc->sec_state.bonded);
+    }
+};
+static WBClientCallbacks _secCallbacks;
+
 void WallboxBLE::begin(const char* addr) {
     _instance = this;
     _addr = addr;
@@ -15,14 +33,14 @@ void WallboxBLE::begin(const char* addr) {
     _svcUUID = DEF_SVC;
     _chrUUID = DEF_CHR;
     _state = State::DISCONNECTED;
-    Serial.printf("[BLE] Target: %s\n", addr);
+    Log.printf("[BLE] Target: %s\n", addr);
 }
 
 void WallboxBLE::pause(uint32_t ms) {
     _pausedUntil = millis() + ms;
     if (_state == State::CONNECTED) _disconnect();
     _state = State::DISCONNECTED;
-    Serial.printf("[BLE] paused for %u ms (release for official app)\n", ms);
+    Log.printf("[BLE] paused for %u ms (release for official app)\n", ms);
 }
 
 void WallboxBLE::loop() {
@@ -38,7 +56,7 @@ void WallboxBLE::loop() {
     case State::CONNECTED:
         // Check connection is still alive
         if (!_client || !_client->isConnected()) {
-            Serial.println("[BLE] Connection lost");
+            Log.println("[BLE] Connection lost");
             _state = State::DISCONNECTED;
             _chr = nullptr;
             break;
@@ -48,7 +66,7 @@ void WallboxBLE::loop() {
         if (millis() - _lastActivityTime >= PING_INTERVAL_MS) {
             String resp = sendCommand(bapi::MET_PING, "null", 2000);
             if (resp.isEmpty()) {
-                Serial.println("[BLE] Ping timeout — connection dead, reconnecting");
+                Log.println("[BLE] Ping timeout — connection dead, reconnecting");
                 _disconnect();
                 break;
             }
@@ -88,7 +106,7 @@ void WallboxBLE::_connect() {
 
     if (!skipScan) {
         // Full scan
-        Serial.printf("[BLE] Scanning for %s...\n", addrLower.c_str());
+        Log.printf("[BLE] Scanning for %s...\n", addrLower.c_str());
         NimBLEScan* scan = NimBLEDevice::getScan();
         scan->setActiveScan(true);
         scan->setInterval(100);
@@ -108,19 +126,19 @@ void WallboxBLE::_connect() {
                 _foundAddr = dev.getAddress();  // preserves correct address type
                 _lastSeenTime = millis();
                 String name = dev.getName().c_str();
-                Serial.printf("[BLE] Found! RSSI: %d dBm  Name: %s  Type: %d\n",
+                Log.printf("[BLE] Found! RSSI: %d dBm  Name: %s  Type: %d\n",
                     _scanRSSI, name.c_str(), dev.getAddress().getType());
                 break;
             }
         }
 
         if (!found) {
-            Serial.printf("[BLE] Not found in scan (%d devices seen)\n", results.getCount());
+            Log.printf("[BLE] Not found in scan (%d devices seen)\n", results.getCount());
             for (int i = 0; i < results.getCount() && i < 5; i++) {
                 NimBLEAdvertisedDevice dev = results.getDevice(i);
                 String name = dev.getName().c_str();
                 if (name.length() > 0) {
-                    Serial.printf("[BLE]   %s %s RSSI:%d\n",
+                    Log.printf("[BLE]   %s %s RSSI:%d\n",
                         dev.getAddress().toString().c_str(), name.c_str(), dev.getRSSI());
                 }
             }
@@ -130,42 +148,43 @@ void WallboxBLE::_connect() {
             return;
         }
     } else {
-        Serial.printf("[BLE] Seen %lus ago, connecting directly...\n",
+        Log.printf("[BLE] Seen %lus ago, connecting directly...\n",
             (millis() - _lastSeenTime) / 1000);
     }
 
     // Connect
-    Serial.printf("[BLE] Connecting (RSSI: %d)...\n", _scanRSSI);
+    Log.printf("[BLE] Connecting (RSSI: %d)...\n", _scanRSSI);
 
     if (!_client) {
         _client = NimBLEDevice::createClient();
         _client->setConnectTimeout(10);
+        _client->setClientCallbacks(&_secCallbacks, false);
     }
 
     // Use the address from scan (preserves correct type) or try both
     bool connected = false;
     if (_foundAddr.toString().length() > 0) {
-        Serial.printf("[BLE] Using scan address (type %d)...\n", _foundAddr.getType());
+        Log.printf("[BLE] Using scan address (type %d)...\n", _foundAddr.getType());
         connected = _client->connect(_foundAddr);
     }
     if (!connected) {
-        Serial.println("[BLE] Trying public address...");
+        Log.println("[BLE] Trying public address...");
         connected = _client->connect(NimBLEAddress(addrLower.c_str(), BLE_ADDR_PUBLIC));
     }
     if (!connected) {
-        Serial.println("[BLE] Trying random address...");
+        Log.println("[BLE] Trying random address...");
         connected = _client->connect(NimBLEAddress(addrLower.c_str(), BLE_ADDR_RANDOM));
     }
 
     if (!connected) {
-        Serial.printf("[BLE] Connection failed (RSSI %d)\n", _scanRSSI);
+        Log.printf("[BLE] Connection failed (RSSI %d)\n", _scanRSSI);
         _state = State::ERROR;
         _connectBackoff = min(_connectBackoff * 2, (uint32_t)30000);
         esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
         return;
     }
 
-    Serial.println("[BLE] Connected, stabilizing...");
+    Log.println("[BLE] Connected, stabilizing...");
     delay(300);  // Let connection stabilize before anything
 
     // WiFi coexistence: widen BLE intervals so WiFi gets airtime
@@ -175,7 +194,7 @@ void WallboxBLE::_connect() {
     // Discover services
     NimBLERemoteService* svc = _client->getService(_svcUUID.c_str());
     if (!svc) {
-        Serial.printf("[BLE] Service %s not found\n", _svcUUID.c_str());
+        Log.printf("[BLE] Service %s not found\n", _svcUUID.c_str());
         _client->disconnect();
         _state = State::ERROR;
         esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
@@ -184,25 +203,34 @@ void WallboxBLE::_connect() {
 
     _chr = svc->getCharacteristic(_chrUUID.c_str());
     if (!_chr) {
-        Serial.println("[BLE] Characteristic not found");
+        Log.println("[BLE] Characteristic not found");
         _client->disconnect();
         _state = State::ERROR;
         esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
         return;
     }
 
-    // Subscribe to notifications
-    if (_chr->canNotify()) {
-        if (!_chr->registerForNotify(_notifyCb)) {
-            Serial.println("[BLE] Failed to register for notifications");
-            _client->disconnect();
-            _state = State::ERROR;
-            esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
-            return;
+    // Subscribe to notifications — if CCCD write is rejected, encrypt and retry
+    bool notifyOk = _chr->canNotify() && _chr->registerForNotify(_notifyCb);
+    if (!notifyOk && _chr->canNotify()) {
+        Log.println("[BLE] CCCD rejected, trying SMP encryption...");
+        delay(200);
+        if (_client->secureConnection()) {
+            Log.println("[BLE] Encrypted, retrying notifications...");
+            notifyOk = _chr->registerForNotify(_notifyCb);
+        } else {
+            Log.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
         }
     }
+    if (!notifyOk) {
+        Log.println("[BLE] Failed to register for notifications");
+        _client->disconnect();
+        _state = State::ERROR;
+        esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+        return;
+    }
 
-    Serial.println("[BLE] Notifications enabled");
+    Log.println("[BLE] Notifications enabled");
 
     // Read GATT Device Info service (0x180A) if present
     NimBLERemoteService* devInfo = _client->getService("180a");
@@ -211,7 +239,7 @@ void WallboxBLE::_connect() {
         if ((c = devInfo->getCharacteristic("2a29")) != nullptr) _devMfg = c->readValue().c_str();
         if ((c = devInfo->getCharacteristic("2a24")) != nullptr) _devModel = c->readValue().c_str();
         if ((c = devInfo->getCharacteristic("2a26")) != nullptr) _devFw = c->readValue().c_str();
-        Serial.printf("[BLE] Device: %s / %s / FW %s\n",
+        Log.printf("[BLE] Device: %s / %s / FW %s\n",
             _devMfg.c_str(), _devModel.c_str(), _devFw.c_str());
     }
     // Also read generic Device Name (0x1800 / 0x2a00)
@@ -231,7 +259,7 @@ void WallboxBLE::_connect() {
     // Authenticate if needed
     if (_authenticate()) {
         _state = State::CONNECTED;
-        Serial.println("[BLE] Ready");
+        Log.println("[BLE] Ready");
     }
 }
 
@@ -246,11 +274,11 @@ void WallboxBLE::_disconnect() {
 bool WallboxBLE::_authenticate() {
     _state = State::AUTHENTICATING;
 
-    Serial.println("[BLE] Checking PIN status...");
+    Log.println("[BLE] Checking PIN status...");
     String pinResp = sendCommand(bapi::MET_READ_PIN, "null", 5000);
 
     if (pinResp.isEmpty()) {
-        Serial.println("[BLE] No response to read_pin, assuming no PIN needed");
+        Log.println("[BLE] No response to read_pin, assuming no PIN needed");
         _pinRequired = false;
         return true;
     }
@@ -265,20 +293,20 @@ bool WallboxBLE::_authenticate() {
     int version = doc["r"]["version"] | 0;
 
     if (!pin || strlen(pin) == 0) {
-        Serial.println("[BLE] No PIN set — open access");
+        Log.println("[BLE] No PIN set — open access");
         _pinRequired = false;
         return true;
     }
 
-    Serial.printf("[BLE] PIN is set (version=%d)\n", version);
+    Log.printf("[BLE] PIN is set (version=%d)\n", version);
     _pinRequired = true;
 
     if (_pin.isEmpty()) {
-        Serial.println("[BLE] WARNING: Charger has PIN but none configured!");
+        Log.println("[BLE] WARNING: Charger has PIN but none configured!");
         return true;
     }
 
-    Serial.println("[BLE] Authenticating with PIN...");
+    Log.println("[BLE] Authenticating with PIN...");
     String par = "{\"pin\":\"" + _pin + "\",\"version\":" + String(version) + "}";
 
     String authResp = sendCommand(bapi::MET_SET_PIN, par.c_str(), 5000);
@@ -286,10 +314,10 @@ bool WallboxBLE::_authenticate() {
         JsonDocument authDoc;
         if (deserializeJson(authDoc, authResp) == DeserializationError::Ok) {
             if (authDoc["error"].is<JsonObject>()) {
-                Serial.printf("[BLE] PIN auth failed: %s\n",
+                Log.printf("[BLE] PIN auth failed: %s\n",
                     authDoc["error"]["message"].as<const char*>());
             } else {
-                Serial.println("[BLE] PIN authenticated");
+                Log.println("[BLE] PIN authenticated");
             }
         }
     }
@@ -315,7 +343,7 @@ String WallboxBLE::sendCommand(const char* met, const char* par, uint32_t timeou
     // Connection health check before sending
     if (!_chr || !_client || !_client->isConnected()) {
         if (_state == State::CONNECTED) {
-            Serial.printf("[BLE] Connection lost (detected before %s)\n", met);
+            Log.printf("[BLE] Connection lost (detected before %s)\n", met);
             _state = State::DISCONNECTED;
             _chr = nullptr;
         }
@@ -331,12 +359,12 @@ String WallboxBLE::sendCommand(const char* met, const char* par, uint32_t timeou
     _parser.reset();
     _responseReady = false;
 
-    Serial.printf("[BLE] TX %s\n", met);
+    Log.printf("[BLE] TX %s\n", met);
 
     // Write — try without response first, fallback to with response
     if (!_chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), false)) {
         if (!_chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), true)) {
-            Serial.printf("[BLE] Write failed for %s — connection may be dead\n", met);
+            Log.printf("[BLE] Write failed for %s — connection may be dead\n", met);
             _state = State::DISCONNECTED;
             _chr = nullptr;
             return "";
@@ -352,17 +380,17 @@ String WallboxBLE::sendCommand(const char* met, const char* par, uint32_t timeou
     }
 
     if (!_responseReady) {
-        Serial.printf("[BLE] Timeout %s (%dms)\n", met, (int)(millis() - start));
+        Log.printf("[BLE] Timeout %s (%dms)\n", met, (int)(millis() - start));
         // Check if connection died during wait
         if (_client && !_client->isConnected()) {
-            Serial.println("[BLE] Connection lost during command");
+            Log.println("[BLE] Connection lost during command");
             _state = State::DISCONNECTED;
             _chr = nullptr;
         }
         return "";
     }
 
-    Serial.printf("[BLE] RX %s (%d bytes)\n", met, _lastResponse.length());
+    Log.printf("[BLE] RX %s (%d bytes)\n", met, _lastResponse.length());
     return _lastResponse;
 }
 

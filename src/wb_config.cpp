@@ -1,4 +1,5 @@
 #include "wb_config.h"
+#include "wb_log.h"
 
 ConfigManager configMgr;
 
@@ -31,10 +32,10 @@ void ConfigManager::load() {
     _cfg.haDiscoveryPrefix = _prefs.getString("ha_prefix", "homeassistant");
     _cfg.haDeviceId   = _prefs.getString("ha_devid", "wallbox_pulsar_max");
 
-    Serial.println("[Config] Loaded from NVS:");
-    Serial.printf("  WiFi: %s\n", _cfg.wifiSSID.c_str());
-    Serial.printf("  MQTT: %s:%d\n", _cfg.mqttHost.c_str(), _cfg.mqttPort);
-    Serial.printf("  BLE:  %s (PIN: %s)\n", _cfg.bleAddr.c_str(),
+    Log.println("[Config] Loaded from NVS:");
+    Log.printf("  WiFi: %s\n", _cfg.wifiSSID.c_str());
+    Log.printf("  MQTT: %s:%d\n", _cfg.mqttHost.c_str(), _cfg.mqttPort);
+    Log.printf("  BLE:  %s (PIN: %s)\n", _cfg.bleAddr.c_str(),
                   _cfg.blePin.length() > 0 ? "set" : "none");
 }
 
@@ -57,11 +58,11 @@ void ConfigManager::save() {
     _prefs.putULong("poll_rt", _cfg.realtimePollMs);
     _prefs.putString("ha_prefix", _cfg.haDiscoveryPrefix);
     _prefs.putString("ha_devid", _cfg.haDeviceId);
-    Serial.println("[Config] Saved to NVS");
+    Log.println("[Config] Saved to NVS");
 }
 
 void ConfigManager::reset() {
     _prefs.clear();
     _cfg = WBConfig{};
-    Serial.println("[Config] Reset to defaults");
+    Log.println("[Config] Reset to defaults");
 }
