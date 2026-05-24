@@ -290,7 +290,9 @@ void setup() {
             ArduinoOTA.handle();
         });
         if (cfg.bleService.length() > 0 && cfg.bleChar.length() > 0) {
-            wallboxBLE.setUUIDs(cfg.bleService.c_str(), cfg.bleChar.c_str());
+            // Dual-char mode if bleTxChar is set (e.g. Pulsar Plus); otherwise single-char (MAX default)
+            wallboxBLE.setUUIDs(cfg.bleService.c_str(), cfg.bleChar.c_str(),
+                                cfg.bleTxChar.c_str());
         }
         if (cfg.blePin.length() > 0) {
             wallboxBLE.setPin(cfg.blePin.c_str());

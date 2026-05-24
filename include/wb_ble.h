@@ -42,8 +42,12 @@ public:
     bool pinRequired() const { return _pinRequired; }
     uint32_t blePasskey() const { return _pin.isEmpty() ? 0 : (uint32_t)_pin.toInt(); }
 
-    // UUID override
-    void setUUIDs(const char* svc, const char* chr) { _svcUUID = svc; _chrUUID = chr; }
+    // UUID override (single-char mode: write+notify on the same characteristic — Pulsar MAX)
+    void setUUIDs(const char* svc, const char* chr) { _svcUUID = svc; _chrUUID = chr; _txChrUUID = ""; }
+    // Dual-char mode (Pulsar Plus etc.): write on chr, notify on txChr.
+    void setUUIDs(const char* svc, const char* chr, const char* txChr) {
+        _svcUUID = svc; _chrUUID = chr; _txChrUUID = (txChr && *txChr) ? txChr : "";
+    }
 
     // Responses
     String lastResponse() const { return _lastResponse; }
@@ -81,7 +85,8 @@ private:
     String _addr;
     String _pin;
     String _svcUUID;
-    String _chrUUID;
+    String _chrUUID;          // write characteristic (also notify in single-char mode)
+    String _txChrUUID;        // optional separate notify characteristic (Pulsar Plus)
     NimBLEAddress _foundAddr;
     State _state = State::DISCONNECTED;
     bool _pinRequired = false;

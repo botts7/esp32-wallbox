@@ -23,8 +23,10 @@ struct WBConfig {
     // Wallbox BLE
     String bleAddr;
     String blePin;       // empty = no PIN
-    String bleService;   // default u-blox
-    String bleChar;      // default u-blox
+    String bleService;   // default u-blox (Pulsar MAX)
+    String bleChar;      // single-char mode (MAX): both write + notify here
+    String bleTxChar;    // dual-char mode (Pulsar Plus etc.): separate notify char
+    String chargerModel; // "max" (default) | "plus" — for status code map + UI presets
 
     // Web auth
     bool authEnabled = false;

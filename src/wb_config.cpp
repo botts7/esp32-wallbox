@@ -24,6 +24,8 @@ void ConfigManager::load() {
     _cfg.blePin       = _prefs.getString("ble_pin", "");
     _cfg.bleService   = _prefs.getString("ble_svc", DEFAULT_BLE_SVC);
     _cfg.bleChar      = _prefs.getString("ble_chr", DEFAULT_BLE_CHR);
+    _cfg.bleTxChar    = _prefs.getString("ble_txchr", "");
+    _cfg.chargerModel = _prefs.getString("chg_model", "max");
     _cfg.authEnabled  = _prefs.getBool("auth_en", false);
     _cfg.authUser     = _prefs.getString("auth_user", "admin");
     _cfg.authPass     = _prefs.getString("auth_pass", "");
@@ -51,6 +53,8 @@ void ConfigManager::save() {
     _prefs.putString("ble_pin", _cfg.blePin);
     _prefs.putString("ble_svc", _cfg.bleService);
     _prefs.putString("ble_chr", _cfg.bleChar);
+    _prefs.putString("ble_txchr", _cfg.bleTxChar);
+    _prefs.putString("chg_model", _cfg.chargerModel);
     _prefs.putBool("auth_en", _cfg.authEnabled);
     _prefs.putString("auth_user", _cfg.authUser);
     _prefs.putString("auth_pass", _cfg.authPass);

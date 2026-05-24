@@ -210,14 +210,30 @@ void WallboxBLE::_connect() {
         return;
     }
 
+    // Resolve notify-target characteristic:
+    //   single-char mode (MAX): same characteristic as write (_chr)
+    //   dual-char mode (Plus):  separate notify characteristic (_txChrUUID)
+    NimBLERemoteCharacteristic* notifyChr = _chr;
+    if (_txChrUUID.length() > 0) {
+        notifyChr = svc->getCharacteristic(_txChrUUID.c_str());
+        if (!notifyChr) {
+            Log.printf("[BLE] TX/notify char %s not found\n", _txChrUUID.c_str());
+            _client->disconnect();
+            _state = State::ERROR;
+            esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+            return;
+        }
+        Log.println("[BLE] Using dual-char mode (separate notify characteristic)");
+    }
+
     // Subscribe to notifications — if CCCD write is rejected, encrypt and retry
-    bool notifyOk = _chr->canNotify() && _chr->registerForNotify(_notifyCb);
-    if (!notifyOk && _chr->canNotify()) {
+    bool notifyOk = notifyChr->canNotify() && notifyChr->registerForNotify(_notifyCb);
+    if (!notifyOk && notifyChr->canNotify()) {
         Log.println("[BLE] CCCD rejected, trying SMP encryption...");
         delay(200);
         if (_client->secureConnection()) {
             Log.println("[BLE] Encrypted, retrying notifications...");
-            notifyOk = _chr->registerForNotify(_notifyCb);
+            notifyOk = notifyChr->registerForNotify(_notifyCb);
         } else {
             Log.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
         }

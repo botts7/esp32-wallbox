@@ -969,8 +969,15 @@ static void handleConfig() {
 
     // Advanced
     page += "<details><summary style='color:var(--text3);cursor:pointer;padding:6px 0;font-size:.85em'>Advanced</summary><div class='card'>";
+    page += "<label>Charger model</label><select name='chg_model'>";
+    page += String("<option value='max'") + (cfg.chargerModel == "max" ? " selected" : "") + ">Pulsar MAX (default, single-char)</option>";
+    page += String("<option value='plus'") + (cfg.chargerModel == "plus" ? " selected" : "") + ">Pulsar Plus (Nordic UART, dual-char)</option>";
+    page += String("<option value='custom'") + (cfg.chargerModel == "custom" ? " selected" : "") + ">Custom (set UUIDs below)</option>";
+    page += "</select>";
+    page += "<p class='help'>Picking <b>Pulsar Plus</b> auto-fills the Nordic UART UUIDs on save. Use <b>Custom</b> if you know better.</p>";
     page += "<label>Service UUID</label><input name='ble_svc' value='" + cfg.bleService + "' style='font-size:12px;font-family:monospace'>";
-    page += "<label>Char UUID</label><input name='ble_chr' value='" + cfg.bleChar + "' style='font-size:12px;font-family:monospace'>";
+    page += "<label>Char UUID (write — also notify in single-char mode)</label><input name='ble_chr' value='" + cfg.bleChar + "' style='font-size:12px;font-family:monospace'>";
+    page += "<label>TX/Notify Char UUID (optional — leave blank for single-char Pulsar MAX)</label><input name='ble_txchr' value='" + cfg.bleTxChar + "' placeholder='Required for Pulsar Plus' style='font-size:12px;font-family:monospace'>";
     page += "<div class='row'><div><label>Status Poll (ms)</label><input name='poll_status' type='number' value='" + String(cfg.statusPollMs) + "'></div>";
     page += "<div><label>Realtime Poll (ms)</label><input name='poll_rt' type='number' value='" + String(cfg.realtimePollMs) + "'></div></div>";
     page += "<div class='row'><div><label>HA Prefix</label><input name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'></div>";
@@ -1089,6 +1096,19 @@ static void handleSave() {
     cfg.authUser = http.arg("auth_user"); cfg.authPass = http.arg("auth_pass");
     cfg.bleAddr = normalizeMAC(http.arg("ble_addr")); cfg.blePin = http.arg("ble_pin");
     cfg.bleService = http.arg("ble_svc"); cfg.bleChar = http.arg("ble_chr");
+    cfg.bleTxChar = http.arg("ble_txchr");
+    cfg.chargerModel = http.arg("chg_model");
+    // Apply preset UUIDs if a model is selected (custom = leave fields as-typed)
+    if (cfg.chargerModel == "max") {
+        cfg.bleService = "2456e1b9-26e2-8f83-e744-f34f01e9d701";
+        cfg.bleChar    = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
+        cfg.bleTxChar  = "";  // single-char mode
+    } else if (cfg.chargerModel == "plus") {
+        // Nordic UART variant used by Pulsar Plus (per jagheterfredrik/wallbox-ble)
+        cfg.bleService = "331a36f5-2459-45ea-9d95-6142f0c4b307";
+        cfg.bleChar    = "a9da6040-0823-4995-94ec-9ce41ca28833";  // RX (write)
+        cfg.bleTxChar  = "a73e9a10-628f-4494-a099-12efaf72258f";  // TX (notify)
+    }
     cfg.statusPollMs = http.arg("poll_status").toInt();
     cfg.realtimePollMs = http.arg("poll_rt").toInt();
     cfg.haDiscoveryPrefix = http.arg("ha_prefix"); cfg.haDeviceId = http.arg("ha_devid");
