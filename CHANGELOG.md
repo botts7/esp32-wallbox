@@ -4,6 +4,41 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.3.0] - 2026-05-22
+
+### 🙏 Community contributions
+
+- **BLE SMP pairing for Wallbox firmware ≥ 6.11.26** — newer charger firmware
+  requires an encrypted BLE link before allowing CCCD writes (notification
+  subscription). The gateway now tries the plain `registerForNotify` first
+  (backwards-compatible with older firmware) and falls back to SMP passkey
+  pairing using the configured BAPI PIN if rejected. Tested on FW 6.11.16 (no
+  fallback needed) — anyone on 6.11.26+ should now be able to use the gateway.
+  Thanks to **[@benvanmierloo](https://github.com/benvanmierloo)** for the
+  contribution! ([#1](https://github.com/botts7/esp32-wallbox/pull/1))
+- **Telnet log server on port 23** — all `Serial` output is now also streamed
+  to up to two LAN telnet clients (`telnet wallbox-gw.local`). Service is
+  advertised via mDNS. Zero overhead when no client is connected. Also by
+  **[@benvanmierloo](https://github.com/benvanmierloo)**.
+
+### Added
+
+- **Solar savings** on the `/sessions` stats tiles. Week / Month cost tiles now
+  show an additional ☀ "saved $X" line — the dollar value of solar (green) kWh
+  vs what grid would have cost at your tariff. Configurable green rate (default
+  $0 = "free" solar; set to your feed-in tariff to see opportunity cost).
+- **Notifications panel** (Settings → Charger → 🔔 Notifications) — detects
+  that the gateway runs on plain HTTP (no Notification API access) and shows a
+  ready-to-paste Home Assistant automation snippet that gives proper push
+  notifications via the HA Companion app, using our existing
+  `sensor.wallbox_pulsar_max_status` entity.
+
+### Fixed
+
+- **Page reveal** now triggers on `DOMContentLoaded` instead of `window.load` —
+  much faster perceived load when the gateway is busy talking to a weak BLE
+  link (was waiting on every CSS/JS asset before showing anything).
+
 ## [2.2.0] - 2026-05-19
 
 ### Added
@@ -143,6 +178,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **MIT License** with Wallbox trademark disclaimer
 - **Confirmed working**: Wallbox Pulsar MAX with u-blox NINA-B22 BLE radio
 
+[2.3.0]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.3.0
 [2.2.0]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.2.0
 [2.1.2]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.1.2
 [2.1.1]: https://github.com/botts7/esp32-wallbox/releases/tag/v2.1.1

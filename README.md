@@ -299,6 +299,12 @@ Contributions welcome! Please:
 3. Test on actual hardware before submitting PR
 4. Update CHANGELOG.md with your change
 
+### Contributors
+
+- [@benvanmierloo](https://github.com/benvanmierloo) — BLE SMP pairing for
+  newer Wallbox firmware (≥ 6.11.26), telnet log server
+  ([#1](https://github.com/botts7/esp32-wallbox/pull/1))
+
 ## Related Projects
 
 - [Official HA Wallbox integration](https://www.home-assistant.io/integrations/wallbox/) —
