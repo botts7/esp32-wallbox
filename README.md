@@ -95,16 +95,23 @@ connection, and bridges BLE commands to MQTT with full Home Assistant auto-disco
 
 ## Compatible Chargers
 
-Tested: **Wallbox Pulsar MAX** (u-blox NINA-B22 BLE radio, firmware 6.11.16)
+| Model | Status |
+|---|---|
+| **Pulsar MAX** (FW 6.11.16 and earlier) | ✅ Fully tested |
+| **Pulsar MAX** (FW 6.11.26+) | ✅ Working in v2.3.0+ (encrypted BLE handled) |
+| **Pulsar Plus** | 🟡 Active prep, looking for testers |
+| **Copper SB**, **Commander 2**, **Quasar / Quasar 2** | ⚪ Untested — reports welcome |
 
-Should work (same BAPI BLE protocol family):
-- Pulsar Plus
-- Commander 2
-- Copper (SB / Business)
-- Quasar / Quasar 2 (V2H discharge entity will populate on these)
+See **[COMPATIBILITY.md](COMPATIBILITY.md)** for the full matrix including
+gateway-board recommendations, BLE signal-strength thresholds, and how to
+contribute a report. The BAPI protocol is shared across Wallbox models;
+where the BLE radio differs (u-blox / Nordic / Zentri etc.) the gateway
+exposes UUID overrides in Config → Advanced.
 
-The BLE radio varies by model — u-blox, Zentri (Silicon Labs), BGX. Service/Characteristic
-UUIDs can be overridden in Config → Advanced.
+**Want to add your charger to the supported list?** Open an issue using
+the [`pulsar-plus-compat`](https://github.com/botts7/esp32-wallbox/issues/new/choose)
+template (works for any model — just fill in your details) or post in
+[Discussions](https://github.com/botts7/esp32-wallbox/discussions).
 
 ## Hardware
 
