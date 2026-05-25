@@ -2,6 +2,7 @@
 #include "wb_config.h"
 #include "wb_ble.h"
 #include "wb_log.h"
+#include "wb_version.h"
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -9,6 +10,7 @@
 #include <NimBLEDevice.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <esp_task_wdt.h>
 WBWebServer webServer;
 
 static WebServer http(80);
@@ -1147,7 +1149,7 @@ static void handleInfo() {
 <div class='card'>
   <a href='/ota' class='btn btn-outline' style='text-decoration:none;display:block'>&#x1F4E6; Firmware Update</a>
 </div>
-<p style='text-align:center;color:var(--text3);font-size:.75em;margin-top:16px'>Wallbox BLE Gateway v1.0</p>
+<p style='text-align:center;color:var(--text3);font-size:.75em;margin-top:16px'>Wallbox BLE Gateway )HTML" WB_VERSION R"HTML(</p>
 
 <script>
 function loadGW(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi Signal',d.wifi_rssi+' dBm');h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h;var c='';if(d.dev_name)c+=row('Name',d.dev_name);if(d.dev_mfg)c+=row('Manufacturer',d.dev_mfg);if(d.dev_model)c+=row('Model',d.dev_model);if(d.dev_fw)c+=row('BLE Module FW',d.dev_fw);document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>'})}
@@ -1690,17 +1692,32 @@ static void handleOtaUpload() {
 
         // Pause BLE for the OTA window. BLE scans/reconnects set the radio
         // coex preference to BT and starve WiFi for several seconds at a
-        // time — fatal to a streaming OTA TCP upload. Reported when a
-        // gateway in a tight BLE reconnect loop couldn't OTA at all.
+        // time — bad for a streaming OTA TCP upload.
         wallboxBLE.pause(5 * 60 * 1000);  // 5 min — auto-resumes after
 
-        // Check partition size
+        // Extend the Task Watchdog timeout to cover the blocking flash
+        // erase that's about to happen inside Update.begin(). On an empty
+        // / fully-used OTA partition the erase can take 10+ seconds, well
+        // beyond the default 5s WDT — which would otherwise panic-reboot
+        // mid-upload (reported by peter-mcc in #4).
+        esp_task_wdt_init(60, false);
+
+        // Use the HTTP Content-Length to size Update.begin() — this
+        // erases only as much as needed instead of the whole 1.9 MB
+        // partition. Browser-side time-to-first-byte is much shorter.
+        size_t expected = 0;
+        if (http.hasHeader("Content-Length")) {
+            expected = (size_t) http.header("Content-Length").toInt();
+            // Content-Length includes multipart envelope (~150 bytes); fine to over-erase by that much
+        }
         const esp_partition_t* partition = esp_ota_get_next_update_partition(NULL);
         if (partition) {
-            Log.printf("[OTA] Target partition: %s (%u bytes)\n", partition->label, partition->size);
+            Log.printf("[OTA] Target partition: %s (%u bytes), expected upload: %u\n",
+                       partition->label, partition->size, (unsigned)expected);
         }
 
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+        bool ok = expected > 0 ? Update.begin(expected) : Update.begin(UPDATE_SIZE_UNKNOWN);
+        if (!ok) {
             Log.printf("[OTA] Begin failed: %s\n", Update.errorString());
             otaError = true;
         }
@@ -1765,6 +1782,10 @@ static void handleServiceWorker() {
 }
 
 static void registerRoutes() {
+    // Capture Content-Length so the OTA handler can size Update.begin()
+    // and erase only what's needed.
+    static const char* otaHeaders[] = {"Content-Length"};
+    http.collectHeaders(otaHeaders, 1);
     http.on("/style.css", handleStyleCss);
     http.on("/app.js", handleAppJs);
     http.on("/save", HTTP_POST, handleSave);

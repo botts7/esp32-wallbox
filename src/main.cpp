@@ -11,6 +11,7 @@
 #include "wb_web.h"
 #include "wb_ws.h"
 #include "wb_log.h"
+#include "wb_version.h"
 #include "bapi.h"
 #include <ArduinoJson.h>
 
@@ -181,7 +182,7 @@ void setup() {
     // If firmware is broken and can't connect, bootloader reverts after 3 failed boots
 
     Log.println("\n============================");
-    Log.println("  Wallbox BLE Gateway v1.0");
+    Log.printf("  Wallbox BLE Gateway %s\n", WB_VERSION);
     Log.println("============================\n");
 
     // Log OTA partition info
@@ -236,7 +237,7 @@ void setup() {
     if (mdnsOk) {
         MDNS.addService("http", "tcp", 80);
         MDNS.addServiceTxt("http", "tcp", "device", "wallbox-gateway");
-        MDNS.addServiceTxt("http", "tcp", "version", "v2.0");
+        MDNS.addServiceTxt("http", "tcp", "version", WB_VERSION);
         MDNS.addServiceTxt("http", "tcp", "path", "/");
         MDNS.addService("telnet", "tcp", 23);
         Log.printf("[mDNS] http://wallbox-gw.local (IP: %s)\n", WiFi.localIP().toString().c_str());
