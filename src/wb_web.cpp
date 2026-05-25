@@ -274,14 +274,17 @@ static void handleBleScan() {
     // Don't scan if BLE is actively connecting — causes conflicts
     if (wallboxBLE.state() == WallboxBLE::State::CONNECTING ||
         wallboxBLE.state() == WallboxBLE::State::AUTHENTICATING) {
+        Log.println("[BLE-Scan] requested via web UI, but BLE is busy — refused");
         http.send(200, "application/json", "{\"devices\":[],\"busy\":true}");
         return;
     }
+    Log.println("[BLE-Scan] requested via web UI, starting 8s scan...");
     NimBLEScan* scan = NimBLEDevice::getScan();
     scan->setActiveScan(true);
     scan->setInterval(100);
     scan->setWindow(99);
     NimBLEScanResults results = scan->start(8, false);
+    Log.printf("[BLE-Scan] complete: %d device(s) seen\n", results.getCount());
     String json = "{\"devices\":[";
     bool first = true;
     for (int i = 0; i < results.getCount(); i++) {
@@ -290,6 +293,11 @@ static void handleBleScan() {
         String addr = dev.getAddress().toString().c_str();
         int rssi = dev.getRSSI();
         bool isWB = name.startsWith("WB") || name.indexOf("allbox") >= 0;
+        Log.printf("[BLE-Scan]   %s%s %s  RSSI:%d\n",
+                   isWB ? "* " : "  ",
+                   addr.c_str(),
+                   name.length() ? name.c_str() : "(no name)",
+                   rssi);
         if (!first) json += ",";
         first = false;
         json += "{\"addr\":\"" + addr + "\",\"name\":\"" + name + "\",\"rssi\":" + String(rssi) + ",\"is_wallbox\":" + (isWB ? "true" : "false") + "}";
@@ -304,11 +312,14 @@ static void handleWifiScan() {
     if (mode == WIFI_AP) WiFi.mode(WIFI_AP_STA);
     else if (mode == WIFI_OFF) WiFi.mode(WIFI_STA);
 
+    Log.println("[WiFi-Scan] requested via web UI, scanning...");
     int n = WiFi.scanNetworks(false, true, false, 400);
     if (n < 0) {
+        Log.printf("[WiFi-Scan] failed (code %d)\n", n);
         http.send(500, "application/json", "{\"error\":\"scan failed\",\"code\":" + String(n) + "}");
         return;
     }
+    Log.printf("[WiFi-Scan] complete: %d network(s) found\n", n);
     String json = "{\"networks\":[";
     bool first = true;
     for (int i = 0; i < n && i < 20; i++) {
