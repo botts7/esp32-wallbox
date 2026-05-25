@@ -1688,6 +1688,12 @@ static void handleOtaUpload() {
         otaError = false;
         otaInProgress = true;
 
+        // Pause BLE for the OTA window. BLE scans/reconnects set the radio
+        // coex preference to BT and starve WiFi for several seconds at a
+        // time — fatal to a streaming OTA TCP upload. Reported when a
+        // gateway in a tight BLE reconnect loop couldn't OTA at all.
+        wallboxBLE.pause(5 * 60 * 1000);  // 5 min — auto-resumes after
+
         // Check partition size
         const esp_partition_t* partition = esp_ota_get_next_update_partition(NULL);
         if (partition) {
