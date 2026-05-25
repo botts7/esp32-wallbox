@@ -19,6 +19,7 @@ private:
     WiFiServer* _server = nullptr;
     WiFiClient  _clients[MAX_CLIENTS];
     uint8_t     _clientCount = 0;
+    uint8_t     _lastByte = 0;       // for CR-injection in write() — see .cpp
 };
 
 extern TelnetLog Log;

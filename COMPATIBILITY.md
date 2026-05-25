@@ -63,6 +63,8 @@ The gateway publishes the Wallbox device with native HA entities (sensors, switc
    - **Pulsar Plus owners** → [`pulsar-plus-compat`](https://github.com/botts7/esp32-wallbox/issues/new/choose)
    - **Anything else** → use the standard `bug_report` or `charger_compatibility` template
 4. Include the **BLE Scan** result (Config page → BLE Scan button) and a snippet of telnet log if you have it
+   - **Windows users:** the built-in `telnet` client isn't enabled by default (and you'd need to set it to send LF as CRLF). Easiest path is [PuTTY](https://www.putty.org/) in "Raw" mode pointing at port 23 — readable lines out of the box.
+   - **macOS / Linux:** `nc wallbox-gw.local 23` works directly.
 
 Even a one-line "works on my Pulsar MAX FW X.Y.Z, ESP32-S3 board Z, RSSI Q" is useful. Negative results also help — if it doesn't connect, the scan log tells us what to fix.
 
