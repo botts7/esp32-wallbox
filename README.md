@@ -125,30 +125,42 @@ No wiring, sensors, or peripherals needed — just the ESP32.
 
 ## Quick Start
 
-### Option 1: Pre-built Binary (easiest)
+### 🪄 One-click install (Chrome / Edge)
 
-1. Download `firmware.bin` from [Releases](../../releases)
-2. Flash using [ESP Web Tools](https://esp.huhn.me/) (in-browser) or esptool:
-   ```bash
-   esptool.py --port COM4 write_flash 0x0 firmware.bin
-   ```
-3. Connect to WiFi AP `WallboxGW-Setup` (password `wallbox123`)
-4. Open `http://192.168.4.1/` in a browser
-5. Configure WiFi, MQTT, BLE address (tap Scan to find your charger)
-6. Save & Reboot
+Plug the ESP32-S3 in via USB, then click the button below. The browser
+handles erase + flash of all three files at the correct offsets — no
+terminal, no esptool, no manual offsets.
 
-### Option 2: Build from source
+<!-- HTML below renders the install button on GitHub-rendered Markdown via raw HTML pass-through.
+     If GitHub strips it, the link still works as a manual fallback. -->
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 
-1. Install [PlatformIO](https://platformio.org/install) (VSCode extension or CLI)
-2. Clone this repo
-3. Open in VS Code with PlatformIO
-4. `pio run -e esp32s3 -t upload` (or click the → arrow)
-5. Follow captive portal setup (step 3 above)
+<p>
+  <esp-web-install-button manifest="https://github.com/botts7/esp32-wallbox/releases/latest/download/install.json">
+    <span slot="unsupported">⚠️ ESP Web Tools needs Chrome or Edge — see <a href="INSTALL.md">INSTALL.md</a> for other options.</span>
+  </esp-web-install-button>
+</p>
+
+After flashing:
+
+1. Connect to WiFi AP `WallboxGW-Setup` (password `wallbox123`)
+2. Open `http://192.168.4.1/` in a browser
+3. Configure WiFi, MQTT, BLE address (tap **Scan** to find your charger)
+4. Save & Reboot → gateway appears at `http://wallbox-gw.local/`
+
+### Other install methods
+
+See **[INSTALL.md](INSTALL.md)** for:
+- Browser-based flashing with [esptool.spacehuhn.com](https://esptool.spacehuhn.com) (Safari / Firefox)
+- Command-line `esptool.py` (automation, scripts)
+- Build from source with PlatformIO
+- **Recovering a board that won't boot**
 
 ### After first-boot setup
 
 - Dashboard: `http://wallbox-gw.local/` (or the IP shown in Config page)
-- Future updates via OTA: Config → Firmware Update → upload new `firmware.bin`
+- Future updates via **OTA**: open `/ota` and upload the new firmware
+  `.bin` only — no need to re-flash bootloader / partitions
 - HA entities appear automatically under device "Wallbox Pulsar MAX"
 
 ## Home Assistant Setup
