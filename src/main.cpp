@@ -168,6 +168,8 @@ static void publishGatewayInfo() {
     json += ",\"dev_model\":\"" + wallboxBLE.deviceModel() + "\"";
     json += ",\"dev_fw\":\"" + wallboxBLE.deviceFirmware() + "\"";
     json += ",\"dev_name\":\"" + wallboxBLE.deviceName() + "\"";
+    json += ",\"chg_sn\":\"" + wallboxBLE.chargerSerial() + "\"";
+    json += ",\"chg_mac\":\"" + wallboxBLE.chargerMac() + "\"";
     json += "}";
     wallboxMQTT.publishResponse("gateway", json);
 }
@@ -199,8 +201,14 @@ void setup() {
     NimBLEDevice::setMTU(247);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);  // +9dBm max range
     NimBLEDevice::setSecurityAuth(true, true, true);
+    // IO capability — KeyboardOnly handles both eras of both models.
+    // Newer Wallbox firmware (MAX 6.11.26+, Plus 6.7.x+) shows a "Bluetooth
+    // Passcode" in the phone app; the user copies it into our PIN field
+    // and we answer onPassKeyRequest() with it. Older firmware without a
+    // passkey: the BLE spec auto-negotiates to Just Works when the
+    // peripheral declares NoInputNoOutput, so KeyboardOnly is harmless there.
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_ONLY);
-    Log.println("[BLE] TX power: +9 dBm");
+    Log.println("[BLE] TX power: +9 dBm, IO cap: KeyboardOnly");
 
     // Check if WiFi is configured
     if (!configMgr.hasWiFi()) {
@@ -295,6 +303,7 @@ void setup() {
             wallboxBLE.setUUIDs(cfg.bleService.c_str(), cfg.bleChar.c_str(),
                                 cfg.bleTxChar.c_str());
         }
+        wallboxBLE.setChargerModel(cfg.chargerModel.c_str());
         if (cfg.blePin.length() > 0) {
             wallboxBLE.setPin(cfg.blePin.c_str());
         }

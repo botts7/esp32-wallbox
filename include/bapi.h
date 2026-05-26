@@ -66,8 +66,10 @@ constexpr const char* MET_GET_NETWORKS   = "gnsta";   // networks status
 constexpr const char* MET_GET_MOBILE     = "gmcon";   // mobile connectivity
 constexpr const char* MET_GET_PROXY      = "gpmod";   // proxy mode
 constexpr const char* MET_GET_BATTERY    = "r_socr";  // battery config (inferred)
-constexpr const char* MET_GET_CHARGER_VER = "r_ver";  // charger versions (inferred)
-constexpr const char* MET_GET_DISCHARGE  = "r_dch";   // discharge session (inferred)
+constexpr const char* MET_GET_CHARGER_VER = "fw_v_";  // charger versions (per jagheterfredrik/wallbox-ble)
+constexpr const char* MET_GET_DISCHARGE  = "r_dis";   // discharge session (per jagheterfredrik/wallbox-ble)
+constexpr const char* MET_GET_SERIAL     = "r_sn_";   // serial number (universal)
+constexpr const char* MET_GET_MAC        = "g_mac";   // MAC addresses (universal)
 constexpr const char* MET_GET_ECO_SMART  = "g_ecos";  // eco smart (inferred)
 
 // Write methods

@@ -49,6 +49,12 @@ public:
         _svcUUID = svc; _chrUUID = chr; _txChrUUID = (txChr && *txChr) ? txChr : "";
     }
 
+    // Charger model — drives auth model + keepalive choice
+    // "max"  → MAX/Copper: read_pin/set_pin BAPI auth, `ping` keepalive
+    // "plus" → Plus: SMP-only auth (no BAPI PIN), `r_dat` keepalive
+    void setChargerModel(const char* m) { _chargerModel = (m && *m) ? m : "max"; }
+    bool isPlus() const { return _chargerModel == "plus"; }
+
     // Responses
     String lastResponse() const { return _lastResponse; }
     using ResponseCallback = void (*)(const String& json);
@@ -70,6 +76,10 @@ public:
     String deviceModel() const { return _devModel; }
     String deviceFirmware() const { return _devFw; }
     String deviceName() const { return _devName; }
+
+    // Charger-reported identity (read post-connect via BAPI r_sn_ / g_mac)
+    String chargerSerial() const { return _chgSerial; }
+    String chargerMac() const { return _chgMac; }
 
 private:
     void _connect();
@@ -117,11 +127,20 @@ private:
     uint32_t _lastSeenTime = 0;
     static const uint32_t SCAN_CACHE_MS = 30000;
 
+    // RSSI smoothing — NimBLE's getRssi() returns per-packet instantaneous
+    // values that swing wildly (issue #6). Sample on a fixed cadence and
+    // apply an EMA so all UI/MQTT/WS consumers see the same stable number.
+    mutable int _rssiSmoothed = -127;
+    mutable uint32_t _rssiLastSample = 0;
+    static const uint32_t RSSI_SAMPLE_MS = 2000;
+
     // Stats
     uint32_t _txCount = 0;
     uint32_t _rxCount = 0;
     int _scanRSSI = -127;
     String _devMfg, _devModel, _devFw, _devName;
+    String _chgSerial, _chgMac;
+    String _chargerModel = "max";
 
     int _nextId = 1;
 };

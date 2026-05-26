@@ -62,11 +62,29 @@ void WallboxBLE::loop() {
             break;
         }
 
-        // Keepalive ping if idle (no commands sent recently)
+        // Sample link RSSI on a fixed cadence and smooth with an EMA.
+        // Single source of truth — every consumer reads the same value.
+        if (millis() - _rssiLastSample >= RSSI_SAMPLE_MS) {
+            _rssiLastSample = millis();
+            int raw = _client->getRssi();
+            if (raw > -110 && raw < 0) {
+                if (_rssiSmoothed == -127) {
+                    _rssiSmoothed = raw;
+                } else {
+                    // α≈0.15 — slow enough to absorb the wild per-packet
+                    // swings NimBLE returns, fast enough to track real movement.
+                    _rssiSmoothed = (3 * raw + 17 * _rssiSmoothed) / 20;
+                }
+            }
+        }
+
+        // Keepalive if idle (no commands sent recently)
+        // Plus doesn't implement `ping` — use r_dat (status) which is universal
         if (millis() - _lastActivityTime >= PING_INTERVAL_MS) {
-            String resp = sendCommand(bapi::MET_PING, "null", 2000);
+            const char* keepalive = isPlus() ? bapi::MET_GET_STATUS : bapi::MET_PING;
+            String resp = sendCommand(keepalive, "null", 2000);
             if (resp.isEmpty()) {
-                Log.println("[BLE] Ping timeout — connection dead, reconnecting");
+                Log.printf("[BLE] Keepalive %s timeout — reconnecting\n", keepalive);
                 _disconnect();
                 break;
             }
@@ -93,6 +111,15 @@ void WallboxBLE::loop() {
 }
 
 void WallboxBLE::_connect() {
+    // Don't burn radio cycles scanning if no charger address is configured
+    // (e.g., between web-UI save and reboot — config changed but begin() not re-called)
+    if (_addr.length() == 0) {
+        _state = State::DISCONNECTED;
+        _connectBackoff = 5000;
+        _lastConnectAttempt = millis();
+        return;
+    }
+
     _lastConnectAttempt = millis();
     _state = State::CONNECTING;
 
@@ -233,6 +260,9 @@ void WallboxBLE::_connect() {
         delay(200);
         if (_client->secureConnection()) {
             Log.println("[BLE] Encrypted, retrying notifications...");
+            // NimBLE 1.4.1 can return from secureConnection() before bond
+            // info fully lands — give it a moment before the CCCD retry
+            delay(200);
             notifyOk = notifyChr->registerForNotify(_notifyCb);
         } else {
             Log.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
@@ -272,9 +302,37 @@ void WallboxBLE::_connect() {
     // Restore balanced coexistence
     esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
 
-    // Authenticate if needed
+    // Authenticate if needed (Plus skips read_pin; MAX does the PIN dance)
     if (_authenticate()) {
         _state = State::CONNECTED;
+
+        // Read charger identity once per connect — works on MAX + Plus.
+        // r_sn_ returns the serial; g_mac returns the charger's MAC addresses.
+        // Best-effort: failures just leave the fields empty.
+        String snResp = sendCommand(bapi::MET_GET_SERIAL, "null", 2000);
+        if (!snResp.isEmpty()) {
+            JsonDocument d;
+            if (deserializeJson(d, snResp) == DeserializationError::Ok) {
+                if (d["r"].is<const char*>()) _chgSerial = d["r"].as<const char*>();
+                else if (d["r"]["sn"].is<const char*>()) _chgSerial = d["r"]["sn"].as<const char*>();
+            }
+        }
+        String macResp = sendCommand(bapi::MET_GET_MAC, "null", 2000);
+        if (!macResp.isEmpty()) {
+            JsonDocument d;
+            if (deserializeJson(d, macResp) == DeserializationError::Ok) {
+                // Spec varies — try a few field shapes
+                if (d["r"].is<const char*>())            _chgMac = d["r"].as<const char*>();
+                else if (d["r"]["wifi"].is<const char*>())  _chgMac = d["r"]["wifi"].as<const char*>();
+                else if (d["r"]["mac"].is<const char*>())   _chgMac = d["r"]["mac"].as<const char*>();
+            }
+        }
+        if (_chgSerial.length() || _chgMac.length()) {
+            Log.printf("[BLE] Charger SN: %s  MAC: %s\n",
+                _chgSerial.length() ? _chgSerial.c_str() : "(none)",
+                _chgMac.length() ? _chgMac.c_str() : "(none)");
+        }
+
         Log.println("[BLE] Ready");
     }
 }
@@ -285,16 +343,33 @@ void WallboxBLE::_disconnect() {
     }
     _chr = nullptr;
     _state = State::DISCONNECTED;
+    _rssiSmoothed = -127;  // reset EMA so the next connect starts fresh
+    _rssiLastSample = 0;
 }
 
 bool WallboxBLE::_authenticate() {
     _state = State::AUTHENTICATING;
 
+    // Probe BAPI PIN status. read_pin is the original MAX auth method;
+    // historically Plus had no equivalent (jagheterfredrik/wallbox-ble) but
+    // Wallbox added a Bluetooth PIN system-wide at firmware 6.11+, so newer
+    // Plus firmware may also implement it. Use a short timeout on Plus since
+    // older firmware just silently drops the request.
     Log.println("[BLE] Checking PIN status...");
-    String pinResp = sendCommand(bapi::MET_READ_PIN, "null", 5000);
+    uint32_t pinTimeout = isPlus() ? 2000 : 5000;
+    String pinResp = sendCommand(bapi::MET_READ_PIN, "null", pinTimeout);
 
     if (pinResp.isEmpty()) {
-        Log.println("[BLE] No response to read_pin, assuming no PIN needed");
+        // No read_pin support on this firmware. Confirm the BAPI channel
+        // actually works (via r_dat) before declaring "no PIN needed" —
+        // otherwise a dead link looks identical to an unauthed-but-open one.
+        Log.println("[BLE] No read_pin response — probing r_dat to confirm channel...");
+        String probe = sendCommand(bapi::MET_GET_STATUS, "null", 5000);
+        if (probe.isEmpty()) {
+            Log.println("[BLE] r_dat also silent — channel may be broken or auth-gated");
+        } else {
+            Log.printf("[BLE] r_dat OK (%d bytes) — no BAPI PIN on this firmware\n", probe.length());
+        }
         _pinRequired = false;
         return true;
     }
@@ -428,8 +503,9 @@ const char* WallboxBLE::stateStr() const {
 }
 
 int WallboxBLE::rssi() const {
-    if (_client && _client->isConnected()) {
-        return _client->getRssi();
-    }
-    return _scanRSSI;  // Fall back to last scan RSSI
+    // Pure getter — no HCI call. The smoothed value is updated only inside
+    // loop() so all consumers (WS broadcast, /api/status, MQTT gateway-info)
+    // see exactly the same number at any given moment.
+    if (!_client || !_client->isConnected()) return _scanRSSI;
+    return _rssiSmoothed == -127 ? _scanRSSI : _rssiSmoothed;
 }
