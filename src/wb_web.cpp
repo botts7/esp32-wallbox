@@ -184,6 +184,7 @@ function row(l,v){return "<div class='info-row'><span class='info-label'>"+l+"</
 #define SVG_SETTINGS  "<svg viewBox='0 0 24 24'><path d='M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z'/></svg>"
 #define SVG_CONFIG    "<svg viewBox='0 0 24 24'><path d='M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z'/></svg>"
 #define SVG_INFO      "<svg viewBox='0 0 24 24'><path d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z'/></svg>"
+#define SVG_LOGS      "<svg viewBox='0 0 24 24'><path d='M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z'/></svg>"
 
 static String htmlHead(const char* title = "Wallbox Gateway") {
     bool bleOk = wallboxBLE.isConnected();
@@ -271,6 +272,7 @@ static String htmlFoot(const char* activePath) {
     navItem("/settings", SVG_SETTINGS, "Settings");
     navItem("/config", SVG_CONFIG, "Config");
     navItem("/info", SVG_INFO, "Info");
+    navItem("/logs", SVG_LOGS, "Logs");
     h += "</nav>"
          "<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(function(){});</script>"
          "<script>(function(){var r=function(){document.body.classList.add('ready')};if(document.readyState==='interactive'||document.readyState==='complete')r();else document.addEventListener('DOMContentLoaded',r)})();</script>"
@@ -1126,6 +1128,9 @@ static void handleConfig() {
     page += "<script>function doRestore(){var f=document.getElementById('cfg-file').files[0];var st=document.getElementById('restore-status');if(!f){st.textContent='Pick a file first.';st.style.color='var(--warning)';return}var r=new FileReader();r.onload=function(){fetch('/api/config/import?csrf=" + csrfToken + "',{method:'POST',headers:{'Content-Type':'application/json'},body:r.result}).then(function(resp){return resp.json()}).then(function(d){if(d.ok){st.textContent='Imported — rebooting...';st.style.color='var(--success)'}else{st.textContent='Failed: '+(d.error||'unknown');st.style.color='var(--danger)'}}).catch(function(e){st.textContent='Error: '+e;st.style.color='var(--danger)'})};r.readAsText(f)}</script>";
     page += "</div>";
 
+    // Reboot (keeps config) — useful for capturing a fresh boot trace
+    page += "<button type='button' class='btn btn-outline' style='margin-top:10px' onclick='confirm2(\"Reboot the gateway? Config is preserved.\",function(){fetch(\"/api/reboot?csrf=" + csrfToken + "\",{method:\"POST\"}).then(function(){location.href=\"/logs\"}).catch(function(){})})'>&#x21BB; Reboot Gateway</button>";
+
     page += "<button type='button' class='btn btn-danger' style='margin-top:10px' onclick='confirm2(\"Erase all settings and reboot into setup mode?\",function(){var f=document.createElement(\"form\");f.method=\"POST\";f.action=\"/reset\";var i=document.createElement(\"input\");i.type=\"hidden\";i.name=\"csrf\";i.value=\"" + csrfToken + "\";f.appendChild(i);document.body.appendChild(f);f.submit()})'>&#x1F5D1; Factory Reset</button>";
 
     page += htmlFoot("/config");
@@ -1957,6 +1962,14 @@ static void registerRoutes() {
     http.on("/app.js", handleAppJs);
     http.on("/save", HTTP_POST, handleSave);
     http.on("/reset", HTTP_POST, handleReset);
+    // Reboot without modifying NVS — useful for capturing a fresh boot
+    // trace from /logs without losing any config. Auth + CSRF gated.
+    http.on("/api/reboot", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        if (!checkCsrf()) return;
+        http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+        webServer.requestReboot();
+    });
     http.on("/api/ble-scan", handleBleScan);
     http.on("/api/wifi-scan", handleWifiScan);
     http.on("/api/status", handleApiStatus);
@@ -2069,20 +2082,30 @@ static void registerRoutes() {
     http.on("/logs", []() {
         if (!checkAuth()) return;
         String page = htmlHead("Logs");
-        page += "<h1>&#x1F4DC; Gateway Log</h1>";
-        page += "<p style='color:var(--text3);font-size:.82em'>Last 16 KB of serial/telnet output. Auto-refreshes every 5s; scroll-locks to bottom unless you scroll up.</p>";
+        page += "<h1>&#x1F4DC; Gateway Log <span id='log-state' style='font-size:.55em;vertical-align:middle;margin-left:8px;padding:3px 8px;border-radius:10px;background:rgba(34,197,94,.15);color:#22c55e'>online</span></h1>";
+        page += "<p style='color:var(--text3);font-size:.82em'>Last 16 KB of serial/telnet output. Auto-refreshes every 3s; scroll-locks to bottom unless you scroll up. Persists across page reloads, wiped on reboot.</p>";
+        page += "<div style='margin-bottom:8px'>";
+        page += "<button class='btn btn-outline' style='padding:6px 12px;font-size:.85em' onclick='copyLog()'>&#x1F4CB; Copy</button> ";
+        page += "<a href='/api/logs' download='wallbox-log.txt' class='btn btn-outline' style='padding:6px 12px;font-size:.85em;text-decoration:none'>&#x2B07; Download</a> ";
+        page += "<button class='btn btn-outline' style='padding:6px 12px;font-size:.85em' onclick='confirm2(\"Reboot the gateway? Config is preserved \\u2014 you can watch the boot trace appear here.\",function(){fetch(\"/api/reboot?csrf=" + csrfToken + "\",{method:\"POST\"}).then(function(){}).catch(function(){})})'>&#x21BB; Reboot &amp; capture boot trace</button>";
+        page += "</div>";
         page += "<pre id='log' style='background:var(--bg);border-radius:8px;padding:10px;font-size:.78em;max-height:70vh;overflow:auto;white-space:pre-wrap;line-height:1.35'></pre>";
         page += "<script>(function(){"
                 "var el=document.getElementById('log');"
-                "var stick=true;"
+                "var st=document.getElementById('log-state');"
+                "var stick=true;var fails=0;"
+                "function setState(label,color,bg){st.textContent=label;st.style.color=color;st.style.background=bg}"
+                "function offline(){setState('offline — gateway rebooting?','#ef4444','rgba(239,68,68,.15)')}"
+                "function online(){setState('online','#22c55e','rgba(34,197,94,.15)');fails=0}"
                 "el.addEventListener('scroll',function(){"
                   "stick=(el.scrollHeight-el.scrollTop-el.clientHeight)<8;"
                 "});"
+                "window.copyLog=function(){var t=el.textContent||'';if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){toast&&toast('Copied','success')}).catch(function(){})}};"
                 "function load(){fetch('/api/logs',{cache:'no-store'})"
                   ".then(function(r){return r.text()})"
-                  ".then(function(t){el.textContent=t;if(stick)el.scrollTop=el.scrollHeight})"
-                  ".catch(function(){});}"
-                "load();setInterval(load,5000);"
+                  ".then(function(t){online();el.textContent=t;if(stick)el.scrollTop=el.scrollHeight})"
+                  ".catch(function(){fails++;if(fails>=2)offline()});}"
+                "load();setInterval(load,3000);"
                 "})();</script>";
         page += htmlFoot("/info");
         http.send(200, "text/html", page);
