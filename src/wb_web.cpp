@@ -4,6 +4,7 @@
 #include "wb_log.h"
 #include "wb_version.h"
 #include "wb_health.h"
+#include "wb_ota_history.h"
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -1106,6 +1107,20 @@ static void handleConfig() {
 
     page += "<button type='submit' class='btn btn-success' style='margin-top:12px'>&#x1F4BE; Save &amp; Reboot</button></form>";
     page += "<a href='/ota' class='btn btn-outline' style='margin-top:10px'>&#x1F4E6; Firmware Update</a>";
+
+    // Backup & Restore — passwords/PINs are masked in the export, so the
+    // download is safe to share. Restore preserves the existing secrets
+    // when a field is "***" in the upload.
+    page += "<div class='card' style='margin-top:14px'><div class='card-header'><span class='card-icon'>&#x1F4BE;</span><h2>Backup &amp; Restore</h2></div>";
+    page += "<p class='help' style='margin-bottom:10px'>Download saves the current config as JSON (passwords masked). Restore applies a previously saved config and reboots.</p>";
+    page += "<a href='/api/config/export' download='wallbox-config.json' class='btn btn-outline' style='margin-right:8px;text-decoration:none'>&#x2B07; Download config</a>";
+    page += "<label style='margin-top:14px'>Restore from file</label>";
+    page += "<input type='file' id='cfg-file' accept='.json,application/json' style='margin-bottom:10px'>";
+    page += "<button type='button' class='btn btn-outline' onclick='doRestore()'>&#x2B06; Restore &amp; Reboot</button>";
+    page += "<p id='restore-status' style='font-size:.82em;color:var(--text3);margin-top:8px'></p>";
+    page += "<script>function doRestore(){var f=document.getElementById('cfg-file').files[0];var st=document.getElementById('restore-status');if(!f){st.textContent='Pick a file first.';st.style.color='var(--warning)';return}var r=new FileReader();r.onload=function(){fetch('/api/config/import?csrf=" + csrfToken + "',{method:'POST',headers:{'Content-Type':'application/json'},body:r.result}).then(function(resp){return resp.json()}).then(function(d){if(d.ok){st.textContent='Imported — rebooting...';st.style.color='var(--success)'}else{st.textContent='Failed: '+(d.error||'unknown');st.style.color='var(--danger)'}}).catch(function(e){st.textContent='Error: '+e;st.style.color='var(--danger)'})};r.readAsText(f)}</script>";
+    page += "</div>";
+
     page += "<button type='button' class='btn btn-danger' style='margin-top:10px' onclick='confirm2(\"Erase all settings and reboot into setup mode?\",function(){var f=document.createElement(\"form\");f.method=\"POST\";f.action=\"/reset\";var i=document.createElement(\"input\");i.type=\"hidden\";i.name=\"csrf\";i.value=\"" + csrfToken + "\";f.appendChild(i);document.body.appendChild(f);f.submit()})'>&#x1F5D1; Factory Reset</button>";
 
     page += htmlFoot("/config");
@@ -1190,13 +1205,19 @@ static void handleInfo() {
 </div>
 
 <div class='card'>
-  <a href='/ota' class='btn btn-outline' style='text-decoration:none;display:block'>&#x1F4E6; Firmware Update</a>
+  <a href='/ota' class='btn btn-outline' style='text-decoration:none;display:block;margin-bottom:8px'>&#x1F4E6; Firmware Update</a>
+  <div id='ota-history' style='display:none;margin-top:8px'>
+    <div style='font-size:.82em;color:var(--text2);margin-bottom:6px'>Recent OTA attempts:</div>
+    <div id='ota-history-rows' style='font-size:.78em;font-family:monospace'></div>
+  </div>
 </div>
 <p style='text-align:center;color:var(--text3);font-size:.75em;margin-top:16px'>Wallbox BLE Gateway )HTML" WB_VERSION R"HTML(</p>
 
 <script>
 function loadGW(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){window._lastStatus=d;renderGW(d);var c='';if(d.dev_name)c+=row('Name',d.dev_name);if(d.chg_sn)c+=row('Serial Number',d.chg_sn);if(d.chg_mac)c+=row('Charger MAC',d.chg_mac);if(d.chg_grounding)c+=row('Grounding',d.chg_grounding);if(d.dev_mfg)c+=row('Manufacturer',d.dev_mfg);if(d.dev_model)c+=row('Model',d.dev_model);if(d.dev_fw)c+=row('BLE Module FW',d.dev_fw);document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>';if(d.chg_fw_changed){var b=document.getElementById('fw-changed-banner');var det=document.getElementById('fw-changed-detail');if(b){b.style.display='block';if(det&&d.chg_fw_prev&&d.dev_fw)det.textContent='Was '+d.chg_fw_prev+', now '+d.dev_fw+'.';}}})}
 function dismissFwBanner(){fetch('/api/fw/dismiss',{method:'POST'}).then(function(){var b=document.getElementById('fw-changed-banner');if(b)b.style.display='none'}).catch(function(){})}
+function loadOtaHistory(){fetch('/api/ota/history').then(function(r){return r.json()}).then(function(arr){if(!Array.isArray(arr)||!arr.length)return;var c=document.getElementById('ota-history');var rows=document.getElementById('ota-history-rows');var h='';arr.forEach(function(e){var dot=e.ok?'<span style="color:#22c55e">&#x25CF;</span>':'<span style="color:#ef4444">&#x25CF;</span>';var sz=e.bytes?(' '+Math.round(e.bytes/1024)+'KB'):'';var rsn=e.ok?'':(' — '+(e.reason||'failed'));h+='<div style="margin:3px 0">'+dot+' '+(e.from||'unknown')+sz+rsn+'</div>'});rows.innerHTML=h;c.style.display='block'}).catch(function(){})}
+loadOtaHistory();
 function renderGW(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi Signal',d.wifi_rssi+' dBm');h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h}
 // Live-update the Gateway card off the same WS push the top banner uses,
 // so BLE Signal here can't drift away from the banner's value.
@@ -1860,14 +1881,17 @@ static void handleOtaUpload() {
         if (otaError) {
             Update.abort();
             Log.println("[OTA] Aborted due to errors");
+            wb_ota_history::record(millis() / 1000, WB_VERSION, totalSize, false, "aborted");
             http.send(500, "text/plain", "Upload failed");
         } else if (Update.end(true)) {
             Log.printf("[OTA] Success! %u bytes written to partition\n", totalSize);
+            wb_ota_history::record(millis() / 1000, WB_VERSION, totalSize, true, "ok");
             http.send(200, "text/plain", "OK");
             delay(1000);
             ESP.restart();
         } else {
             Log.printf("[OTA] End failed: %s\n", Update.errorString());
+            wb_ota_history::record(millis() / 1000, WB_VERSION, totalSize, false, Update.errorString());
             http.send(500, "text/plain", Update.errorString());
         }
     } else if (upload.status == UPLOAD_FILE_ABORTED) {
@@ -2007,6 +2031,13 @@ static void registerRoutes() {
         configMgr.save();
         http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
         webServer.requestReboot();
+    });
+
+    // /api/ota/history — the last few OTA attempts (newest first)
+    http.on("/api/ota/history", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Cache-Control", "no-store");
+        http.send(200, "application/json", wb_ota_history::toJson());
     });
 
     // /api/logs — last ~16 KB of Serial/telnet output in chronological order.
