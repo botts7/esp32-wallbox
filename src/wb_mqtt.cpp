@@ -631,6 +631,18 @@ void WallboxMQTT::sendDiscovery() {
         "mdi:counter", mt,
         "{{ (value_json.r.e / 1000) | round(1) }}", "kWh", "energy", nullptr, "total_increasing");
 
+    // Charger notifications (from r_not, published every 60s by main.cpp)
+    String notifTopic = baseTopic() + "/response/notifications";
+    const char* nt = notifTopic.c_str();
+
+    publishDiscoveryEntity(*_client, "sensor", "notification_count", "Active Notifications",
+        "mdi:bell-alert-outline", nt,
+        "{{ value_json.count }}");
+
+    publishDiscoveryEntity(*_client, "sensor", "notification_latest", "Latest Notification",
+        "mdi:bell-outline", nt,
+        "{{ value_json.latest or 'None' }}");
+
     // ========== Settings entities (from wallbox/settings merged topic) ==========
     String setTopic = baseTopic() + "/settings";
     const char* sTopic_ = setTopic.c_str();

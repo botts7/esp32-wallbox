@@ -20,6 +20,8 @@
 static uint32_t lastStatusPoll = 0;
 static uint32_t lastRealtimePoll = 0;
 static uint32_t lastGatewayPublish = 0;
+static uint32_t lastNotifPoll = 0;
+static const uint32_t NOTIF_POLL_MS = 60000;  // r_not — once a minute is plenty
 
 // ---- WiFi ----
 static bool connectWiFi() {
@@ -136,6 +138,36 @@ static void pollStatus() {
     }
     // Energy meter on same cycle (lightweight, useful for live monitoring)
     pollMeter();
+}
+
+// Poll charger notifications (r_not) periodically and publish a digest
+// to MQTT for HA. Cheap — runs once a minute. We publish:
+//   - notification count (sensor)
+//   - the first notification's message (text sensor)
+//   - the raw array as JSON attributes
+static void pollNotifications() {
+    if (!wallboxBLE.isConnected()) return;
+    String resp = wallboxBLE.sendCommand(bapi::MET_GET_NOTIFS, "null", 3000);
+    if (resp.isEmpty()) return;
+    JsonDocument d;
+    if (deserializeJson(d, resp) != DeserializationError::Ok) return;
+
+    JsonVariantConst arr = d["r"];
+    size_t count = arr.is<JsonArrayConst>() ? arr.size() : 0;
+    String firstMsg;
+    if (count > 0) {
+        JsonVariantConst n = arr[0];
+        const char* msg = n["message"] | n["msg"] | n["text"] | (const char*)nullptr;
+        if (msg) firstMsg = msg;
+    }
+
+    JsonDocument out;
+    out["count"] = count;
+    out["latest"] = firstMsg;
+    out["items"] = arr;  // full array for HA attributes
+    String payload;
+    serializeJson(out, payload);
+    wallboxMQTT.publishResponse("notifications", payload);
 }
 
 static void pollRealtime() {
@@ -416,6 +448,11 @@ void loop() {
         if (now - lastGatewayPublish >= 60000) {
             lastGatewayPublish = now;
             publishGatewayInfo();
+        }
+
+        if (now - lastNotifPoll >= NOTIF_POLL_MS) {
+            lastNotifPoll = now;
+            pollNotifications();
         }
     }
 

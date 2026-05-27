@@ -62,6 +62,11 @@ size_t TelnetLog::write(uint8_t c) {
         }
     }
     _lastByte = c;
+    // Append to the in-RAM ring buffer (raw byte — no CR injection, so
+    // /api/logs returns clean LF-terminated text the web can render).
+    _buf[_head] = (char)c;
+    _head = (_head + 1) % BUFFER_SIZE;
+    if (_head == 0) _wrapped = true;
     return 1;
 }
 
@@ -82,5 +87,29 @@ size_t TelnetLog::write(const uint8_t* buf, size_t len) {
         if (start < len) _clients[i].write(buf + start, len - start);
     }
     if (len > 0) _lastByte = buf[len - 1];
+    // Mirror into ring buffer
+    for (size_t i = 0; i < len; i++) {
+        _buf[_head] = (char)buf[i];
+        _head = (_head + 1) % BUFFER_SIZE;
+        if (_head == 0) _wrapped = true;
+    }
     return len;
+}
+
+size_t TelnetLog::copyBuffer(String& out) const {
+    out = "";
+    if (!_wrapped) {
+        if (_head == 0) return 0;
+        out.reserve(_head);
+        for (size_t i = 0; i < _head; i++) out += _buf[i];
+        return _head;
+    }
+    // Wrapped: oldest byte is at _head, newest is just before it.
+    // Walk forward from _head and we recover chronological order.
+    out.reserve(BUFFER_SIZE);
+    for (size_t i = 0; i < BUFFER_SIZE; i++) {
+        size_t idx = (_head + i) % BUFFER_SIZE;
+        out += _buf[idx];
+    }
+    return BUFFER_SIZE;
 }

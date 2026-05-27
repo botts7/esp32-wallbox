@@ -1928,6 +1928,118 @@ static void registerRoutes() {
         wallboxBLE.dismissFirmwareChange();
         http.send(200, "application/json", "{\"ok\":true}");
     });
+    // /api/config/export — returns the gateway's NVS config as JSON, with
+    // passwords/PINs masked. Safe to share for support/backup.
+    http.on("/api/config/export", []() {
+        if (!checkAuth()) return;
+        const WBConfig& c = configMgr.get();
+        JsonDocument d;
+        d["version"] = 1;
+        d["exported_at"] = millis() / 1000;
+        d["wifi_ssid"]   = c.wifiSSID;
+        d["wifi_pass"]   = c.wifiPass.length() ? "***" : "";
+        d["mqtt_host"]   = c.mqttHost;
+        d["mqtt_port"]   = c.mqttPort;
+        d["mqtt_user"]   = c.mqttUser;
+        d["mqtt_pass"]   = c.mqttPass.length() ? "***" : "";
+        d["mqtt_cid"]    = c.mqttClientId;
+        d["ble_addr"]    = c.bleAddr;
+        d["ble_pin"]     = c.blePin.length() ? "***" : "";
+        d["ble_svc"]     = c.bleService;
+        d["ble_chr"]     = c.bleChar;
+        d["ble_txchr"]   = c.bleTxChar;
+        d["chg_model"]   = c.chargerModel;
+        d["auth_enabled"]= c.authEnabled;
+        d["auth_user"]   = c.authUser;
+        d["auth_pass"]   = c.authPass.length() ? "***" : "";
+        d["poll_status"] = c.statusPollMs;
+        d["poll_rt"]     = c.realtimePollMs;
+        d["ha_prefix"]   = c.haDiscoveryPrefix;
+        d["ha_devid"]    = c.haDeviceId;
+        String body;
+        serializeJsonPretty(d, body);
+        http.sendHeader("Content-Disposition", "attachment; filename=\"wallbox-config.json\"");
+        http.send(200, "application/json", body);
+    });
+
+    // /api/config/import — POST a JSON payload to restore config. Values
+    // equal to "***" are skipped (preserves the existing secret). The
+    // gateway reboots after a successful import.
+    http.on("/api/config/import", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        if (!checkCsrf()) return;
+        if (!http.hasArg("plain")) {
+            http.send(400, "application/json", "{\"ok\":false,\"error\":\"missing body\"}");
+            return;
+        }
+        JsonDocument d;
+        if (deserializeJson(d, http.arg("plain")) != DeserializationError::Ok) {
+            http.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid JSON\"}");
+            return;
+        }
+        auto take = [&](JsonVariantConst v, String& dst) {
+            if (v.is<const char*>()) {
+                const char* s = v.as<const char*>();
+                if (strcmp(s, "***") != 0) dst = s;
+            }
+        };
+        WBConfig& c = configMgr.mut();
+        take(d["wifi_ssid"],   c.wifiSSID);
+        take(d["wifi_pass"],   c.wifiPass);
+        take(d["mqtt_host"],   c.mqttHost);
+        if (d["mqtt_port"].is<uint16_t>()) c.mqttPort = d["mqtt_port"].as<uint16_t>();
+        take(d["mqtt_user"],   c.mqttUser);
+        take(d["mqtt_pass"],   c.mqttPass);
+        take(d["mqtt_cid"],    c.mqttClientId);
+        take(d["ble_addr"],    c.bleAddr);
+        take(d["ble_pin"],     c.blePin);
+        take(d["ble_svc"],     c.bleService);
+        take(d["ble_chr"],     c.bleChar);
+        take(d["ble_txchr"],   c.bleTxChar);
+        take(d["chg_model"],   c.chargerModel);
+        if (d["auth_enabled"].is<bool>()) c.authEnabled = d["auth_enabled"].as<bool>();
+        take(d["auth_user"],   c.authUser);
+        take(d["auth_pass"],   c.authPass);
+        if (d["poll_status"].is<uint32_t>()) c.statusPollMs = d["poll_status"].as<uint32_t>();
+        if (d["poll_rt"].is<uint32_t>())     c.realtimePollMs = d["poll_rt"].as<uint32_t>();
+        take(d["ha_prefix"],   c.haDiscoveryPrefix);
+        take(d["ha_devid"],    c.haDeviceId);
+        configMgr.save();
+        http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+        webServer.requestReboot();
+    });
+
+    // /api/logs — last ~16 KB of Serial/telnet output in chronological order.
+    // Plain text so it's trivially curlable; auth-gated when web auth is on.
+    http.on("/api/logs", []() {
+        if (!checkAuth()) return;
+        String body;
+        Log.copyBuffer(body);
+        http.sendHeader("Cache-Control", "no-store");
+        http.send(200, "text/plain; charset=utf-8", body);
+    });
+    // /logs — auto-refreshing viewer
+    http.on("/logs", []() {
+        if (!checkAuth()) return;
+        String page = htmlHead("Logs");
+        page += "<h1>&#x1F4DC; Gateway Log</h1>";
+        page += "<p style='color:var(--text3);font-size:.82em'>Last 16 KB of serial/telnet output. Auto-refreshes every 5s; scroll-locks to bottom unless you scroll up.</p>";
+        page += "<pre id='log' style='background:var(--bg);border-radius:8px;padding:10px;font-size:.78em;max-height:70vh;overflow:auto;white-space:pre-wrap;line-height:1.35'></pre>";
+        page += "<script>(function(){"
+                "var el=document.getElementById('log');"
+                "var stick=true;"
+                "el.addEventListener('scroll',function(){"
+                  "stick=(el.scrollHeight-el.scrollTop-el.clientHeight)<8;"
+                "});"
+                "function load(){fetch('/api/logs',{cache:'no-store'})"
+                  ".then(function(r){return r.text()})"
+                  ".then(function(t){el.textContent=t;if(stick)el.scrollTop=el.scrollHeight})"
+                  ".catch(function(){});}"
+                "load();setInterval(load,5000);"
+                "})();</script>";
+        page += htmlFoot("/info");
+        http.send(200, "text/html", page);
+    });
     // Health endpoint — returns 200 only when the gateway is in a stable,
     // healthy state. Used by OTA tooling to confirm the previous flash
     // actually worked before attempting another. Returns 503 with a JSON
