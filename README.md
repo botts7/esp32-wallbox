@@ -47,6 +47,29 @@ Home Assistant  ◄──MQTT──►  ESP32 Gateway  ◄──BLE (BAPI)──
 The ESP32 sits within Bluetooth range (~10m) of your charger, maintains a persistent BLE
 connection, and bridges BLE commands to MQTT with full Home Assistant auto-discovery.
 
+### Two valid architectures — pick the one that fits
+
+This project takes the **smart-gateway** route: the ESP32 runs the full BAPI
+protocol + BGX bridge handling + status / control / discovery and publishes to
+your MQTT broker. There's also an alternative community path that uses an
+**HA Bluetooth Proxy** (any ESPHome-based ESP32 with `bluetooth_proxy`) +
+[`jagheterfredrik/wallbox-ble`](https://github.com/jagheterfredrik/wallbox-ble)
+as a Python HA custom component — in that model the proxy is a dumb radio
+relay and HA itself does the BLE talking.
+
+|  | This gateway | HA BLE Proxy + wallbox-ble |
+|---|---|---|
+| Protocol implementation | C++ on ESP32 | Python in HA |
+| MQTT broker | Used | Not used |
+| Survives HA being offline | ✓ keeps publishing | ✗ |
+| Standalone (no HA needed) | ✓ | ✗ |
+| Multi-charger | future (v3.0) | trivial — one proxy can see many |
+| Upgrade path for new BAPI methods | firmware OTA | Python update |
+| Diagnostic surface | telnet, `/api/logs`, GATT dump in firmware | HA logs |
+
+Both work; choose based on whether you want the gateway to be self-contained
+(this project) or HA-centric (the proxy path).
+
 ## Features
 
 ### Live monitoring

@@ -317,6 +317,10 @@ static void handleBleScan() {
 }
 
 static void handleWifiScan() {
+    // Auth not required in AP mode (otherwise users can't pick a WiFi
+    // during initial setup). When in STA mode (already connected),
+    // require auth to avoid leaking nearby SSIDs to anyone on the LAN.
+    if (WiFi.getMode() != WIFI_AP && !checkAuth()) return;
     // Ensure STA is enabled for scanning (AP-only mode can't scan)
     wifi_mode_t mode = WiFi.getMode();
     if (mode == WIFI_AP) WiFi.mode(WIFI_AP_STA);
@@ -378,6 +382,7 @@ static void handleApiStatus() {
 }
 
 static void handleBlePause() {
+    if (!checkAuth()) return;
     uint32_t ms = 5 * 60 * 1000;  // default 5 min
     if (http.hasArg("ms")) ms = (uint32_t) http.arg("ms").toInt();
     if (ms < 30000) ms = 30000;        // min 30s
@@ -1784,6 +1789,16 @@ static void handleOtaUpload() {
     static bool otaError = false;
 
     if (upload.status == UPLOAD_FILE_START) {
+        // SECURITY — auth check must happen BEFORE the admission guard,
+        // BEFORE Update.begin() erases the partition. Without this anyone
+        // on the WiFi can flash arbitrary firmware and brick or backdoor
+        // the gateway. checkAuth() is a no-op when web auth isn't
+        // enabled (matches the rest of the API surface).
+        if (!checkAuth()) {
+            Log.println("[OTA] REJECTED: unauthenticated");
+            otaError = true;
+            return;
+        }
         // Admission guard — reject if the gateway hasn't been healthy long
         // enough or another OTA is in progress. Prevents flash-storms
         // (rapid back-to-back OTAs colliding with the post-reboot
@@ -1949,6 +1964,7 @@ static void registerRoutes() {
     http.on("/api/charger", handleApiCharger);
     http.on("/api/command", handleApiCommand);
     http.on("/api/fw/dismiss", HTTP_POST, []() {
+        if (!checkAuth()) return;
         wallboxBLE.dismissFirmwareChange();
         http.send(200, "application/json", "{\"ok\":true}");
     });
