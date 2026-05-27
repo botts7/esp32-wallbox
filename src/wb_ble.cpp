@@ -305,6 +305,40 @@ void WallboxBLE::_connect() {
 
     Log.println("[BLE] Notifications enabled");
 
+    // BGX13P / BGXSS stream-mode switch.
+    // Pulsar Plus (and Copper SB / Quasar) use a Silicon Labs BGX13P module
+    // as a Bluetooth-to-UART bridge to the Wallbox firmware. The BGX has a
+    // "Mode" characteristic (UUID 75a9f022-af03-4e41-b4bc-9de90a47d50b) that
+    // selects between STREAM_MODE (1, data passthrough) and REMOTE_COMMAND_
+    // MODE (3, our writes interpreted as BGX commands and dropped before
+    // reaching Wallbox). Default depends on BGX firmware config — some
+    // boards boot STREAM, others REMOTE_COMMAND. Force STREAM_MODE so our
+    // BAPI bytes always reach the charger MCU.
+    //
+    // Plus-family only — MAX uses u-blox single-char and doesn't have this.
+    if (isPlus()) {
+        static const char* BGX_MODE_UUID = "75a9f022-af03-4e41-b4bc-9de90a47d50b";
+        NimBLERemoteCharacteristic* modeChr = svc->getCharacteristic(BGX_MODE_UUID);
+        if (modeChr) {
+            std::string current = modeChr->readValue();
+            uint8_t curMode = current.length() > 0 ? (uint8_t)current[0] : 0xff;
+            Log.printf("[BLE] BGX mode char found, current value: 0x%02x\n", curMode);
+            if (curMode != 0x01) {  // 1 = STREAM_MODE per Silicon Labs BGXpress
+                uint8_t streamMode = 0x01;
+                if (modeChr->writeValue(&streamMode, 1, true)) {
+                    Log.println("[BLE] BGX switched to STREAM_MODE — BAPI passthrough enabled");
+                    delay(200);  // give the BGX a beat to honour the mode change
+                } else {
+                    Log.println("[BLE] BGX mode write failed — BAPI may not pass through");
+                }
+            } else {
+                Log.println("[BLE] BGX already in STREAM_MODE");
+            }
+        } else {
+            Log.println("[BLE] BGX mode char not found — assuming non-BGX peripheral");
+        }
+    }
+
     // Read GATT Device Info service (0x180A) if present
     NimBLERemoteService* devInfo = _client->getService("180a");
     if (devInfo) {
@@ -495,6 +529,22 @@ bool WallboxBLE::_authenticate() {
 void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_t len, bool isNotify) {
     if (!_instance) return;
     _instance->_rxCount++;
+
+    // Diagnostic — log raw bytes when the frame doesn't start with the BAPI
+    // magic ("EaE"). Catches BGX command-mode error responses ("ERR\r\n",
+    // "ready\r\n" etc.) that the BAPI parser would otherwise silently
+    // discard. Only logs non-BAPI frames so normal traffic stays quiet.
+    if (len > 0 && !(len >= 3 && data[0] == 'E' && data[1] == 'a' && data[2] == 'E')) {
+        String hex, ascii;
+        size_t show = len < 32 ? len : 32;
+        for (size_t i = 0; i < show; i++) {
+            char buf[4];
+            snprintf(buf, sizeof(buf), "%02x ", data[i]);
+            hex += buf;
+            ascii += (data[i] >= 0x20 && data[i] < 0x7f) ? (char)data[i] : '.';
+        }
+        Log.printf("[BLE] RX raw (%u): %s|%s\n", (unsigned)len, hex.c_str(), ascii.c_str());
+    }
 
     bool complete = _instance->_parser.feed(data, len);
     if (complete) {
