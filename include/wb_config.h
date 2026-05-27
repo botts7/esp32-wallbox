@@ -40,6 +40,10 @@ struct WBConfig {
     // HA
     String haDiscoveryPrefix = "homeassistant";
     String haDeviceId = "wallbox_pulsar_max";
+
+    // Last-seen charger firmware string (GATT 0x180A 0x2A26).
+    // Used to detect Wallbox-pushed auto-OTAs across our reboots.
+    String lastSeenFw;
 };
 
 class ConfigManager {
@@ -63,6 +67,25 @@ public:
 
     // Get mutable config (for web UI updates)
     WBConfig& mut() { return _cfg; }
+
+    // True when the configured model uses the Plus-family BLE protocol
+    // (dual-char Nordic UART variant, 0-18 status enum, no BAPI PIN).
+    // Plus, Copper SB, Quasar / Quasar 2 all live here.
+    bool isPlusFamily() const {
+        const String& m = _cfg.chargerModel;
+        return m == "plus" || m == "copper" || m == "quasar" || m == "quasar2";
+    }
+
+    // Friendly product name for the configured model — shown in HA device card
+    // and elsewhere in the UI. Returns ("Wallbox <name>", "<name>") pair.
+    void productName(const char*& fullName, const char*& shortName) const {
+        const String& m = _cfg.chargerModel;
+        if      (m == "plus")    { fullName = "Wallbox Pulsar Plus"; shortName = "Pulsar Plus"; }
+        else if (m == "copper")  { fullName = "Wallbox Copper SB";   shortName = "Copper SB"; }
+        else if (m == "quasar")  { fullName = "Wallbox Quasar";      shortName = "Quasar"; }
+        else if (m == "quasar2") { fullName = "Wallbox Quasar 2";    shortName = "Quasar 2"; }
+        else                     { fullName = "Wallbox Pulsar MAX";  shortName = "Pulsar MAX"; }
+    }
 
     // Reset all config to defaults
     void reset();

@@ -11,6 +11,7 @@
 #include "wb_web.h"
 #include "wb_ws.h"
 #include "wb_log.h"
+#include "wb_health.h"
 #include "wb_version.h"
 #include "bapi.h"
 #include <ArduinoJson.h>
@@ -193,6 +194,17 @@ void setup() {
         Log.printf("[OTA] Running from: %s (0x%x)\n", running->label, running->address);
     }
 
+    // Bump the boot counter BEFORE anything else might crash. If we've
+    // tried to boot this firmware too many times without reaching a
+    // healthy state, something's wrong — log a warning. (Forcing a
+    // partition swap from here is unsafe at this point in startup; we
+    // just surface the issue so the user/installer sees it.)
+    uint8_t bootN = wb_health::bootCountBumpAndRead();
+    Log.printf("[Health] Boot attempt #%u for this firmware\n", bootN);
+    if (bootN >= wb_health::BOOT_FAIL_THRESHOLD) {
+        Log.printf("[Health] WARNING: %u failed-to-be-healthy boots in a row — current firmware is suspect\n", bootN);
+    }
+
     // Load config from NVS
     configMgr.begin();
 
@@ -338,6 +350,13 @@ void loop() {
 
     // Run WS loop (handle client connects/disconnects + frames)
     wbws::loop();
+
+    // Mark healthy once WiFi is connected AND we've been up > 30s.
+    // Healthy = clears the boot counter and tells ESP OTA layer the
+    // partition is good (no rollback on next boot). Only fires once.
+    if (!wb_health::isHealthy() && WiFi.status() == WL_CONNECTED && millis() > 30000) {
+        wb_health::markHealthy();
+    }
 
     // Broadcast BLE health every 5s to any connected WS clients
     static uint32_t lastHealth = 0;

@@ -3,6 +3,7 @@
 #include "wb_ble.h"
 #include "wb_log.h"
 #include "wb_version.h"
+#include "wb_health.h"
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -363,6 +364,9 @@ static void handleApiStatus() {
     json += ",\"dev_name\":\"" + wallboxBLE.deviceName() + "\"";
     json += ",\"chg_sn\":\"" + wallboxBLE.chargerSerial() + "\"";
     json += ",\"chg_mac\":\"" + wallboxBLE.chargerMac() + "\"";
+    json += ",\"chg_grounding\":\"" + wallboxBLE.chargerGrounding() + "\"";
+    json += ",\"chg_fw_changed\":" + String(wallboxBLE.firmwareChanged() ? "true" : "false");
+    json += ",\"chg_fw_prev\":\"" + wallboxBLE.previousFirmware() + "\"";
     json += ",\"ble_paused\":" + String(wallboxBLE.isPaused() ? "true" : "false");
     json += ",\"ble_pause_remaining\":" + String(wallboxBLE.pauseRemainingMs() / 1000);
     json += ",\"ble_last_activity_s\":" + String(wallboxBLE.lastActivityAge() / 1000);
@@ -452,7 +456,7 @@ static void handleDashboard() {
 <div id='pg' style='display:none'>
 <h1>&#x26A1; Wallbox</h1>
 <div id='auth-warn' style='display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#f59e0b'>&#x26A0; No web password set — anyone on your WiFi can control this charger. <a href='/config' style='color:#f59e0b;text-decoration:underline'>Set one</a></div>
-<div id='pin-warn' style='display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#f59e0b'>&#x26A0; No BLE PIN set — anyone nearby can control your charger. <a href='/settings' style='color:#f59e0b;text-decoration:underline'>Set a PIN</a></div>
+<div id='pin-warn' style='display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#f59e0b'>&#x26A0; No Bluetooth Passcode set on the charger — anyone nearby could pair to it. Set one in the Wallbox app, then copy it into the gateway's <a href='/config' style='color:#f59e0b;text-decoration:underline'>config page</a>.</div>
 <div id='ble-health' style='display:none;border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em'></div>
 <div id='notif-bar' style='display:none;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#ef4444;cursor:pointer' onclick='showNotifs()'>&#x1F514; <span id='notif-count'></span> charger notification(s) — tap to view</div>
 <div id='notif-modal' style='display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:300;align-items:center;justify-content:center;padding:16px' onclick='if(event.target===this)this.style.display=\"none\"'><div id='notif-modal-inner' style='background:var(--card);border-radius:12px;max-width:480px;width:100%;max-height:80vh;overflow:auto;padding:16px'></div></div>
@@ -492,7 +496,8 @@ static void handleDashboard() {
 )HTML";
     // Status-code map depends on charger model — Plus uses 0-18 enum (per
     // jagheterfredrik/wallbox-ble); MAX uses sparse hardware codes.
-    if (configMgr.get().chargerModel == "plus") {
+    // Plus-family includes Copper SB, Quasar, Quasar 2 (all share the protocol).
+    if (configMgr.isPlusFamily()) {
         page += "var SN={0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',4:'Paused',5:'Schedule End',6:'Locked',7:'Error',8:'Waiting for Current',9:'Power Sharing (Unconfigured)',10:'Queue (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',13:'MID Safety Margin',14:'OCPP Unavailable',15:'OCPP Finishing',16:'OCPP Reserved',17:'Updating',18:'Queue (Eco Smart)'};\n";
     } else {
         page += "var SN={0:'Disconnected',1:'Connected',2:'Charging',3:'Paused',4:'Scheduled',5:'Discharging',6:'Error',7:'Disconnected',8:'Locked',9:'Updating',10:'Queue (Power)',13:'Waiting for Car',14:'Error',16:'Ready',17:'Connected',18:'Waiting for Schedule',19:'Scheduled',20:'Charging',21:'Charge Complete',22:'Paused by User',23:'Queue (Power Share)',24:'Queue (Eco Smart)',25:'Waiting for Schedule',26:'Discharging',161:'Ready',178:'Paused',179:'Charging',180:'Scheduled',189:'Ready',193:'Paused',194:'Locked',209:'Reserved (OCPP)',210:'Updating'};\n";
@@ -1061,7 +1066,8 @@ static void handleConfig() {
     page += "<div id='scanResults'></div>";
     page += "<label>BLE Address</label><input id='ble_addr' name='ble_addr' value='" + cfg.bleAddr + "' placeholder='6C1DEB309808' oninput='formatMAC(this)'>";
     page += "<p class='help'>With or without colons</p>";
-    page += "<label>BLE PIN</label><input name='ble_pin' value='" + cfg.blePin + "' placeholder='Empty = no PIN'></div>";
+    page += "<label>Bluetooth Passcode <span style='color:var(--text3);font-weight:400'>(also called \"BLE PIN\")</span></label><input name='ble_pin' value='" + cfg.blePin + "' placeholder='Leave blank if your firmware has no passcode'>";
+    page += "<p class='help'>For Pulsar Plus / newer Pulsar MAX firmware (6.11+): open the Wallbox app, go to your charger → Settings, and look for <b>Bluetooth Passcode</b>. Copy that 8-digit code here. On older firmware leave blank.</p></div>";
 
     // Security
     page += "<div class='card'><div class='card-header'><span class='card-icon'>&#x1F512;</span><h2>Web Security</h2></div>";
@@ -1082,8 +1088,11 @@ static void handleConfig() {
     // Advanced
     page += "<details><summary style='color:var(--text3);cursor:pointer;padding:6px 0;font-size:.85em'>Advanced</summary><div class='card'>";
     page += "<label>Charger model</label><select name='chg_model'>";
-    page += String("<option value='max'") + (cfg.chargerModel == "max" ? " selected" : "") + ">Pulsar MAX (default, single-char)</option>";
-    page += String("<option value='plus'") + (cfg.chargerModel == "plus" ? " selected" : "") + ">Pulsar Plus (Nordic UART, dual-char)</option>";
+    page += String("<option value='max'") + (cfg.chargerModel == "max" ? " selected" : "") + ">Pulsar MAX (single-char)</option>";
+    page += String("<option value='plus'") + (cfg.chargerModel == "plus" ? " selected" : "") + ">Pulsar Plus (dual-char)</option>";
+    page += String("<option value='copper'") + (cfg.chargerModel == "copper" ? " selected" : "") + ">Copper SB (Plus protocol — experimental)</option>";
+    page += String("<option value='quasar'") + (cfg.chargerModel == "quasar" ? " selected" : "") + ">Quasar (Plus protocol — experimental)</option>";
+    page += String("<option value='quasar2'") + (cfg.chargerModel == "quasar2" ? " selected" : "") + ">Quasar 2 / V2H (Plus protocol — experimental)</option>";
     page += String("<option value='custom'") + (cfg.chargerModel == "custom" ? " selected" : "") + ">Custom (set UUIDs below)</option>";
     page += "</select>";
     page += "<p class='help'>Picking <b>Pulsar Plus</b> auto-fills the Nordic UART UUIDs on save. Use <b>Custom</b> if you know better.</p>";
@@ -1110,6 +1119,11 @@ static void handleInfo() {
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Info...</div>
 <div id='pg' style='display:none'>
 <h1>&#x2139; Gateway Info</h1>
+
+<div id='fw-changed-banner' style='display:none;background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.30);border-radius:8px;padding:10px;margin-bottom:12px;font-size:.88em;color:#f59e0b'>
+  &#x1F535; <b>Charger firmware changed.</b> <span id='fw-changed-detail'></span>
+  Behaviour may have shifted — keep an eye on the dashboard. <a href='#' onclick='dismissFwBanner();return false' style='color:#f59e0b;text-decoration:underline'>Dismiss</a>
+</div>
 
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F4E1;</span><h2>Gateway</h2></div>
@@ -1181,7 +1195,8 @@ static void handleInfo() {
 <p style='text-align:center;color:var(--text3);font-size:.75em;margin-top:16px'>Wallbox BLE Gateway )HTML" WB_VERSION R"HTML(</p>
 
 <script>
-function loadGW(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){window._lastStatus=d;renderGW(d);var c='';if(d.dev_name)c+=row('Name',d.dev_name);if(d.chg_sn)c+=row('Serial Number',d.chg_sn);if(d.chg_mac)c+=row('Charger MAC',d.chg_mac);if(d.dev_mfg)c+=row('Manufacturer',d.dev_mfg);if(d.dev_model)c+=row('Model',d.dev_model);if(d.dev_fw)c+=row('BLE Module FW',d.dev_fw);document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>'})}
+function loadGW(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){window._lastStatus=d;renderGW(d);var c='';if(d.dev_name)c+=row('Name',d.dev_name);if(d.chg_sn)c+=row('Serial Number',d.chg_sn);if(d.chg_mac)c+=row('Charger MAC',d.chg_mac);if(d.chg_grounding)c+=row('Grounding',d.chg_grounding);if(d.dev_mfg)c+=row('Manufacturer',d.dev_mfg);if(d.dev_model)c+=row('Model',d.dev_model);if(d.dev_fw)c+=row('BLE Module FW',d.dev_fw);document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>';if(d.chg_fw_changed){var b=document.getElementById('fw-changed-banner');var det=document.getElementById('fw-changed-detail');if(b){b.style.display='block';if(det&&d.chg_fw_prev&&d.dev_fw)det.textContent='Was '+d.chg_fw_prev+', now '+d.dev_fw+'.';}}})}
+function dismissFwBanner(){fetch('/api/fw/dismiss',{method:'POST'}).then(function(){var b=document.getElementById('fw-changed-banner');if(b)b.style.display='none'}).catch(function(){})}
 function renderGW(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi Signal',d.wifi_rssi+' dBm');h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h}
 // Live-update the Gateway card off the same WS push the top banner uses,
 // so BLE Signal here can't drift away from the banner's value.
@@ -1216,13 +1231,17 @@ static void handleSave() {
     cfg.bleService = http.arg("ble_svc"); cfg.bleChar = http.arg("ble_chr");
     cfg.bleTxChar = http.arg("ble_txchr");
     cfg.chargerModel = http.arg("chg_model");
-    // Apply preset UUIDs if a model is selected (custom = leave fields as-typed)
+    // Apply preset UUIDs if a model is selected (custom = leave fields as-typed).
+    // Copper SB / Quasar / Quasar 2 use the same dual-char Plus protocol per
+    // jagheterfredrik/wallbox-mqtt-bridge (supports Plus + Copper SB with the
+    // same BAPI surface; Quasar shares the BLE family and adds V2H state codes).
     if (cfg.chargerModel == "max") {
         cfg.bleService = "2456e1b9-26e2-8f83-e744-f34f01e9d701";
         cfg.bleChar    = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
         cfg.bleTxChar  = "";  // single-char mode
-    } else if (cfg.chargerModel == "plus") {
-        // Nordic UART variant used by Pulsar Plus (per jagheterfredrik/wallbox-ble)
+    } else if (cfg.chargerModel == "plus" || cfg.chargerModel == "copper"
+            || cfg.chargerModel == "quasar" || cfg.chargerModel == "quasar2") {
+        // Nordic UART-style variant per jagheterfredrik/wallbox-ble
         cfg.bleService = "331a36f5-2459-45ea-9d95-6142f0c4b307";
         cfg.bleChar    = "a9da6040-0823-4995-94ec-9ce41ca28833";  // RX (write)
         cfg.bleTxChar  = "a73e9a10-628f-4494-a099-12efaf72258f";  // TX (notify)
@@ -1237,8 +1256,33 @@ static void handleSave() {
 
     String page = htmlHead("Saved");
     page += "<div class='card' style='text-align:center'><h2 style='color:var(--success)'>&#x2705; Saved!</h2>";
-    page += "<p style='color:var(--text2);margin-top:10px'>Rebooting...</p><div class='spinner' style='margin:16px auto'></div></div>";
-    page += "</div></body></html>";
+    page += "<p id='wait-msg' style='color:var(--text2);margin-top:10px'>Rebooting gateway...</p>";
+    page += "<div class='spinner' style='margin:16px auto'></div>";
+    page += "<p id='wait-detail' style='color:var(--text3);font-size:.82em;margin-top:8px'>Waiting for it to come back online — this page will reload when it does.</p>";
+    page += "</div>";
+    // Poll the gateway every 2s until it responds, then redirect to the
+    // dashboard. Gives ~2 min of patience for slow reboots; after that
+    // shows a manual link so the user isn't stuck on the spinner forever.
+    page += "<script>(function(){"
+            "var n=0,max=60,started=Date.now();"
+            "var msg=document.getElementById('wait-msg');"
+            "var det=document.getElementById('wait-detail');"
+            "function tick(){"
+              "n++;"
+              "var s=Math.round((Date.now()-started)/1000);"
+              "fetch('/api/status',{cache:'no-store'}).then(function(r){"
+                "if(r.ok){if(msg)msg.textContent='Back online \\u2014 redirecting...';location.replace('/');}"
+                "else throw new Error();"
+              "}).catch(function(){"
+                "if(det)det.textContent='Still waiting... ('+s+'s)';"
+                "if(n<max)setTimeout(tick,2000);"
+                "else{if(msg)msg.textContent='Gateway not responding';"
+                "if(det)det.innerHTML='Try the <a href=\"/\">dashboard</a> manually \\u2014 if that fails, the gateway may need a power cycle.';}"
+              "});"
+            "}"
+            "setTimeout(tick,5000);"
+            "})();</script>";
+    page += "</body></html>";
     http.send(200, "text/html", page);
     webServer.requestReboot();
 }
@@ -1711,6 +1755,7 @@ document.getElementById('ld').style.display='none';document.getElementById('pg')
 }
 
 bool otaInProgress = false;
+static size_t expectedOtaSize = 0;  // Content-Length captured at FILE_START for truncation check
 
 static void handleOtaUpload() {
     HTTPUpload& upload = http.upload();
@@ -1718,6 +1763,22 @@ static void handleOtaUpload() {
     static bool otaError = false;
 
     if (upload.status == UPLOAD_FILE_START) {
+        // Admission guard — reject if the gateway hasn't been healthy long
+        // enough or another OTA is in progress. Prevents flash-storms
+        // (rapid back-to-back OTAs colliding with the post-reboot
+        // settling window) and re-entrant uploads.
+        if (otaInProgress) {
+            Log.println("[OTA] REJECTED: another OTA already in progress");
+            otaError = true;
+            return;
+        }
+        String reason;
+        if (!wb_health::canAcceptOta(reason)) {
+            Log.printf("[OTA] REJECTED: %s\n", reason.c_str());
+            otaError = true;
+            return;
+        }
+
         Log.printf("[OTA] Upload start: %s\n", upload.filename.c_str());
         totalSize = 0;
         otaError = false;
@@ -1748,6 +1809,16 @@ static void handleOtaUpload() {
             Log.printf("[OTA] Target partition: %s (%u bytes), expected upload: %u\n",
                        partition->label, partition->size, (unsigned)expected);
         }
+        // Sanity: Content-Length must fit the OTA partition with some margin.
+        // Refusing here means we never erase if the upload is clearly bogus.
+        if (partition && expected > 0 && expected > partition->size) {
+            Log.printf("[OTA] REJECTED: payload (%u) larger than partition (%u)\n",
+                       (unsigned)expected, (unsigned)partition->size);
+            otaError = true;
+            otaInProgress = false;
+            return;
+        }
+        expectedOtaSize = expected;
 
         bool ok = expected > 0 ? Update.begin(expected) : Update.begin(UPDATE_SIZE_UNKNOWN);
         if (!ok) {
@@ -1772,6 +1843,20 @@ static void handleOtaUpload() {
         totalSize += upload.currentSize;
     } else if (upload.status == UPLOAD_FILE_END) {
         otaInProgress = false;
+        // Truncation check — if we received fewer bytes than Content-Length
+        // promised, refuse to commit. Otherwise `Update.end(true)` will
+        // happily mark a partial OTA partition as valid and brick the device.
+        // Tolerance: ±256 bytes for the multipart envelope.
+        if (!otaError && expectedOtaSize > 0) {
+            size_t diff = (totalSize < expectedOtaSize)
+                            ? expectedOtaSize - totalSize
+                            : totalSize - expectedOtaSize;
+            if (diff > 256) {
+                Log.printf("[OTA] TRUNCATED: expected ~%u bytes, got %u — aborting\n",
+                    (unsigned)expectedOtaSize, (unsigned)totalSize);
+                otaError = true;
+            }
+        }
         if (otaError) {
             Update.abort();
             Log.println("[OTA] Aborted due to errors");
@@ -1784,6 +1869,16 @@ static void handleOtaUpload() {
         } else {
             Log.printf("[OTA] End failed: %s\n", Update.errorString());
             http.send(500, "text/plain", Update.errorString());
+        }
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+        // Client (or our admission guard) bailed mid-flow. Make sure we
+        // don't leave Update.begin()'s erased partition in a half-committed
+        // state — abort it explicitly so the bootloader keeps booting the
+        // current healthy partition.
+        if (otaInProgress) {
+            Update.abort();
+            otaInProgress = false;
+            Log.println("[OTA] Upload aborted by client — partition left untouched");
         }
     }
 }
@@ -1829,6 +1924,25 @@ static void registerRoutes() {
     http.on("/api/ble/pause", handleBlePause);
     http.on("/api/charger", handleApiCharger);
     http.on("/api/command", handleApiCommand);
+    http.on("/api/fw/dismiss", HTTP_POST, []() {
+        wallboxBLE.dismissFirmwareChange();
+        http.send(200, "application/json", "{\"ok\":true}");
+    });
+    // Health endpoint — returns 200 only when the gateway is in a stable,
+    // healthy state. Used by OTA tooling to confirm the previous flash
+    // actually worked before attempting another. Returns 503 with a JSON
+    // reason otherwise.
+    http.on("/api/health", []() {
+        String reason;
+        bool ok = wb_health::canAcceptOta(reason);
+        if (ok) {
+            http.send(200, "application/json",
+                "{\"ok\":true,\"uptime\":" + String(millis()/1000) + "}");
+        } else {
+            String body = "{\"ok\":false,\"reason\":\"" + reason + "\",\"uptime\":" + String(millis()/1000) + "}";
+            http.send(503, "application/json", body);
+        }
+    });
     http.on("/ota", handleOtaPage);
     http.on("/api/ota", HTTP_POST, []() {}, handleOtaUpload);
     http.on("/sessions", handleSessionsPage);

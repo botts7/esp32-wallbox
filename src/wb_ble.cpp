@@ -1,5 +1,6 @@
 #include "wb_ble.h"
 #include "wb_log.h"
+#include "wb_config.h"
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 
@@ -218,6 +219,32 @@ void WallboxBLE::_connect() {
     _client->updateConnParams(30, 50, 2, 300);
     delay(200);
 
+    // Enumerate the entire GATT tree once per connect — helps diagnose
+    // future UUID rotations or new firmware exposing new endpoints.
+    // Cheap (one-shot at connect, output is short).
+    {
+        std::vector<NimBLERemoteService*>* svcs = _client->getServices(true);
+        if (svcs) {
+            Log.printf("[BLE] GATT topology: %u service(s)\n", (unsigned)svcs->size());
+            for (auto* s : *svcs) {
+                Log.printf("[BLE]   svc %s\n", s->getUUID().toString().c_str());
+                std::vector<NimBLERemoteCharacteristic*>* chars = s->getCharacteristics(true);
+                if (!chars) continue;
+                for (auto* c : *chars) {
+                    String props;
+                    if (c->canRead())     props += "R";
+                    if (c->canWrite())    props += "W";
+                    if (c->canWriteNoResponse()) props += "w";
+                    if (c->canNotify())   props += "N";
+                    if (c->canIndicate()) props += "I";
+                    Log.printf("[BLE]     chr %s  [%s]\n",
+                        c->getUUID().toString().c_str(),
+                        props.length() ? props.c_str() : "-");
+                }
+            }
+        }
+    }
+
     // Discover services
     NimBLERemoteService* svc = _client->getService(_svcUUID.c_str());
     if (!svc) {
@@ -287,6 +314,21 @@ void WallboxBLE::_connect() {
         if ((c = devInfo->getCharacteristic("2a26")) != nullptr) _devFw = c->readValue().c_str();
         Log.printf("[BLE] Device: %s / %s / FW %s\n",
             _devMfg.c_str(), _devModel.c_str(), _devFw.c_str());
+
+        // Detect Wallbox auto-OTAs by comparing against the persisted baseline.
+        // First boot (saved == "") seeds silently — no banner for the initial sighting.
+        if (_devFw.length() > 0) {
+            const String& saved = configMgr.get().lastSeenFw;
+            if (saved.length() > 0 && saved != _devFw) {
+                Log.printf("[BLE] Charger FW CHANGED: %s -> %s\n", saved.c_str(), _devFw.c_str());
+                _prevFw = saved;
+                _fwChanged = true;
+            }
+            if (saved != _devFw) {
+                configMgr.mut().lastSeenFw = _devFw;
+                configMgr.save();
+            }
+        }
     }
     // Also read generic Device Name (0x1800 / 0x2a00)
     NimBLERemoteService* ga = _client->getService("1800");
@@ -321,16 +363,50 @@ void WallboxBLE::_connect() {
         if (!macResp.isEmpty()) {
             JsonDocument d;
             if (deserializeJson(d, macResp) == DeserializationError::Ok) {
-                // Spec varies — try a few field shapes
-                if (d["r"].is<const char*>())            _chgMac = d["r"].as<const char*>();
-                else if (d["r"]["wifi"].is<const char*>())  _chgMac = d["r"]["wifi"].as<const char*>();
-                else if (d["r"]["mac"].is<const char*>())   _chgMac = d["r"]["mac"].as<const char*>();
+                // Spec varies across firmware. MAX returns a FLAT object:
+                //   {"eth_mac":"...","wlan_mac":"...","id":N}
+                // Plus/Copper likely wrap under "r". Try both shapes;
+                // prefer wlan_mac (BLE radio shares the WiFi chip).
+                auto pickMac = [](JsonVariantConst obj) -> const char* {
+                    if (obj["wlan_mac"].is<const char*>()) return obj["wlan_mac"].as<const char*>();
+                    if (obj["wifi"].is<const char*>())     return obj["wifi"].as<const char*>();
+                    if (obj["mac"].is<const char*>())      return obj["mac"].as<const char*>();
+                    if (obj["eth_mac"].is<const char*>())  return obj["eth_mac"].as<const char*>();
+                    return nullptr;
+                };
+                const char* m = pickMac(d["r"]);
+                if (!m || strlen(m) == 0 || strcmp(m, "0") == 0) m = pickMac(d.as<JsonVariantConst>());
+                if (m && strlen(m) > 0 && strcmp(m, "0") != 0) _chgMac = m;
             }
         }
         if (_chgSerial.length() || _chgMac.length()) {
             Log.printf("[BLE] Charger SN: %s  MAC: %s\n",
                 _chgSerial.length() ? _chgSerial.c_str() : "(none)",
                 _chgMac.length() ? _chgMac.c_str() : "(none)");
+        }
+
+        // Grounding status (r_wel) — universal safety diagnostic. The
+        // response format varies (some firmware returns plain "ok"/"fault",
+        // others return a JSON object {"r":{...}}) — store whatever we get
+        // so the UI can do best-effort display.
+        String welResp = sendCommand(bapi::MET_GET_GROUNDING, "null", 2000);
+        if (!welResp.isEmpty()) {
+            JsonDocument d;
+            if (deserializeJson(d, welResp) == DeserializationError::Ok) {
+                if (d["r"].is<const char*>()) {
+                    _chgGrounding = d["r"].as<const char*>();
+                } else if (d["r"]["status"].is<const char*>()) {
+                    _chgGrounding = d["r"]["status"].as<const char*>();
+                } else if (d["r"]["grounding"].is<const char*>()) {
+                    _chgGrounding = d["r"]["grounding"].as<const char*>();
+                } else if (d["r"].is<int>()) {
+                    // Integer status — 0 typically = OK / no fault
+                    _chgGrounding = (d["r"].as<int>() == 0) ? "OK" : "Fault";
+                }
+            }
+            if (_chgGrounding.length()) {
+                Log.printf("[BLE] Grounding: %s\n", _chgGrounding.c_str());
+            }
         }
 
         Log.println("[BLE] Ready");

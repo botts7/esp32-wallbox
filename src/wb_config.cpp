@@ -33,6 +33,7 @@ void ConfigManager::load() {
     _cfg.realtimePollMs = _prefs.getULong("poll_rt", 30000);
     _cfg.haDiscoveryPrefix = _prefs.getString("ha_prefix", "homeassistant");
     _cfg.haDeviceId   = _prefs.getString("ha_devid", "wallbox_pulsar_max");
+    _cfg.lastSeenFw   = _prefs.getString("last_fw", "");
 
     Log.println("[Config] Loaded from NVS:");
     Log.printf("  WiFi: %s\n", _cfg.wifiSSID.c_str());
@@ -62,6 +63,7 @@ void ConfigManager::save() {
     _prefs.putULong("poll_rt", _cfg.realtimePollMs);
     _prefs.putString("ha_prefix", _cfg.haDiscoveryPrefix);
     _prefs.putString("ha_devid", _cfg.haDeviceId);
+    _prefs.putString("last_fw", _cfg.lastSeenFw);
     Log.println("[Config] Saved to NVS");
 }
 

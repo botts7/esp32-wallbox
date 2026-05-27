@@ -49,11 +49,15 @@ public:
         _svcUUID = svc; _chrUUID = chr; _txChrUUID = (txChr && *txChr) ? txChr : "";
     }
 
-    // Charger model — drives auth model + keepalive choice
-    // "max"  → MAX/Copper: read_pin/set_pin BAPI auth, `ping` keepalive
-    // "plus" → Plus: SMP-only auth (no BAPI PIN), `r_dat` keepalive
+    // Charger model — drives auth model + keepalive choice.
+    // Plus-family ("plus", "copper", "quasar", "quasar2") all share the
+    // Nordic-UART-style dual-char protocol per jagheterfredrik/wallbox-ble
+    // and -mqtt-bridge: no BAPI PIN, `r_dat` keepalive, Plus 0-18 status enum.
     void setChargerModel(const char* m) { _chargerModel = (m && *m) ? m : "max"; }
-    bool isPlus() const { return _chargerModel == "plus"; }
+    bool isPlus() const {
+        return _chargerModel == "plus" || _chargerModel == "copper"
+            || _chargerModel == "quasar" || _chargerModel == "quasar2";
+    }
 
     // Responses
     String lastResponse() const { return _lastResponse; }
@@ -80,6 +84,16 @@ public:
     // Charger-reported identity (read post-connect via BAPI r_sn_ / g_mac)
     String chargerSerial() const { return _chgSerial; }
     String chargerMac() const { return _chgMac; }
+    // Grounding status (r_wel) — universal safety diagnostic.
+    // Empty if not yet polled / not supported on this firmware.
+    String chargerGrounding() const { return _chgGrounding; }
+
+    // Firmware-change tracking — set when the GATT-reported FW differs
+    // from the value persisted from the previous boot. Catches Wallbox
+    // silent auto-OTAs that change behaviour overnight.
+    bool firmwareChanged() const { return _fwChanged; }
+    String previousFirmware() const { return _prevFw; }
+    void dismissFirmwareChange() { _fwChanged = false; _prevFw = ""; }
 
 private:
     void _connect();
@@ -139,8 +153,10 @@ private:
     uint32_t _rxCount = 0;
     int _scanRSSI = -127;
     String _devMfg, _devModel, _devFw, _devName;
-    String _chgSerial, _chgMac;
+    String _chgSerial, _chgMac, _chgGrounding;
     String _chargerModel = "max";
+    String _prevFw;
+    bool _fwChanged = false;
 
     int _nextId = 1;
 };

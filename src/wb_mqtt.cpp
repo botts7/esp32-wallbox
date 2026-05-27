@@ -44,10 +44,11 @@ static void publishDiscoveryEntity(PubSubClient& mqtt, const char* component,
     JsonObject dev = doc["device"].to<JsonObject>();
     dev["identifiers"][0] = configMgr.get().haDeviceId;
     {
-        bool _isPlus = (configMgr.get().chargerModel == "plus");
-        dev["name"] = _isPlus ? "Wallbox Pulsar Plus" : "Wallbox Pulsar MAX";
+        const char* _fullName = nullptr; const char* _shortName = nullptr;
+        configMgr.productName(_fullName, _shortName);
+        dev["name"] = _fullName;
         dev["manufacturer"] = "Wallbox";
-        dev["model"] = _isPlus ? "Pulsar Plus" : "Pulsar MAX";
+        dev["model"] = _shortName;
     }
     dev["sw_version"] = "6.11.16";
     // No via_device — the ESP32 gateway IS the device
@@ -82,10 +83,11 @@ static void publishDiscoverySwitch(PubSubClient& mqtt, const char* objectId,
     JsonObject dev = doc["device"].to<JsonObject>();
     dev["identifiers"][0] = configMgr.get().haDeviceId;
     {
-        bool _isPlus = (configMgr.get().chargerModel == "plus");
-        dev["name"] = _isPlus ? "Wallbox Pulsar Plus" : "Wallbox Pulsar MAX";
+        const char* _fullName = nullptr; const char* _shortName = nullptr;
+        configMgr.productName(_fullName, _shortName);
+        dev["name"] = _fullName;
         dev["manufacturer"] = "Wallbox";
-        dev["model"] = _isPlus ? "Pulsar Plus" : "Pulsar MAX";
+        dev["model"] = _shortName;
     }
 
     String payload;
@@ -120,10 +122,11 @@ static void publishDiscoveryNumber(PubSubClient& mqtt, const char* objectId,
     JsonObject dev = doc["device"].to<JsonObject>();
     dev["identifiers"][0] = configMgr.get().haDeviceId;
     {
-        bool _isPlus = (configMgr.get().chargerModel == "plus");
-        dev["name"] = _isPlus ? "Wallbox Pulsar Plus" : "Wallbox Pulsar MAX";
+        const char* _fullName = nullptr; const char* _shortName = nullptr;
+        configMgr.productName(_fullName, _shortName);
+        dev["name"] = _fullName;
         dev["manufacturer"] = "Wallbox";
-        dev["model"] = _isPlus ? "Pulsar Plus" : "Pulsar MAX";
+        dev["model"] = _shortName;
     }
 
     String payload;
@@ -152,10 +155,11 @@ static void publishDiscoveryButton(PubSubClient& mqtt, const char* objectId,
     JsonObject dev = doc["device"].to<JsonObject>();
     dev["identifiers"][0] = configMgr.get().haDeviceId;
     {
-        bool _isPlus = (configMgr.get().chargerModel == "plus");
-        dev["name"] = _isPlus ? "Wallbox Pulsar Plus" : "Wallbox Pulsar MAX";
+        const char* _fullName = nullptr; const char* _shortName = nullptr;
+        configMgr.productName(_fullName, _shortName);
+        dev["name"] = _fullName;
         dev["manufacturer"] = "Wallbox";
-        dev["model"] = _isPlus ? "Pulsar Plus" : "Pulsar MAX";
+        dev["model"] = _shortName;
     }
 
     String payload;
@@ -190,10 +194,11 @@ static void publishDiscoverySelect(PubSubClient& mqtt, const char* objectId,
     JsonObject dev = doc["device"].to<JsonObject>();
     dev["identifiers"][0] = cfg.haDeviceId;
     {
-        bool _isPlus = (configMgr.get().chargerModel == "plus");
-        dev["name"] = _isPlus ? "Wallbox Pulsar Plus" : "Wallbox Pulsar MAX";
+        const char* _fullName = nullptr; const char* _shortName = nullptr;
+        configMgr.productName(_fullName, _shortName);
+        dev["name"] = _fullName;
         dev["manufacturer"] = "Wallbox";
-        dev["model"] = _isPlus ? "Pulsar Plus" : "Pulsar MAX";
+        dev["model"] = _shortName;
     }
 
     String payload;
@@ -460,8 +465,9 @@ void WallboxMQTT::sendDiscovery() {
 
     // Status code map differs between MAX and Plus — Plus uses a clean 0-18
     // enum (per jagheterfredrik/wallbox-ble) while MAX uses sparse hardware
-    // codes (161, 178-180, 189-194, 209-210, etc).
-    const bool isPlus = (configMgr.get().chargerModel == "plus");
+    // codes (161, 178-180, 189-194, 209-210, etc). Plus-family includes
+    // Copper SB, Quasar, Quasar 2 — all use the same protocol.
+    const bool isPlus = configMgr.isPlusFamily();
     const char* statusMap = isPlus
         ? "{% set m = {0:'Ready',1:'Charging',2:'Waiting for Car',"
           "3:'Waiting for Schedule',4:'Paused',5:'Schedule End',6:'Locked',"
@@ -489,7 +495,9 @@ void WallboxMQTT::sendDiscovery() {
         ? "[1,11]"
         : "[2,20,21,179]";
 
-    const char* deviceModelName = isPlus ? "Wallbox Pulsar Plus" : "Wallbox Pulsar MAX";
+    const char* deviceModelName = nullptr;
+    const char* deviceModelShort = nullptr;
+    configMgr.productName(deviceModelName, deviceModelShort);
 
     // Sensors from r_dat (status)
     publishDiscoveryEntity(*_client, "sensor", "charging_power", "Charging Power",
@@ -562,7 +570,7 @@ void WallboxMQTT::sendDiscovery() {
         dev["identifiers"][0] = configMgr.get().haDeviceId;
         dev["name"] = deviceModelName;
         dev["manufacturer"] = "Wallbox";
-        dev["model"] = isPlus ? "Pulsar Plus" : "Pulsar MAX";
+        dev["model"] = deviceModelShort;
         String pl;
         serializeJson(doc, pl);
         _client->beginPublish(topic.c_str(), pl.length(), true);
