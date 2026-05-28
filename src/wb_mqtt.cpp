@@ -216,6 +216,12 @@ void WallboxMQTT::begin() {
     mqttClient.setServer(cfg.mqttHost.c_str(), cfg.mqttPort);
     mqttClient.setCallback(_mqttCallback);
     mqttClient.setBufferSize(1024);
+    // Widen keepalive from the PubSubClient default (15s) so that
+    // brief blockages of MQTT.loop() (e.g. during a chain of BAPI
+    // calls in pollSettings) don't trip the client-side timeout.
+    // Pair with the MQTT.loop() call in the BLE yield callback to
+    // belt-and-braces the keepalive-starvation case.
+    mqttClient.setKeepAlive(60);
     _client = &mqttClient;
 }
 

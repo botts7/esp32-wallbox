@@ -338,10 +338,17 @@ void setup() {
         const WBConfig& cfg = configMgr.get();
         wallboxBLE.begin(cfg.bleAddr.c_str());
 
-        // Yield callback — keeps web server + OTA responsive during BLE waits
+        // Yield callback — runs while BLE is waiting on a BAPI response so
+        // the rest of the gateway stays responsive. Critically includes
+        // wallboxMQTT.loop() so PubSubClient's keepalive logic still gets
+        // cycles during long settings polls — without this, several
+        // back-to-back BLE waits could starve MQTT for 15+ seconds and
+        // PubSubClient would close the socket (the "connection closed by
+        // client every 85s" pattern observed in the rc12 broker log).
         wallboxBLE.onYield([]() {
             webServer.loop();
             ArduinoOTA.handle();
+            wallboxMQTT.loop();
         });
         if (cfg.bleService.length() > 0 && cfg.bleChar.length() > 0) {
             // Dual-char mode if bleTxChar is set (e.g. Pulsar Plus); otherwise single-char (MAX default)
