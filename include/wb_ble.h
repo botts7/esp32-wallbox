@@ -71,6 +71,21 @@ public:
     using YieldCallback = void (*)();
     void onYield(YieldCallback cb) { _yieldCb = cb; }
 
+    // Phase-2 polling — cadence setters (defaults match rc15 config).
+    // Main task calls these from setup() with the user's config values.
+    void setStatusPollMs(uint32_t ms)   { if (ms >= 1000) _statusPollMs = ms; }
+    void setRealtimePollMs(uint32_t ms) { if (ms >= 1000) _realtimePollMs = ms; }
+
+    // Phase-2 polling — thread-safe copy-out accessors. Each one
+    // copies the latest cached value plus its seq counter; main task
+    // compares to its remembered "last published" seq and only
+    // re-publishes when seq has advanced.
+    void copyCachedStatus(String& out, uint32_t& seq);
+    void copyCachedRealtime(String& out, uint32_t& seq);
+    void copyCachedMeter(String& out, uint32_t& seq);
+    void copyCachedSettings(String& out, uint32_t& seq);
+    void copyCachedNotifications(String& out, uint32_t& seq);
+
     // Stats
     uint32_t txCount() const { return _txCount; }
     uint32_t rxCount() const { return _rxCount; }
@@ -154,6 +169,29 @@ private:
     SemaphoreHandle_t _cmdMutex = nullptr;
     TaskHandle_t      _taskHandle = nullptr;
     static void _taskFn(void* arg);
+
+    // ---- Phase 2 polling on the BLE task (rc16) ----
+    // The BLE task drives all periodic BAPI polling (status, realtime,
+    // settings, meter, notifications). Results live in these cached
+    // strings; each has a monotonic seq counter. The main task reads
+    // seq vs its own "last published" counter and publishes when it
+    // advances — so MQTT/WS publishing stays on main task (PubSubClient
+    // is not thread-safe), but the BAPI traffic that drives it no
+    // longer blocks main loop iterations.
+    SemaphoreHandle_t _cacheMutex = nullptr;
+    String   _cachedStatusJson, _cachedRealtimeJson, _cachedMeterJson;
+    String   _cachedSettingsJson, _cachedNotificationsJson;
+    uint32_t _seqStatus = 0,   _seqRealtime = 0, _seqMeter = 0;
+    uint32_t _seqSettings = 0, _seqNotifications = 0;
+    // Poll timers (BLE-task local)
+    uint32_t _lastStatusPoll = 0, _lastRealtimePoll = 0, _lastNotifPoll = 0;
+    uint32_t _statusPollMs = 10000, _realtimePollMs = 30000;
+    static const uint32_t NOTIF_POLL_MS = 60000;
+    void _pollStatus();
+    void _pollRealtime();
+    void _pollSettings();
+    void _pollNotifications();
+    void _storeCache(String& dst, uint32_t& seq, const String& value);
 
     // RSSI smoothing — NimBLE's getRssi() returns per-packet instantaneous
     // values that swing wildly (issue #6). Sample on a fixed cadence and

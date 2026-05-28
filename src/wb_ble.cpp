@@ -42,6 +42,7 @@ void WallboxBLE::begin(const char* addr) {
     // The mutex serialises sendCommand() callers (notably: the BLE task's
     // own keepalive, and the main task's poll cycles).
     if (!_cmdMutex) _cmdMutex = xSemaphoreCreateMutex();
+    if (!_cacheMutex) _cacheMutex = xSemaphoreCreateMutex();
     if (!_taskHandle) {
         xTaskCreatePinnedToCore(
             _taskFn, "wb_ble",
@@ -127,6 +128,27 @@ void WallboxBLE::loop() {
                 _chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), false);
                 _txCount++;
                 _lastActivityTime = millis();
+            }
+        }
+
+        // ---- Phase 2 (rc16): periodic polling, driven from this task ----
+        // These were on the Arduino main loop before — moving them here
+        // means the main loop never blocks waiting for BAPI responses.
+        // Main task reads cached results via copyCachedXxx() and publishes.
+        {
+            uint32_t now = millis();
+            if (now - _lastStatusPoll >= _statusPollMs) {
+                _lastStatusPoll = now;
+                _pollStatus();
+            }
+            if (now - _lastRealtimePoll >= _realtimePollMs) {
+                _lastRealtimePoll = now;
+                _pollRealtime();
+                _pollSettings();   // 5-BAPI chain — but on BLE task, invisible to main
+            }
+            if (now - _lastNotifPoll >= NOTIF_POLL_MS) {
+                _lastNotifPoll = now;
+                _pollNotifications();
             }
         }
         break;
@@ -675,4 +697,151 @@ int WallboxBLE::rssi() const {
     // see exactly the same number at any given moment.
     if (!_client || !_client->isConnected()) return _scanRSSI;
     return _rssiSmoothed == -127 ? _scanRSSI : _rssiSmoothed;
+}
+
+// ---------- Phase 2: periodic polling on the BLE task ----------
+
+void WallboxBLE::_storeCache(String& dst, uint32_t& seq, const String& value) {
+    if (!_cacheMutex) return;
+    if (xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        dst = value;
+        seq++;
+        xSemaphoreGive(_cacheMutex);
+    }
+}
+
+void WallboxBLE::_pollStatus() {
+    if (_state != State::CONNECTED) return;
+    String resp = sendCommand(bapi::MET_GET_STATUS);
+    if (!resp.isEmpty()) _storeCache(_cachedStatusJson, _seqStatus, resp);
+    // Energy meter on same cycle — lightweight & useful
+    if (_state != State::CONNECTED) return;
+    String meter = sendCommand(bapi::MET_GET_METER);
+    if (!meter.isEmpty()) _storeCache(_cachedMeterJson, _seqMeter, meter);
+}
+
+void WallboxBLE::_pollRealtime() {
+    if (_state != State::CONNECTED) return;
+    String resp = sendCommand(bapi::MET_GET_REALTIME);
+    if (!resp.isEmpty()) _storeCache(_cachedRealtimeJson, _seqRealtime, resp);
+}
+
+void WallboxBLE::_pollSettings() {
+    // Five sequential BAPI reads, merged into one JSON. This is the
+    // ~15-second worst case that used to block the Arduino main loop —
+    // now it runs entirely on the BLE task with no caller-visible delay.
+    if (_state != State::CONNECTED) return;
+    JsonDocument merged;
+
+    String r1 = sendCommand(bapi::MET_GET_AUTOLOCK);
+    if (!r1.isEmpty()) {
+        JsonDocument d; if (deserializeJson(d, r1) == DeserializationError::Ok) {
+            if (d["r"].is<JsonObject>()) {
+                merged["autolock"] = d["r"]["enabled"] | 0;
+                merged["autolock_time"] = d["r"]["time"] | 60;
+            } else {
+                merged["autolock"] = d["r"] | 0;
+                merged["autolock_time"] = 60;
+            }
+        }
+    }
+    if (_state != State::CONNECTED) return;
+
+    String r2 = sendCommand("g_ecos", "null");
+    if (!r2.isEmpty()) {
+        JsonDocument d; if (deserializeJson(d, r2) == DeserializationError::Ok) {
+            merged["eco_mode"] = d["r"]["esm"] | 0;
+            merged["eco_power"] = d["r"]["esp"] | 100;
+        }
+    }
+    if (_state != State::CONNECTED) return;
+
+    String r3 = sendCommand("g_psh", "null");
+    if (!r3.isEmpty()) {
+        JsonDocument d; if (deserializeJson(d, r3) == DeserializationError::Ok) {
+            merged["power_sharing"] = d["r"]["dyps"] | 0;
+        }
+    }
+    if (_state != State::CONNECTED) return;
+
+    String r4 = sendCommand("g_phsw", "null");
+    if (!r4.isEmpty()) {
+        JsonDocument d; if (deserializeJson(d, r4) == DeserializationError::Ok) {
+            merged["phase_switch"] = d["r"]["enabled"] | 0;
+        }
+    }
+    if (_state != State::CONNECTED) return;
+
+    String r5 = sendCommand(bapi::MET_GET_TIMEZONE);
+    if (!r5.isEmpty()) {
+        JsonDocument d; if (deserializeJson(d, r5) == DeserializationError::Ok) {
+            const char* tz = d["r"]["timezone"] | "UTC";
+            merged["timezone"] = tz;
+        }
+    }
+    merged["halo"] = 2;  // placeholder — no verified getter yet
+
+    String out;
+    serializeJson(merged, out);
+    _storeCache(_cachedSettingsJson, _seqSettings, out);
+}
+
+void WallboxBLE::_pollNotifications() {
+    if (_state != State::CONNECTED) return;
+    String resp = sendCommand(bapi::MET_GET_NOTIFS, "null", 3000);
+    if (resp.isEmpty()) return;
+    JsonDocument d;
+    if (deserializeJson(d, resp) != DeserializationError::Ok) return;
+
+    JsonVariantConst arr = d["r"];
+    size_t count = arr.is<JsonArrayConst>() ? arr.size() : 0;
+    String firstMsg;
+    if (count > 0) {
+        JsonVariantConst n = arr[0];
+        const char* msg = n["message"] | n["msg"] | n["text"] | (const char*)nullptr;
+        if (msg) firstMsg = msg;
+    }
+    JsonDocument out;
+    out["count"]  = count;
+    out["latest"] = firstMsg;
+    out["items"]  = arr;
+    String payload;
+    serializeJson(out, payload);
+    _storeCache(_cachedNotificationsJson, _seqNotifications, payload);
+}
+
+void WallboxBLE::copyCachedStatus(String& out, uint32_t& seq) {
+    if (!_cacheMutex) { out = ""; seq = 0; return; }
+    if (xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        out = _cachedStatusJson; seq = _seqStatus;
+        xSemaphoreGive(_cacheMutex);
+    } else { out = ""; seq = 0; }
+}
+void WallboxBLE::copyCachedRealtime(String& out, uint32_t& seq) {
+    if (!_cacheMutex) { out = ""; seq = 0; return; }
+    if (xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        out = _cachedRealtimeJson; seq = _seqRealtime;
+        xSemaphoreGive(_cacheMutex);
+    } else { out = ""; seq = 0; }
+}
+void WallboxBLE::copyCachedMeter(String& out, uint32_t& seq) {
+    if (!_cacheMutex) { out = ""; seq = 0; return; }
+    if (xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        out = _cachedMeterJson; seq = _seqMeter;
+        xSemaphoreGive(_cacheMutex);
+    } else { out = ""; seq = 0; }
+}
+void WallboxBLE::copyCachedSettings(String& out, uint32_t& seq) {
+    if (!_cacheMutex) { out = ""; seq = 0; return; }
+    if (xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        out = _cachedSettingsJson; seq = _seqSettings;
+        xSemaphoreGive(_cacheMutex);
+    } else { out = ""; seq = 0; }
+}
+void WallboxBLE::copyCachedNotifications(String& out, uint32_t& seq) {
+    if (!_cacheMutex) { out = ""; seq = 0; return; }
+    if (xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        out = _cachedNotificationsJson; seq = _seqNotifications;
+        xSemaphoreGive(_cacheMutex);
+    } else { out = ""; seq = 0; }
 }

@@ -18,11 +18,9 @@
 #include <ArduinoJson.h>
 
 // ---- Polling timers ----
-static uint32_t lastStatusPoll = 0;
-static uint32_t lastRealtimePoll = 0;
+// Phase 2 (rc16): periodic BAPI polling moved into the BLE task. Only
+// publishGatewayInfo() — pure WiFi/diag data, no BLE — stays here.
 static uint32_t lastGatewayPublish = 0;
-static uint32_t lastNotifPoll = 0;
-static const uint32_t NOTIF_POLL_MS = 60000;  // r_not — once a minute is plenty
 
 // ---- WiFi ----
 static bool connectWiFi() {
@@ -56,128 +54,63 @@ static void checkWiFi() {
     }
 }
 
-// ---- Poll charger status ----
-static String lastStatus, lastRealtime, lastMeter;
+// ---- Last-published-seq tracking ----
+// Phase 2 (rc16): all periodic BAPI polling now runs on the BLE task
+// (see wb_ble.cpp _pollStatus/_pollRealtime/_pollSettings/etc.). The
+// main loop's job is to notice when the BLE task has updated a cache
+// and publish the new value to MQTT/WS. These counters remember what
+// seq we last published so we only publish on advances.
+static String lastStatus, lastRealtime;  // kept around for webServer.updateCache contract
+static uint32_t _lastSeqStatus = 0, _lastSeqRealtime = 0, _lastSeqMeter = 0;
+static uint32_t _lastSeqSettings = 0, _lastSeqNotifications = 0;
 
-static void pollMeter() {
-    if (!wallboxBLE.isConnected()) return;
-    String resp = wallboxBLE.sendCommand(bapi::MET_GET_METER);
-    if (!resp.isEmpty()) {
-        lastMeter = resp;
-        wallboxMQTT.publishResponse("meter", resp);
-        wbws::broadcast("meter", resp);
-    }
-}
+static void publishGatewayInfo();  // forward decl — defined below
 
-// Poll charger settings (auto lock, eco smart, power sharing, etc) and publish
-// merged JSON to wallbox/settings for HA native entities
-static void pollSettings() {
-    if (!wallboxBLE.isConnected()) return;
-
-    JsonDocument merged;
-
-    String r1 = wallboxBLE.sendCommand(bapi::MET_GET_AUTOLOCK);
-    if (!r1.isEmpty()) {
-        JsonDocument d; if (deserializeJson(d, r1) == DeserializationError::Ok) {
-            if (d["r"].is<JsonObject>()) {
-                merged["autolock"] = d["r"]["enabled"] | 0;
-                merged["autolock_time"] = d["r"]["time"] | 60;
-            } else {
-                merged["autolock"] = d["r"] | 0;
-                merged["autolock_time"] = 60;
-            }
-        }
-    }
-
-    String r2 = wallboxBLE.sendCommand("g_ecos", "null");
-    if (!r2.isEmpty()) {
-        JsonDocument d; if (deserializeJson(d, r2) == DeserializationError::Ok) {
-            merged["eco_mode"] = d["r"]["esm"] | 0;
-            merged["eco_power"] = d["r"]["esp"] | 100;
-        }
-    }
-
-    String r3 = wallboxBLE.sendCommand("g_psh", "null");
-    if (!r3.isEmpty()) {
-        JsonDocument d; if (deserializeJson(d, r3) == DeserializationError::Ok) {
-            merged["power_sharing"] = d["r"]["dyps"] | 0;
-        }
-    }
-
-    String r4 = wallboxBLE.sendCommand("g_phsw", "null");
-    if (!r4.isEmpty()) {
-        JsonDocument d; if (deserializeJson(d, r4) == DeserializationError::Ok) {
-            merged["phase_switch"] = d["r"]["enabled"] | 0;
-        }
-    }
-
-    String r5 = wallboxBLE.sendCommand(bapi::MET_GET_TIMEZONE);
-    if (!r5.isEmpty()) {
-        JsonDocument d; if (deserializeJson(d, r5) == DeserializationError::Ok) {
-            const char* tz = d["r"]["timezone"] | "UTC";
-            merged["timezone"] = tz;
-        }
-    }
-
-    // Halo — just a placeholder since we don't have a verified getter yet
-    merged["halo"] = 2;  // Default to Medium
-
-    String out;
-    serializeJson(merged, out);
-    wallboxMQTT.publishSettings(out);
-    wbws::broadcast("settings", out);
-}
-
-static void pollStatus() {
-    if (!wallboxBLE.isConnected()) return;
-    String resp = wallboxBLE.sendCommand(bapi::MET_GET_STATUS);
-    if (!resp.isEmpty()) {
+static void publishCachedStatusIfNew() {
+    String resp; uint32_t seq = 0;
+    wallboxBLE.copyCachedStatus(resp, seq);
+    if (seq != 0 && seq != _lastSeqStatus && !resp.isEmpty()) {
+        _lastSeqStatus = seq;
         lastStatus = resp;
         wallboxMQTT.publishStatus(resp);
         webServer.updateCache(lastStatus, lastRealtime);
         wbws::broadcast("status", resp);
     }
-    // Energy meter on same cycle (lightweight, useful for live monitoring)
-    pollMeter();
 }
-
-// Poll charger notifications (r_not) periodically and publish a digest
-// to MQTT for HA. Cheap — runs once a minute. We publish:
-//   - notification count (sensor)
-//   - the first notification's message (text sensor)
-//   - the raw array as JSON attributes
-static void pollNotifications() {
-    if (!wallboxBLE.isConnected()) return;
-    String resp = wallboxBLE.sendCommand(bapi::MET_GET_NOTIFS, "null", 3000);
-    if (resp.isEmpty()) return;
-    JsonDocument d;
-    if (deserializeJson(d, resp) != DeserializationError::Ok) return;
-
-    JsonVariantConst arr = d["r"];
-    size_t count = arr.is<JsonArrayConst>() ? arr.size() : 0;
-    String firstMsg;
-    if (count > 0) {
-        JsonVariantConst n = arr[0];
-        const char* msg = n["message"] | n["msg"] | n["text"] | (const char*)nullptr;
-        if (msg) firstMsg = msg;
-    }
-
-    JsonDocument out;
-    out["count"] = count;
-    out["latest"] = firstMsg;
-    out["items"] = arr;  // full array for HA attributes
-    String payload;
-    serializeJson(out, payload);
-    wallboxMQTT.publishResponse("notifications", payload);
-}
-
-static void pollRealtime() {
-    if (!wallboxBLE.isConnected()) return;
-    String resp = wallboxBLE.sendCommand(bapi::MET_GET_REALTIME);
-    if (!resp.isEmpty()) {
+static void publishCachedRealtimeIfNew() {
+    String resp; uint32_t seq = 0;
+    wallboxBLE.copyCachedRealtime(resp, seq);
+    if (seq != 0 && seq != _lastSeqRealtime && !resp.isEmpty()) {
+        _lastSeqRealtime = seq;
         lastRealtime = resp;
         wallboxMQTT.publishRealtime(resp);
         webServer.updateCache(lastStatus, lastRealtime);
+    }
+}
+static void publishCachedMeterIfNew() {
+    String resp; uint32_t seq = 0;
+    wallboxBLE.copyCachedMeter(resp, seq);
+    if (seq != 0 && seq != _lastSeqMeter && !resp.isEmpty()) {
+        _lastSeqMeter = seq;
+        wallboxMQTT.publishResponse("meter", resp);
+        wbws::broadcast("meter", resp);
+    }
+}
+static void publishCachedSettingsIfNew() {
+    String resp; uint32_t seq = 0;
+    wallboxBLE.copyCachedSettings(resp, seq);
+    if (seq != 0 && seq != _lastSeqSettings && !resp.isEmpty()) {
+        _lastSeqSettings = seq;
+        wallboxMQTT.publishSettings(resp);
+        wbws::broadcast("settings", resp);
+    }
+}
+static void publishCachedNotificationsIfNew() {
+    String resp; uint32_t seq = 0;
+    wallboxBLE.copyCachedNotifications(resp, seq);
+    if (seq != 0 && seq != _lastSeqNotifications && !resp.isEmpty()) {
+        _lastSeqNotifications = seq;
+        wallboxMQTT.publishResponse("notifications", resp);
     }
 }
 
@@ -356,6 +289,8 @@ void setup() {
                                 cfg.bleTxChar.c_str());
         }
         wallboxBLE.setChargerModel(cfg.chargerModel.c_str());
+        wallboxBLE.setStatusPollMs(cfg.statusPollMs);
+        wallboxBLE.setRealtimePollMs(cfg.realtimePollMs);
         if (cfg.blePin.length() > 0) {
             wallboxBLE.setPin(cfg.blePin.c_str());
         }
@@ -418,9 +353,9 @@ void loop() {
     bool nowConnected = wallboxBLE.isConnected();
 
     if (nowConnected && !wasConnected) {
-        // Just reconnected — poll immediately
-        lastStatusPoll = 0;
-        lastRealtimePoll = 0;
+        // Just reconnected — the BLE task's own poll timers will fire
+        // on their natural cadence; no main-side poll-timer reset needed
+        // in rc16 since main no longer drives the polls.
         bleDisconnectedAt = 0;
         wallboxMQTT.publishAvailability(true);
         wb_diag::reportReconnect(wb_diag::Kind::BLE);
@@ -439,30 +374,22 @@ void loop() {
         wallboxMQTT.publishAvailability(avail);
     }
 
-    // Poll charger status periodically
-    const WBConfig& cfg = configMgr.get();
-    if (nowConnected && wallboxMQTT.isConnected()) {
+    // Phase 2 (rc16): periodic BAPI polling runs on the BLE FreeRTOS task
+    // (see wb_ble.cpp _pollStatus/_pollRealtime/_pollSettings/_pollNotifications).
+    // Main loop's job is to publish to MQTT/WS when the BLE task has fresh
+    // data. Each check is a mutex-protected copy-out + seq compare; ~5 µs
+    // each when the cache hasn't advanced. Never blocks on BLE.
+    if (wallboxMQTT.isConnected()) {
+        publishCachedStatusIfNew();
+        publishCachedRealtimeIfNew();
+        publishCachedMeterIfNew();
+        publishCachedSettingsIfNew();
+        publishCachedNotificationsIfNew();
+
         uint32_t now = millis();
-
-        if (now - lastStatusPoll >= cfg.statusPollMs) {
-            lastStatusPoll = now;
-            pollStatus();
-        }
-
-        if (now - lastRealtimePoll >= cfg.realtimePollMs) {
-            lastRealtimePoll = now;
-            pollRealtime();
-            pollSettings();  // poll settings every realtime cycle (30s default)
-        }
-
         if (now - lastGatewayPublish >= 60000) {
             lastGatewayPublish = now;
             publishGatewayInfo();
-        }
-
-        if (now - lastNotifPoll >= NOTIF_POLL_MS) {
-            lastNotifPoll = now;
-            pollNotifications();
         }
     }
 
