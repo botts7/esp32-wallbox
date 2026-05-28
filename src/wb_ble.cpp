@@ -35,6 +35,32 @@ void WallboxBLE::begin(const char* addr) {
     _chrUUID = DEF_CHR;
     _state = State::DISCONNECTED;
     Log.printf("[BLE] Target: %s\n", addr);
+
+    // Phase 1 refactor: spin up a dedicated FreeRTOS task that owns the
+    // BLE state machine. The Arduino main loop no longer calls loop()
+    // directly — so BLE scans / connects / waits never freeze the web UI.
+    // The mutex serialises sendCommand() callers (notably: the BLE task's
+    // own keepalive, and the main task's poll cycles).
+    if (!_cmdMutex) _cmdMutex = xSemaphoreCreateMutex();
+    if (!_taskHandle) {
+        xTaskCreatePinnedToCore(
+            _taskFn, "wb_ble",
+            8192,           // stack size
+            this,
+            1,              // priority — lower than NimBLE host (which is 5)
+            &_taskHandle,
+            1               // Core 1 (same as Arduino loop — Core 0 is NimBLE's)
+        );
+        Log.println("[BLE] State-machine task started on core 1");
+    }
+}
+
+void WallboxBLE::_taskFn(void* arg) {
+    WallboxBLE* self = (WallboxBLE*)arg;
+    for (;;) {
+        self->loop();
+        vTaskDelay(pdMS_TO_TICKS(20));  // ~50 Hz tick — plenty for our pace
+    }
 }
 
 void WallboxBLE::pause(uint32_t ms) {
@@ -557,6 +583,16 @@ void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_
 }
 
 String WallboxBLE::sendCommand(const char* met, const char* par, uint32_t timeoutMs) {
+    // Serialise BAPI commands across tasks. The BLE task's own keepalive
+    // and the Arduino main task's polls can both end up here — without
+    // this mutex, two writeValue() calls on _chr could race and corrupt
+    // _parser/_responseReady state. Wait at most timeoutMs + 1s for the
+    // mutex; if we can't get it, treat as a timeout (and don't bash _chr).
+    if (_cmdMutex && xSemaphoreTake(_cmdMutex, pdMS_TO_TICKS(timeoutMs + 1000)) != pdTRUE) {
+        Log.printf("[BLE] sendCommand %s — mutex busy, skipping\n", met);
+        return "";
+    }
+
     // Connection health check before sending
     if (!_chr || !_client || !_client->isConnected()) {
         if (_state == State::CONNECTED) {
@@ -564,6 +600,7 @@ String WallboxBLE::sendCommand(const char* met, const char* par, uint32_t timeou
             _state = State::DISCONNECTED;
             _chr = nullptr;
         }
+        if (_cmdMutex) xSemaphoreGive(_cmdMutex);
         return "";
     }
 
@@ -584,6 +621,7 @@ String WallboxBLE::sendCommand(const char* met, const char* par, uint32_t timeou
             Log.printf("[BLE] Write failed for %s — connection may be dead\n", met);
             _state = State::DISCONNECTED;
             _chr = nullptr;
+            if (_cmdMutex) xSemaphoreGive(_cmdMutex);
             return "";
         }
     }
@@ -604,11 +642,14 @@ String WallboxBLE::sendCommand(const char* met, const char* par, uint32_t timeou
             _state = State::DISCONNECTED;
             _chr = nullptr;
         }
+        if (_cmdMutex) xSemaphoreGive(_cmdMutex);
         return "";
     }
 
     Log.printf("[BLE] RX %s (%d bytes)\n", met, _lastResponse.length());
-    return _lastResponse;
+    String resp = _lastResponse;
+    if (_cmdMutex) xSemaphoreGive(_cmdMutex);
+    return resp;
 }
 
 void WallboxBLE::queueCommand(const char* met, const char* par) {

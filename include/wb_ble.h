@@ -2,6 +2,9 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 #include "bapi.h"
 
 // Wallbox BLE connection manager.
@@ -140,6 +143,17 @@ private:
     // Scan cache for smart reconnect
     uint32_t _lastSeenTime = 0;
     static const uint32_t SCAN_CACHE_MS = 30000;
+
+    // ---- Phase 1 BLE task refactor (rc15) ----
+    // The state machine (scan / connect / auth / keepalive) and sendCommand
+    // serialisation move onto a dedicated FreeRTOS task so the Arduino
+    // main loop never blocks on BLE work. sendCommand() can still be called
+    // from any task and remains synchronous, but only one BAPI command is
+    // in flight at a time (serialised by _cmdMutex). The task itself drives
+    // loop() ~50 Hz.
+    SemaphoreHandle_t _cmdMutex = nullptr;
+    TaskHandle_t      _taskHandle = nullptr;
+    static void _taskFn(void* arg);
 
     // RSSI smoothing — NimBLE's getRssi() returns per-packet instantaneous
     // values that swing wildly (issue #6). Sample on a fixed cadence and

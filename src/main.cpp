@@ -406,11 +406,11 @@ void loop() {
                                  wallboxBLE.lastActivityAge() / 1000);
     }
 
-    // Run BLE loop — skip during OTA to free radio + CPU
-    extern bool otaInProgress;
-    if (configMgr.hasBLE() && !otaInProgress) {
-        wallboxBLE.loop();
-    }
+    // BLE state machine runs on its own FreeRTOS task (wb_ble.cpp _taskFn,
+    // spawned by wallboxBLE.begin()). Main loop no longer drives it — so
+    // BLE scans and connects can't freeze the web UI / MQTT / WS handling.
+    // We still pause the task during OTA via wallboxBLE.pause() which the
+    // OTA upload handler already calls at FILE_START.
 
     // Track BLE state for availability + immediate poll on reconnect
     static bool wasConnected = false;
