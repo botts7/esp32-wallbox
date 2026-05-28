@@ -35,6 +35,7 @@ private:
     PubSubClient* _client = nullptr;
     uint32_t _lastConnectAttempt = 0;
     bool _discoveryPublished = false;
+    bool _wasConnected = false;  // edge-trigger for wb_diag counters
 };
 
 extern WallboxMQTT wallboxMQTT;

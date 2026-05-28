@@ -2,6 +2,7 @@
 #include "wb_ble.h"
 #include "wb_config.h"
 #include "wb_log.h"
+#include "wb_diag.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
 
@@ -220,10 +221,23 @@ void WallboxMQTT::begin() {
 
 void WallboxMQTT::loop() {
     if (!_client->connected()) {
+        // Edge-trigger the disconnect event on the first loop iteration
+        // where we notice we're down. _wasConnected guards against
+        // double-counting across many reconnect attempts.
+        if (_wasConnected) {
+            _wasConnected = false;
+            wb_diag::reportDisconnect(wb_diag::Kind::MQTT);
+        }
         if (millis() - _lastConnectAttempt >= 5000) {
             _connect();
         }
         return;
+    }
+    if (!_wasConnected) {
+        // Just (re)connected — close the open MQTT disconnect event.
+        // reportReconnect is a no-op if no disconnect was open (first boot).
+        _wasConnected = true;
+        wb_diag::reportReconnect(wb_diag::Kind::MQTT);
     }
     _client->loop();
 }

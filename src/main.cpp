@@ -12,6 +12,7 @@
 #include "wb_ws.h"
 #include "wb_log.h"
 #include "wb_health.h"
+#include "wb_diag.h"
 #include "wb_version.h"
 #include "bapi.h"
 #include <ArduinoJson.h>
@@ -415,9 +416,11 @@ void loop() {
         lastRealtimePoll = 0;
         bleDisconnectedAt = 0;
         wallboxMQTT.publishAvailability(true);
+        wb_diag::reportReconnect(wb_diag::Kind::BLE);
     } else if (!nowConnected && wasConnected) {
         // Just disconnected — start grace timer
         bleDisconnectedAt = millis();
+        wb_diag::reportDisconnect(wb_diag::Kind::BLE);
     }
     wasConnected = nowConnected;
 

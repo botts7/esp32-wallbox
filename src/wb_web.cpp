@@ -5,6 +5,7 @@
 #include "wb_version.h"
 #include "wb_health.h"
 #include "wb_ota_history.h"
+#include "wb_diag.h"
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -1140,6 +1141,9 @@ static void handleConfig() {
 // ========== PAGE 4: Info (/info) ==========
 static void handleInfo() {
     String page = htmlHead("Info");
+    // CSRF token needed by interactive JS (e.g. clearDiag) — injected
+    // here so the page-body raw string can stay static.
+    page += "<script>window.WB_CSRF='" + csrfToken + "';</script>";
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Info...</div>
 <div id='pg' style='display:none'>
@@ -1158,6 +1162,12 @@ static void handleInfo() {
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F50C;</span><h2>Charger Details</h2></div>
   <div id='chg'>Loading...</div>
+</div>
+
+<div class='card'>
+  <div class='card-header'><span class='card-icon'>&#x1F4C8;</span><h2>Connection Diagnostics</h2></div>
+  <div id='diag-rows' style='font-size:.88em'>Loading...</div>
+  <button class='btn btn-outline' style='padding:6px 12px;font-size:.82em;margin-top:8px' onclick='clearDiag()'>Clear counters</button>
 </div>
 
 <div class='card'>
@@ -1228,6 +1238,11 @@ function loadGW(){fetch('/api/status').then(function(r){return r.json()}).then(f
 function dismissFwBanner(){fetch('/api/fw/dismiss',{method:'POST'}).then(function(){var b=document.getElementById('fw-changed-banner');if(b)b.style.display='none'}).catch(function(){})}
 function loadOtaHistory(){fetch('/api/ota/history').then(function(r){return r.json()}).then(function(arr){if(!Array.isArray(arr)||!arr.length)return;var c=document.getElementById('ota-history');var rows=document.getElementById('ota-history-rows');var h='';arr.forEach(function(e){var dot=e.ok?'<span style="color:#22c55e">&#x25CF;</span>':'<span style="color:#ef4444">&#x25CF;</span>';var sz=e.bytes?(' '+Math.round(e.bytes/1024)+'KB'):'';var rsn=e.ok?'':(' — '+(e.reason||'failed'));h+='<div style="margin:3px 0">'+dot+' '+(e.from||'unknown')+sz+rsn+'</div>'});rows.innerHTML=h;c.style.display='block'}).catch(function(){})}
 loadOtaHistory();
+function fmtUptime(s){if(!s)return 'never';var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60);return (d?d+'d ':'')+(h?h+'h ':'')+m+'m'}
+function fmtDur(s){if(s<60)return s+'s';if(s<3600)return Math.round(s/60)+'m '+(s%60)+'s';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m'}
+function loadDiag(){fetch('/api/diag/disconnects').then(function(r){return r.json()}).then(function(d){var rows=document.getElementById('diag-rows');if(!rows)return;var h='';h+=row('BLE reconnects (this boot)',d.ble_reconnects+(d.ble_longest_s?' (longest '+fmtDur(d.ble_longest_s)+')':''));h+=row('MQTT reconnects (this boot)',d.mqtt_reconnects+(d.mqtt_longest_s?' (longest '+fmtDur(d.mqtt_longest_s)+')':''));if(d.ble_last_at_s)h+=row('Last BLE reconnect',fmtUptime(d.ble_last_at_s)+' after boot');if(d.mqtt_last_at_s)h+=row('Last MQTT reconnect',fmtUptime(d.mqtt_last_at_s)+' after boot');if(d.events&&d.events.length){h+='<div style=\"margin-top:8px;font-size:.82em;color:var(--text2)\">Recent events (newest first, persisted):</div>';d.events.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style=\"font-family:monospace;font-size:.78em;margin:2px 0\"><span style=\"color:'+kc+'\">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+', down '+fmtDur(e.dur)+'</div>'})}rows.innerHTML=h||'<div style=\"color:var(--text3)\">No disconnects logged yet.</div>'}).catch(function(){})}
+loadDiag();setInterval(loadDiag,30000);
+function clearDiag(){if(!confirm('Reset disconnect counters and clear event history?'))return;fetch('/api/diag/clear?csrf='+window.WB_CSRF,{method:'POST'}).then(function(){loadDiag()}).catch(function(){})}
 function renderGW(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi Signal',d.wifi_rssi+' dBm');h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h}
 // Live-update the Gateway card off the same WS push the top banner uses,
 // so BLE Signal here can't drift away from the banner's value.
@@ -2067,6 +2082,19 @@ static void registerRoutes() {
         if (!checkAuth()) return;
         http.sendHeader("Cache-Control", "no-store");
         http.send(200, "application/json", wb_ota_history::toJson());
+    });
+    // /api/diag/disconnects — counters + recent BLE/MQTT reconnect events
+    http.on("/api/diag/disconnects", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Cache-Control", "no-store");
+        http.send(200, "application/json", wb_diag::toJson());
+    });
+    // Manual clear for the counters (e.g., after acknowledging an outage)
+    http.on("/api/diag/clear", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        if (!checkCsrf()) return;
+        wb_diag::clear();
+        http.send(200, "application/json", "{\"ok\":true}");
     });
 
     // /api/logs — last ~16 KB of Serial/telnet output in chronological order.
