@@ -238,6 +238,23 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
     }
     h += "<link rel='stylesheet' href='/style.css?v=" + buildVer + "'>"
         "<script src='/app.js?v=" + buildVer + "' defer></script>"
+        // Fetch limiter — ESP32's web server has very limited concurrent
+        // connection slots. Without this, pages that fire multiple
+        // overlapping fetches (loadGW + loadOtaHistory + loadBootReason
+        // + loadDiag + loadNotifs + updateBleHealth + the page's own
+        // BAPI calls + WebSocket) easily flood the server, causing
+        // ERR_EMPTY_RESPONSE, /app.js stalls, and eventually panic
+        // crashes. We cap concurrency at 2 in-flight requests at any
+        // time; the rest queue. Per-request latency stays unchanged on
+        // the happy path; under load the queue holds requests until
+        // a slot is free.
+        "<script>(function(){var maxC=1,inflight=0,q=[];var nf=window.fetch.bind(window);"
+          "function pump(){while(inflight<maxC&&q.length){var t=q.shift();inflight++;"
+            "nf(t.url,t.opts).then(function(r){inflight--;t.res(r);pump()},"
+                              "function(e){inflight--;t.rej(e);pump()})}}"
+          "window.fetch=function(url,opts){return new Promise(function(res,rej){"
+            "q.push({url:url,opts:opts,res:res,rej:rej});pump()})};"
+        "})();</script>"
         "<script>(function(){try{var t=localStorage.getItem('wb-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}})();</script>"
         "<script>(function(){var handlers={};var sock=null;var rd=1000;var open=false;function connect(){try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.hostname+':81/');sock.onopen=function(){open=true;rd=1000;document.documentElement.setAttribute('data-ws','1')};sock.onmessage=function(e){try{var m=JSON.parse(e.data);var hs=handlers[m.t];if(hs){for(var i=0;i<hs.length;i++){try{hs[i](m.d,m)}catch(ee){}}}}catch(err){}};sock.onclose=function(){open=false;document.documentElement.removeAttribute('data-ws');sock=null;setTimeout(connect,rd);rd=Math.min(rd*2,30000)};sock.onerror=function(){}}catch(e){setTimeout(connect,rd)}}window.wbws={subscribe:function(t,fn){(handlers[t]=handlers[t]||[]).push(fn)},isOpen:function(){return open},send:function(s){if(sock&&open)sock.send(s)}};connect();})();</script>"
         "<script>(function(){var _lastSt=null;function load(){var def={enabled:false,events:{started:true,complete:true,paused:false,error:true,plug_in:false,plug_out:false}};try{var s=JSON.parse(localStorage.getItem('wb-notif')||'null');if(!s)return def;if(!s.events)s.events=def.events;return s}catch(e){return def}}function fire(title,body){try{new Notification(title,{body:body,tag:'wb',silent:false})}catch(e){}}window.wbFireNotif=fire;window.wbCheckStatus=function(s){if(!s||typeof s.st!=='number')return;var st=s.st;if(_lastSt===null){_lastSt=st;return}if(st===_lastSt)return;var N=load();var was=_lastSt;_lastSt=st;if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted')return;var charging=[2,20,179],complete=[21],paused=[3,22,178,193],error=[6,14],ready=[0,7,16,161,189],connected=[1,13,17];function inG(v,g){return g.indexOf(v)>=0}if(inG(st,complete)&&N.events.complete)fire('Charging complete','Your car is ready to go.');else if(inG(st,charging)&&!inG(was,charging)&&N.events.started)fire('Charging started','Active.');else if(inG(st,paused)&&!inG(was,paused)&&N.events.paused)fire('Charging paused','See dashboard.');else if(inG(st,error)&&!inG(was,error)&&N.events.error)fire('Charger error','See dashboard.');else if(inG(st,connected)&&inG(was,ready)&&N.events.plug_in)fire('Plug connected','Ready to charge.');else if(inG(st,ready)&&!inG(was,ready)&&N.events.plug_out)fire('Plug disconnected','Charger idle.')};})();</script>"
@@ -417,12 +434,28 @@ static void handleApiCharger() {
     http.send(200, "application/json", json);
 }
 
+// Server-side limit on how many BAPI command requests can be queued.
+// Each /api/command call goes through sendCommand which waits on
+// _cmdMutex with a multi-second timeout. Under load (e.g. /sessions
+// firing 20+ parallel r_log fetches), the queue piles up, LWIP/heap
+// gets stressed, and the gateway panics. Capping in-flight at 2 and
+// fast-failing the rest with 503 keeps the gateway alive — the
+// browser retry on 503 (or the JS-level fetch limiter) keeps the
+// experience usable.
+static volatile int _apiCmdInflight = 0;
+static const int MAX_API_CMD_INFLIGHT = 2;
+
 static void handleApiCommand() {
     if (!checkAuth()) return;
     if (!wallboxBLE.isConnected()) {
         http.send(503, "application/json", "{\"error\":\"BLE not connected\"}");
         return;
     }
+    if (_apiCmdInflight >= MAX_API_CMD_INFLIGHT) {
+        http.send(503, "application/json", "{\"error\":\"busy\",\"retry\":true}");
+        return;
+    }
+    _apiCmdInflight++;
     String action = http.arg("action");
     String value = http.arg("value");
     String resp;
@@ -438,9 +471,11 @@ static void handleApiCommand() {
         if (par.isEmpty()) par = "null";
         resp = wallboxBLE.sendCommand(met.c_str(), par.c_str());
     } else {
+        _apiCmdInflight--;
         http.send(400, "application/json", "{\"error\":\"unknown action\"}");
         return;
     }
+    _apiCmdInflight--;
     http.send(200, "application/json", resp.isEmpty() ? "{\"error\":\"timeout\"}" : resp);
 }
 
@@ -1238,16 +1273,21 @@ static void handleInfo() {
 <p style='text-align:center;color:var(--text3);font-size:.75em;margin-top:16px'>Wallbox BLE Gateway )HTML" WB_VERSION R"HTML(</p>
 
 <script>
-function loadGW(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){window._lastStatus=d;renderGW(d);var c='';if(d.dev_name)c+=row('Name',d.dev_name);if(d.chg_sn)c+=row('Serial Number',d.chg_sn);if(d.chg_mac)c+=row('Charger MAC',d.chg_mac);if(d.chg_grounding)c+=row('Grounding',d.chg_grounding);if(d.dev_mfg)c+=row('Manufacturer',d.dev_mfg);if(d.dev_model)c+=row('Model',d.dev_model);if(d.dev_fw)c+=row('BLE Module FW',d.dev_fw);document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>';if(d.chg_fw_changed){var b=document.getElementById('fw-changed-banner');var det=document.getElementById('fw-changed-detail');if(b){b.style.display='block';if(det&&d.chg_fw_prev&&d.dev_fw)det.textContent='Was '+d.chg_fw_prev+', now '+d.dev_fw+'.';}}})}
+function loadGW(){return fetch('/api/status').then(function(r){return r.json()}).then(function(d){window._lastStatus=d;renderGW(d);var c='';if(d.dev_name)c+=row('Name',d.dev_name);if(d.chg_sn)c+=row('Serial Number',d.chg_sn);if(d.chg_mac)c+=row('Charger MAC',d.chg_mac);if(d.chg_grounding)c+=row('Grounding',d.chg_grounding);if(d.dev_mfg)c+=row('Manufacturer',d.dev_mfg);if(d.dev_model)c+=row('Model',d.dev_model);if(d.dev_fw)c+=row('BLE Module FW',d.dev_fw);document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>';if(d.chg_fw_changed){var b=document.getElementById('fw-changed-banner');var det=document.getElementById('fw-changed-detail');if(b){b.style.display='block';if(det&&d.chg_fw_prev&&d.dev_fw)det.textContent='Was '+d.chg_fw_prev+', now '+d.dev_fw+'.';}}}).catch(function(){})}
 function dismissFwBanner(){fetch('/api/fw/dismiss',{method:'POST'}).then(function(){var b=document.getElementById('fw-changed-banner');if(b)b.style.display='none'}).catch(function(){})}
-function loadOtaHistory(){fetch('/api/ota/history').then(function(r){return r.json()}).then(function(arr){if(!Array.isArray(arr)||!arr.length)return;var c=document.getElementById('ota-history');var rows=document.getElementById('ota-history-rows');var h='';arr.forEach(function(e){var dot=e.ok?'<span style="color:#22c55e">&#x25CF;</span>':'<span style="color:#ef4444">&#x25CF;</span>';var sz=e.bytes?(' '+Math.round(e.bytes/1024)+'KB'):'';var rsn=e.ok?'':(' — '+(e.reason||'failed'));h+='<div style="margin:3px 0">'+dot+' '+(e.from||'unknown')+sz+rsn+'</div>'});rows.innerHTML=h;c.style.display='block'}).catch(function(){})}
-loadOtaHistory();
-function loadBootReason(){fetch('/api/boot/history').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('boot-reason');if(!el)return;var cur=d.current||'unknown';var bad=(cur.indexOf('panic')>=0||cur.indexOf('watchdog')>=0||cur.indexOf('brownout')>=0);var col=bad?'#ef4444':'var(--text3)';var prefix=bad?'&#x26A0; ':'';el.innerHTML='<span style=\"color:'+col+'\">'+prefix+'Last boot: '+cur+'</span>';if(d.history&&d.history.length>1){var bads=d.history.filter(function(e){var r=e.reason||'';return r.indexOf('panic')>=0||r.indexOf('watchdog')>=0||r.indexOf('brownout')>=0});if(bads.length){el.innerHTML+=' <span style=\"color:var(--text3);font-size:.92em\">('+bads.length+' bad boot'+(bads.length>1?'s':'')+' in recent history)</span>'}}}).catch(function(){})}
-loadBootReason();
+function loadOtaHistory(){return fetch('/api/ota/history').then(function(r){return r.json()}).then(function(arr){if(!Array.isArray(arr)||!arr.length)return;var c=document.getElementById('ota-history');var rows=document.getElementById('ota-history-rows');var h='';arr.forEach(function(e){var dot=e.ok?'<span style="color:#22c55e">&#x25CF;</span>':'<span style="color:#ef4444">&#x25CF;</span>';var sz=e.bytes?(' '+Math.round(e.bytes/1024)+'KB'):'';var rsn=e.ok?'':(' — '+(e.reason||'failed'));h+='<div style="margin:3px 0">'+dot+' '+(e.from||'unknown')+sz+rsn+'</div>'});rows.innerHTML=h;c.style.display='block'}).catch(function(){})}
+function loadBootReason(){return fetch('/api/boot/history').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('boot-reason');if(!el)return;var cur=d.current||'unknown';var bad=(cur.indexOf('panic')>=0||cur.indexOf('watchdog')>=0||cur.indexOf('brownout')>=0);var col=bad?'#ef4444':'var(--text3)';var prefix=bad?'&#x26A0; ':'';el.innerHTML='<span style=\"color:'+col+'\">'+prefix+'Last boot: '+cur+'</span>';if(d.history&&d.history.length>1){var bads=d.history.filter(function(e){var r=e.reason||'';return r.indexOf('panic')>=0||r.indexOf('watchdog')>=0||r.indexOf('brownout')>=0});if(bads.length){el.innerHTML+=' <span style=\"color:var(--text3);font-size:.92em\">('+bads.length+' bad boot'+(bads.length>1?'s':'')+' in recent history)</span>'}}}).catch(function(){})}
+// Chain /info fetches sequentially instead of firing 4-6 in parallel —
+// ESP32's WebServer has very limited concurrent connection slots, and
+// flooding it under load was causing /app.js to stall and (under worse
+// load) full panic crashes. Each fetch is small (<10 KB) so sequential
+// total time is still <2s on a healthy gateway, much better than
+// "looks fast then explodes".
+function loadInfoChained(){loadGW().then(loadBootReason).then(loadOtaHistory).then(loadDiag).catch(function(){})}
+loadInfoChained();setInterval(function(){loadGW().then(loadDiag).catch(function(){})},15000);
 function fmtUptime(s){if(!s)return 'never';var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60);return (d?d+'d ':'')+(h?h+'h ':'')+m+'m'}
 function fmtDur(s){if(s<60)return s+'s';if(s<3600)return Math.round(s/60)+'m '+(s%60)+'s';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m'}
-function loadDiag(){fetch('/api/diag/disconnects').then(function(r){return r.json()}).then(function(d){var rows=document.getElementById('diag-rows');if(!rows)return;var curUp=d.uptime_s||0;var h='';h+=row('BLE reconnects (this boot)',d.ble_reconnects+(d.ble_longest_s?' (longest '+fmtDur(d.ble_longest_s)+')':''));h+=row('MQTT reconnects (this boot)',d.mqtt_reconnects+(d.mqtt_longest_s?' (longest '+fmtDur(d.mqtt_longest_s)+')':''));if(d.ble_last_at_s)h+=row('Last BLE reconnect',fmtUptime(d.ble_last_at_s)+' after boot');if(d.mqtt_last_at_s)h+=row('Last MQTT reconnect',fmtUptime(d.mqtt_last_at_s)+' after boot');if(d.events&&d.events.length){var thisBoot=d.events.filter(function(e){return e.start<=curUp});var prior=d.events.filter(function(e){return e.start>curUp});if(thisBoot.length){h+='<div style=\"margin-top:8px;font-size:.82em;color:var(--text2)\">Events this boot:</div>';thisBoot.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style=\"font-family:monospace;font-size:.78em;margin:2px 0\"><span style=\"color:'+kc+'\">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+', down '+fmtDur(e.dur)+'</div>'})}if(prior.length){h+='<div style=\"margin-top:8px;font-size:.82em;color:var(--text3)\">From prior boots (NVS-persisted):</div>';prior.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style=\"font-family:monospace;font-size:.78em;margin:2px 0;opacity:.55\"><span style=\"color:'+kc+'\">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+' of that boot, down '+fmtDur(e.dur)+'</div>'})}}rows.innerHTML=h||'<div style=\"color:var(--text3)\">No disconnects logged yet.</div>'}).catch(function(){})}
-loadDiag();setInterval(loadDiag,30000);
+function loadDiag(){return fetch('/api/diag/disconnects').then(function(r){return r.json()}).then(function(d){var rows=document.getElementById('diag-rows');if(!rows)return;var curUp=d.uptime_s||0;var h='';h+=row('BLE reconnects (this boot)',d.ble_reconnects+(d.ble_longest_s?' (longest '+fmtDur(d.ble_longest_s)+')':''));h+=row('MQTT reconnects (this boot)',d.mqtt_reconnects+(d.mqtt_longest_s?' (longest '+fmtDur(d.mqtt_longest_s)+')':''));if(d.ble_last_at_s)h+=row('Last BLE reconnect',fmtUptime(d.ble_last_at_s)+' after boot');if(d.mqtt_last_at_s)h+=row('Last MQTT reconnect',fmtUptime(d.mqtt_last_at_s)+' after boot');if(d.events&&d.events.length){var thisBoot=d.events.filter(function(e){return e.start<=curUp});var prior=d.events.filter(function(e){return e.start>curUp});if(thisBoot.length){h+='<div style=\"margin-top:8px;font-size:.82em;color:var(--text2)\">Events this boot:</div>';thisBoot.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style=\"font-family:monospace;font-size:.78em;margin:2px 0\"><span style=\"color:'+kc+'\">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+', down '+fmtDur(e.dur)+'</div>'})}if(prior.length){h+='<div style=\"margin-top:8px;font-size:.82em;color:var(--text3)\">From prior boots (NVS-persisted):</div>';prior.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style=\"font-family:monospace;font-size:.78em;margin:2px 0;opacity:.55\"><span style=\"color:'+kc+'\">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+' of that boot, down '+fmtDur(e.dur)+'</div>'})}}rows.innerHTML=h||'<div style=\"color:var(--text3)\">No disconnects logged yet.</div>'}).catch(function(){})}
 function clearDiag(){if(!confirm('Reset disconnect counters and clear event history?'))return;fetch('/api/diag/clear?csrf='+window.WB_CSRF,{method:'POST'}).then(function(){loadDiag()}).catch(function(){})}
 function renderGW(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi Signal',d.wifi_rssi+' dBm');h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h}
 // Live-update the Gateway card off the same WS push the top banner uses,
@@ -1258,7 +1298,6 @@ var NET_LABELS={channel:'WiFi Channel',dns1:'DNS Primary',dns2:'DNS Secondary',g
 function Q(m,l){var r=document.getElementById('qr');r.style.display='block';r.innerHTML="<span class='spinner'></span>"+l+"...";fetch('/api/command?action=bapi&met='+m+'&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(d.error){r.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}var v=d.r||d;var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var ws={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi Status',typeof v==='number'?(ws[v]||'Code '+v):''+v)}else if(m==='r_not'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');else v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('#'+(i+1),n.message||n.msg||JSON.stringify(n));h+="</div>"})}else{h+=row('Notifications',typeof v==='number'?(v===0?'None':''+v):''+v)}}else if(m==='g_ocpp'){var lb=OCPP_LABELS;if(typeof v==='object'){for(var k in v){var lbl=lb[k]||k;var val=v[k];if(val===null||val===undefined||val==='')val='<span style="color:var(--text3)">Not set</span>';else if(typeof val==='number'&&(k==='e'||k==='connected'))val=val?'Yes':'No';h+=row(lbl,val)}}else{h+=row('OCPP',v===1?'Connected':v===0?'Not configured':'Code '+v)}}else if(m==='gnsta'){if(Array.isArray(v)&&v.length>0){var n=v[0];var lb=NET_LABELS;for(var k in n){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=n[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else if(typeof v==='object'&&!Array.isArray(v)){var lb=NET_LABELS;for(var k in v){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else{h+=row('Network',''+v)}}else if(m==='gupdc'){if(typeof v==='object'){if(v.update)h+=row('Update Available','<span style="color:var(--success)">Yes</span>');else h+=row('Update Available','No');if(v.version||v.current)h+=row('Current Version',v.version||v.current||'Unknown');if(v.latest||v.new_version)h+=row('Latest Version',v.latest||v.new_version||'Unknown')}else{h+=row('Firmware',typeof v==='number'?(v===0?'Up to date':'Update available ('+v+')'):''+v)}}else if(m==='r_not'){if(typeof v==='object'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('Notification '+(i+1),n.message||n.msg||n.text||JSON.stringify(n));if(n.timestamp||n.ts)h+=row('Time',new Date((n.timestamp||n.ts)*1000).toLocaleString());h+="</div>"})}else{for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});h+=row(lbl,typeof v[k]==='object'?JSON.stringify(v[k]):v[k])}}}else{h+=row('Notifications',v===0?'None':''+v)}}else if(typeof v==='object'){for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(typeof val==='boolean')val=val?'Yes':'No';else if(typeof val==='object')val=JSON.stringify(val);h+=row(lbl,val)}}else{h+=row(l,v)}r.innerHTML=h}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'})}
 function B(){var m=document.getElementById('bm').value,r=document.getElementById('br');r.style.display='block';r.textContent='Sending '+m+'...';fetch('/api/command?action=bapi&met='+encodeURIComponent(m)+'&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){r.textContent=JSON.stringify(d,null,2)}).catch(function(e){r.textContent='Error: '+e.message})}
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
-loadGW();setInterval(loadGW,15000);
 </script>
 </div>
 )HTML";
@@ -2088,6 +2127,28 @@ static void registerRoutes() {
         if (!checkAuth()) return;
         http.sendHeader("Cache-Control", "no-store");
         http.send(200, "application/json", wb_ota_history::toJson());
+    });
+    // /api/diag/runtime — heap + per-task stack monitoring. The last
+    // values logged via this endpoint can hint at memory pressure that
+    // preceded a panic (the panic itself doesn't tell us that).
+    http.on("/api/diag/runtime", []() {
+        if (!checkAuth()) return;
+        String body = "{";
+        body += "\"heap_free\":" + String(ESP.getFreeHeap());
+        body += ",\"heap_min_ever\":" + String(ESP.getMinFreeHeap());
+        body += ",\"heap_max_alloc\":" + String(ESP.getMaxAllocHeap());
+        body += ",\"psram_free\":" + String(ESP.getFreePsram());
+        body += ",\"main_stack_hwm\":" + String(uxTaskGetStackHighWaterMark(NULL));
+        body += ",\"ble_stack_hwm\":";
+        TaskHandle_t ble = xTaskGetHandle("wb_ble");
+        body += ble ? String(uxTaskGetStackHighWaterMark(ble)) : String("null");
+        body += ",\"loop_stack_hwm\":";
+        TaskHandle_t arduinoLoop = xTaskGetHandle("loopTask");
+        body += arduinoLoop ? String(uxTaskGetStackHighWaterMark(arduinoLoop)) : String("null");
+        body += ",\"uptime_s\":" + String(millis() / 1000);
+        body += "}";
+        http.sendHeader("Cache-Control", "no-store");
+        http.send(200, "application/json", body);
     });
     // /api/boot/history — last ~10 boot reasons (newest first).
     // Lets us see WHY the gateway rebooted (panic / WDT / power-on / etc).
