@@ -503,6 +503,7 @@ void WallboxBLE::_disconnect() {
     _state = State::DISCONNECTED;
     _rssiSmoothed = -127;  // reset EMA so the next connect starts fresh
     _rssiLastSample = 0;
+    _seenBapiThisConnection = false;  // re-enable raw-RX logging for next connect
 }
 
 bool WallboxBLE::_authenticate() {
@@ -579,10 +580,17 @@ void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_
     _instance->_rxCount++;
 
     // Diagnostic — log raw bytes when the frame doesn't start with the BAPI
-    // magic ("EaE"). Catches BGX command-mode error responses ("ERR\r\n",
-    // "ready\r\n" etc.) that the BAPI parser would otherwise silently
-    // discard. Only logs non-BAPI frames so normal traffic stays quiet.
-    if (len > 0 && !(len >= 3 && data[0] == 'E' && data[1] == 'a' && data[2] == 'E')) {
+    // magic ("EaE") AND we haven't already seen valid BAPI traffic on this
+    // connection. The point of this log is catching BGX command-mode error
+    // replies ("ERR\r\n", "ready\r\n" etc.) at connect time on Plus. Once
+    // we've seen even one valid BAPI response, subsequent non-EaE packets
+    // are just continuations of multi-packet frames — logging them all
+    // floods the in-RAM log buffer (it wrapped in ~2 minutes on MAX,
+    // making post-incident diagnosis useless). After the first valid
+    // BAPI response, stay quiet.
+    if (!_instance->_seenBapiThisConnection
+        && len > 0
+        && !(len >= 3 && data[0] == 'E' && data[1] == 'a' && data[2] == 'E')) {
         String hex, ascii;
         size_t show = len < 32 ? len : 32;
         for (size_t i = 0; i < show; i++) {
@@ -598,6 +606,7 @@ void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_
     if (complete) {
         _instance->_lastResponse = _instance->_parser.json();
         _instance->_responseReady = true;
+        _instance->_seenBapiThisConnection = true;
         if (_instance->_responseCb) {
             _instance->_responseCb(_instance->_lastResponse);
         }

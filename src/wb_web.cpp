@@ -1229,6 +1229,7 @@ static void handleInfo() {
 
 <div class='card'>
   <a href='/ota' class='btn btn-outline' style='text-decoration:none;display:block;margin-bottom:8px'>&#x1F4E6; Firmware Update</a>
+  <div id='boot-reason' style='font-size:.82em;color:var(--text3);margin-top:6px;margin-bottom:6px'></div>
   <div id='ota-history' style='display:none;margin-top:8px'>
     <div style='font-size:.82em;color:var(--text2);margin-bottom:6px'>Recent OTA attempts:</div>
     <div id='ota-history-rows' style='font-size:.78em;font-family:monospace'></div>
@@ -1241,6 +1242,8 @@ function loadGW(){fetch('/api/status').then(function(r){return r.json()}).then(f
 function dismissFwBanner(){fetch('/api/fw/dismiss',{method:'POST'}).then(function(){var b=document.getElementById('fw-changed-banner');if(b)b.style.display='none'}).catch(function(){})}
 function loadOtaHistory(){fetch('/api/ota/history').then(function(r){return r.json()}).then(function(arr){if(!Array.isArray(arr)||!arr.length)return;var c=document.getElementById('ota-history');var rows=document.getElementById('ota-history-rows');var h='';arr.forEach(function(e){var dot=e.ok?'<span style="color:#22c55e">&#x25CF;</span>':'<span style="color:#ef4444">&#x25CF;</span>';var sz=e.bytes?(' '+Math.round(e.bytes/1024)+'KB'):'';var rsn=e.ok?'':(' — '+(e.reason||'failed'));h+='<div style="margin:3px 0">'+dot+' '+(e.from||'unknown')+sz+rsn+'</div>'});rows.innerHTML=h;c.style.display='block'}).catch(function(){})}
 loadOtaHistory();
+function loadBootReason(){fetch('/api/boot/history').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('boot-reason');if(!el)return;var cur=d.current||'unknown';var bad=(cur.indexOf('panic')>=0||cur.indexOf('watchdog')>=0||cur.indexOf('brownout')>=0);var col=bad?'#ef4444':'var(--text3)';var prefix=bad?'&#x26A0; ':'';el.innerHTML='<span style=\"color:'+col+'\">'+prefix+'Last boot: '+cur+'</span>';if(d.history&&d.history.length>1){var bads=d.history.filter(function(e){var r=e.reason||'';return r.indexOf('panic')>=0||r.indexOf('watchdog')>=0||r.indexOf('brownout')>=0});if(bads.length){el.innerHTML+=' <span style=\"color:var(--text3);font-size:.92em\">('+bads.length+' bad boot'+(bads.length>1?'s':'')+' in recent history)</span>'}}}).catch(function(){})}
+loadBootReason();
 function fmtUptime(s){if(!s)return 'never';var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60);return (d?d+'d ':'')+(h?h+'h ':'')+m+'m'}
 function fmtDur(s){if(s<60)return s+'s';if(s<3600)return Math.round(s/60)+'m '+(s%60)+'s';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m'}
 function loadDiag(){fetch('/api/diag/disconnects').then(function(r){return r.json()}).then(function(d){var rows=document.getElementById('diag-rows');if(!rows)return;var curUp=d.uptime_s||0;var h='';h+=row('BLE reconnects (this boot)',d.ble_reconnects+(d.ble_longest_s?' (longest '+fmtDur(d.ble_longest_s)+')':''));h+=row('MQTT reconnects (this boot)',d.mqtt_reconnects+(d.mqtt_longest_s?' (longest '+fmtDur(d.mqtt_longest_s)+')':''));if(d.ble_last_at_s)h+=row('Last BLE reconnect',fmtUptime(d.ble_last_at_s)+' after boot');if(d.mqtt_last_at_s)h+=row('Last MQTT reconnect',fmtUptime(d.mqtt_last_at_s)+' after boot');if(d.events&&d.events.length){var thisBoot=d.events.filter(function(e){return e.start<=curUp});var prior=d.events.filter(function(e){return e.start>curUp});if(thisBoot.length){h+='<div style=\"margin-top:8px;font-size:.82em;color:var(--text2)\">Events this boot:</div>';thisBoot.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style=\"font-family:monospace;font-size:.78em;margin:2px 0\"><span style=\"color:'+kc+'\">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+', down '+fmtDur(e.dur)+'</div>'})}if(prior.length){h+='<div style=\"margin-top:8px;font-size:.82em;color:var(--text3)\">From prior boots (NVS-persisted):</div>';prior.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style=\"font-family:monospace;font-size:.78em;margin:2px 0;opacity:.55\"><span style=\"color:'+kc+'\">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+' of that boot, down '+fmtDur(e.dur)+'</div>'})}}rows.innerHTML=h||'<div style=\"color:var(--text3)\">No disconnects logged yet.</div>'}).catch(function(){})}
@@ -2085,6 +2088,15 @@ static void registerRoutes() {
         if (!checkAuth()) return;
         http.sendHeader("Cache-Control", "no-store");
         http.send(200, "application/json", wb_ota_history::toJson());
+    });
+    // /api/boot/history — last ~10 boot reasons (newest first).
+    // Lets us see WHY the gateway rebooted (panic / WDT / power-on / etc).
+    http.on("/api/boot/history", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Cache-Control", "no-store");
+        String body = "{\"current\":\"" + String(wb_health::currentBootReasonStr())
+                    + "\",\"history\":" + wb_health::bootHistoryJson() + "}";
+        http.send(200, "application/json", body);
     });
     // /api/diag/disconnects — counters + recent BLE/MQTT reconnect events
     http.on("/api/diag/disconnects", []() {

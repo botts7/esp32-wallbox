@@ -160,6 +160,12 @@ void setup() {
         Log.printf("[OTA] Running from: %s (0x%x)\n", running->label, running->address);
     }
 
+    // Capture esp_reset_reason() — tells us whether the previous run
+    // ended cleanly (software / power-on) or violently (panic / WDT /
+    // brownout). Persisted to NVS so we can read it later even if the
+    // log buffer wraps before the user gets to /logs.
+    wb_health::recordBootReason();
+
     // Bump the boot counter BEFORE anything else might crash. If we've
     // tried to boot this firmware too many times without reaching a
     // healthy state, something's wrong — log a warning. (Forcing a

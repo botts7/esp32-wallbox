@@ -200,6 +200,10 @@ private:
     mutable uint32_t _rssiLastSample = 0;
     static const uint32_t RSSI_SAMPLE_MS = 2000;
 
+    // Raw-RX diagnostic state — only spams the log buffer before we see
+    // the first valid BAPI frame on a fresh connection. Reset in _disconnect().
+    bool _seenBapiThisConnection = false;
+
     // Stats
     uint32_t _txCount = 0;
     uint32_t _rxCount = 0;

@@ -20,6 +20,20 @@ namespace wb_health {
 // Call this very early in setup(), BEFORE WiFi or BLE init.
 uint8_t bootCountBumpAndRead();
 
+// Capture esp_reset_reason() of this boot, persist a short history of
+// recent boots (reason + uptime-at-time-of-recording) to NVS. Call
+// in setup() right after the boot-banner log. Stores up to 10 entries,
+// newest first.
+void recordBootReason();
+
+// Get current boot's reset reason as a short string ("power-on",
+// "panic", "task-wdt", "brownout", "external", "software", ...).
+const char* currentBootReasonStr();
+
+// Return the persisted history as a JSON array string (newest first).
+// Each entry: {reason, uptime_was_s}.
+String bootHistoryJson();
+
 // Reset the boot counter to 0 (call when healthy).
 void bootCountReset();
 
