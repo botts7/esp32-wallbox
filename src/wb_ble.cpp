@@ -727,13 +727,17 @@ void WallboxBLE::_pollRealtime() {
 }
 
 void WallboxBLE::_pollSettings() {
-    // Five sequential BAPI reads, merged into one JSON. This is the
-    // ~15-second worst case that used to block the Arduino main loop —
-    // now it runs entirely on the BLE task with no caller-visible delay.
+    // Five sequential BAPI reads, merged into one JSON. Each one uses a
+    // 2-second timeout (vs the default 5s) so the mutex doesn't get held
+    // for ~15s in the worst case — user-initiated BAPI commands (web,
+    // MQTT) need to be able to slip in between these settings reads
+    // without the user perceiving a hang. Settings reads on a healthy
+    // link complete in well under 1s.
+    static const uint32_t SETTINGS_TIMEOUT_MS = 2000;
     if (_state != State::CONNECTED) return;
     JsonDocument merged;
 
-    String r1 = sendCommand(bapi::MET_GET_AUTOLOCK);
+    String r1 = sendCommand(bapi::MET_GET_AUTOLOCK, "null", SETTINGS_TIMEOUT_MS);
     if (!r1.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r1) == DeserializationError::Ok) {
             if (d["r"].is<JsonObject>()) {
@@ -747,7 +751,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r2 = sendCommand("g_ecos", "null");
+    String r2 = sendCommand("g_ecos", "null", SETTINGS_TIMEOUT_MS);
     if (!r2.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r2) == DeserializationError::Ok) {
             merged["eco_mode"] = d["r"]["esm"] | 0;
@@ -756,7 +760,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r3 = sendCommand("g_psh", "null");
+    String r3 = sendCommand("g_psh", "null", SETTINGS_TIMEOUT_MS);
     if (!r3.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r3) == DeserializationError::Ok) {
             merged["power_sharing"] = d["r"]["dyps"] | 0;
@@ -764,7 +768,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r4 = sendCommand("g_phsw", "null");
+    String r4 = sendCommand("g_phsw", "null", SETTINGS_TIMEOUT_MS);
     if (!r4.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r4) == DeserializationError::Ok) {
             merged["phase_switch"] = d["r"]["enabled"] | 0;
@@ -772,7 +776,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r5 = sendCommand(bapi::MET_GET_TIMEZONE);
+    String r5 = sendCommand(bapi::MET_GET_TIMEZONE, "null", SETTINGS_TIMEOUT_MS);
     if (!r5.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r5) == DeserializationError::Ok) {
             const char* tz = d["r"]["timezone"] | "UTC";

@@ -114,6 +114,7 @@ String toJson() {
     out["mqtt_longest_s"]   = _mqttLongest;
     out["ble_last_at_s"]    = _bleLastReconnect;
     out["mqtt_last_at_s"]   = _mqttLastReconnect;
+    out["uptime_s"]         = millis() / 1000;  // for "this boot vs prior" split on /info
     JsonArray events = out["events"].to<JsonArray>();
     for (int i = (int)arr.size() - 1; i >= 0; i--) {
         events.add(arr[i]);
