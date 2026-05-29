@@ -1,6 +1,6 @@
 # v2.4.0-rc21
 
-Production-ready 2.4.0 release candidate. Six changes:
+Production-ready 2.4.0 release candidate. Nine changes:
 
 1. **Root-cause fix for the sustained-load panic** — the BLE yield
    callback was calling `webServer.loop()` while running *inside* a
@@ -171,6 +171,71 @@ Tested on local MAX gateway:
   the rc20 limiter).
 - `/sessions` and `/info` both render and respond < 500ms.
 - BLE auto-reconnects after the OTA-window pause expires.
+
+## UX polish (post-stress-testing)
+
+- **Confirm-dialog Cancel button** — was removing the buttons row
+  instead of the overlay (closest('div[style]') matched the inner
+  div, not the outer). Cancel now correctly dismisses the full
+  modal. Affects Reboot Charger, Release BLE for App, Delete
+  Schedule.
+- **Auto Lock dual-shape support** — older Pulsar MAX firmware
+  returns g_alo as a plain number; newer firmware returns
+  {enabled, time}. The form auto-detects and sends matching format
+  back on save. Previously rendered "Couldn't read Auto Lock state"
+  forever on the older shape.
+- **Bluetooth Passcode tab** — new on Settings → Charger. Local-only
+  setting (does NOT call any s_* on the charger; updates cfg.blePin
+  in NVS and reboots so next BLE pair uses the new value). User
+  creates passcode in the official Wallbox app and copies here.
+- **WiFi Status enrichment** — was a single "Connected" word from
+  the charger's gwsta BAPI. Now shows SSID, IP, signal bars + dBm,
+  gateway uptime, BLE module info — gateway-side data from
+  /api/status, no BLE hop.
+- **Firmware Update shortcut** — new button on Settings → Charger
+  (navigates to /ota).
+
+## Universal /api/command retry with backoff
+
+The global JS fetch wrapper now retries `/api/command` on:
+
+- HTTP 429 (rate-limited) — respects server `Retry-After`
+- HTTP 503 (busy or BLE-not-connected) — same
+- HTTP 200 with `{error: ...}` or null/missing `r` field
+
+Backoff: **800 ms → 2.4 s → 7.2 s**, max 3 attempts. Non-/api/command
+URLs pass through unchanged. Replaces per-call retry on each tab
+loader — every BAPI loader self-heals on transient miss without
+per-site code.
+
+## scripts/probe_bapi.py — BAPI shape audit tool
+
+Read-only audit script. Calls every g_* / r_* method the gateway
+uses against a target gateway, prints a structured shape map +
+JSON output suitable for paste-into-issue. Safe to run on any
+working install; rate-limit aware (1 s pacing).
+
+```
+python scripts/probe_bapi.py --host wallbox-gw.local --label "Pulsar Plus FW 6.7.38"
+```
+
+Use this when testing a new charger model — the gateway's
+assumptions about the wire format (object vs number, present vs
+absent fields, naming) drift across firmware. The Auto Lock dual-
+shape fix above came from probing the live MAX with this tool.
+
+## /settings response truncation fix
+
+After the additions above /settings grew to ~67 KB. The Arduino
+WebServer's `http.send(code, type, String)` was silently truncating
+the response around 65 KB on fragmented heap: the htmlFoot (which
+holds the `body.classList.add('ready')` script that lifts the body's
+`visibility:hidden`) was never sent, and the user saw a black
+screen on /settings while every other page worked. Fixed by
+streaming the response via `setContentLength(CONTENT_LENGTH_UNKNOWN)`
++ chunked `sendContent()` calls — each chunk is a small String,
+freed as soon as it's on the wire, never needing a single
+contiguous buffer over ~14 KB.
 
 ## SHA256
 
