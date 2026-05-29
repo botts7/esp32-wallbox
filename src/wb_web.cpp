@@ -663,6 +663,18 @@ static bool tbAllow() {
     return true;
 }
 
+// Read-only token bucket peek, for surfacing on /api/health and over MQTT
+// for HA-observable rate-limit pressure. Refresh-then-read without
+// consuming — so a single curl /api/health doesn't perturb the bucket.
+int wb_web_tokens_remaining() {
+    uint32_t now = millis();
+    if (_tbLastMs == 0) _tbLastMs = now;
+    _tbTokens += (now - _tbLastMs) * (TB_REFILL / 1000.0f);
+    if (_tbTokens > TB_CAP) _tbTokens = TB_CAP;
+    _tbLastMs = now;
+    return (int)_tbTokens;
+}
+
 static void handleApiCommand() {
     if (!checkAuth()) return;
     if (!wallboxBLE.isConnected()) {

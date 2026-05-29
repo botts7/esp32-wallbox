@@ -114,6 +114,13 @@ static void publishCachedNotificationsIfNew() {
     }
 }
 
+// Globals defined in wb_web.cpp — exposed for MQTT diagnostic publish.
+// Keeping them as plain extern (no header) since this is the only other
+// translation unit that needs them, and the rc21 reentry tripwire is
+// already documented in handleApiCommand.
+extern volatile int g_webMaxReentry;
+int wb_web_tokens_remaining();
+
 static void publishGatewayInfo() {
     if (!wallboxMQTT.isConnected()) return;
     String json = "{\"rssi\":";
@@ -128,9 +135,36 @@ static void publishGatewayInfo() {
     json += String(millis() / 1000);
     json += ",\"heap\":";
     json += String(ESP.getFreeHeap());
+    // Min-ever heap is the fragmentation watermark. HA can graph this to
+    // spot a slow leak before it hits the panic threshold.
+    json += ",\"heap_min_ever\":";
+    json += String((uint32_t)esp_get_minimum_free_heap_size());
     json += ",\"wifi_rssi\":";
     json += String(WiFi.RSSI());
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
+    // Gateway-side firmware version (gateway, not the BLE module) — so HA
+    // can show which build is running and alert on unexpected downgrade.
+    json += ",\"fw\":\"" WB_VERSION "\"";
+    // rc21 reentry tripwire + token bucket — proof fields surfaced over
+    // MQTT so HA can alarm if max_reentry ever rises above 1 (regression)
+    // and graph tokens-remaining for rate-limit pressure.
+    json += ",\"max_reentry\":";
+    json += String((int)g_webMaxReentry);
+    json += ",\"tokens\":";
+    json += String(wb_web_tokens_remaining());
+    // Boot reason + per-firmware bad-boot count — same data /info badge
+    // shows, now visible from HA. Useful for fleet monitoring.
+    json += ",\"boot_reason\":\"";
+    json += wb_health::currentBootReasonStr();
+    json += "\"";
+    // BLE pause state — when the user "Released BLE for App", HA users
+    // need to know polling has stopped (sensors will stale) and roughly
+    // how long until it resumes.
+    json += ",\"ble_paused\":";
+    json += (wallboxBLE.isPaused() ? "true" : "false");
+    json += ",\"ble_pause_remaining_s\":";
+    json += String(wallboxBLE.pauseRemainingMs() / 1000);
+    json += ",\"chg_grounding\":\"" + wallboxBLE.chargerGrounding() + "\"";
     json += ",\"dev_mfg\":\"" + wallboxBLE.deviceManufacturer() + "\"";
     json += ",\"dev_model\":\"" + wallboxBLE.deviceModel() + "\"";
     json += ",\"dev_fw\":\"" + wallboxBLE.deviceFirmware() + "\"";

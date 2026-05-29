@@ -746,5 +746,33 @@ void WallboxMQTT::sendDiscovery() {
     publishDiscoveryEntity(*_client, "sensor", "dev_fw", "BLE Firmware",
         "mdi:cog", gTopic.c_str(), "{{ value_json.dev_fw | default('') }}");
 
+    // rc22 — diagnostic sensors backed by the rc20/rc21 observability
+    // surface (max_reentry, tokens, boot_reason, heap watermark, BLE pause
+    // state). All from the gateway-info topic so they update every minute
+    // alongside the existing dev_* sensors. Useful for HA alarms on the
+    // 'this firmware shouldn't be panicking' invariant and for fleet
+    // health dashboards.
+    publishDiscoveryEntity(*_client, "sensor", "gateway_fw", "Gateway Firmware",
+        "mdi:package-variant", gTopic.c_str(), "{{ value_json.fw | default('') }}");
+    publishDiscoveryEntity(*_client, "sensor", "boot_reason", "Last Boot Reason",
+        "mdi:restart", gTopic.c_str(), "{{ value_json.boot_reason | default('unknown') }}");
+    publishDiscoveryEntity(*_client, "sensor", "max_reentry", "Reentry Tripwire",
+        "mdi:shield-bug-outline", gTopic.c_str(), "{{ value_json.max_reentry | default(1) }}");
+    publishDiscoveryEntity(*_client, "sensor", "tokens", "Rate-Limit Tokens",
+        "mdi:gauge", gTopic.c_str(), "{{ value_json.tokens | default(0) }}", nullptr, nullptr, nullptr, "measurement");
+    publishDiscoveryEntity(*_client, "sensor", "heap_min_ever", "Heap Min Watermark",
+        "mdi:memory", gTopic.c_str(), "{{ value_json.heap_min_ever | default(0) }}", "B", nullptr, nullptr, "measurement");
+    publishDiscoveryEntity(*_client, "sensor", "heap_free", "Heap Free",
+        "mdi:memory", gTopic.c_str(), "{{ value_json.heap | default(0) }}", "B", nullptr, nullptr, "measurement");
+    publishDiscoveryEntity(*_client, "sensor", "gw_uptime", "Gateway Uptime",
+        "mdi:clock-outline", gTopic.c_str(), "{{ value_json.uptime | default(0) }}", "s", "duration", nullptr, "measurement");
+    publishDiscoveryEntity(*_client, "sensor", "ble_paused", "BLE Paused",
+        "mdi:bluetooth-off", gTopic.c_str(),
+        "{% if value_json.ble_paused %}Yes ({{ value_json.ble_pause_remaining_s }}s remaining){% else %}No{% endif %}");
+    publishDiscoveryEntity(*_client, "sensor", "chg_grounding", "Charger Grounding",
+        "mdi:earth", gTopic.c_str(), "{{ value_json.chg_grounding | default('Unknown') }}");
+    publishDiscoveryEntity(*_client, "sensor", "wifi_rssi", "WiFi Signal",
+        "mdi:wifi", gTopic.c_str(), "{{ value_json.wifi_rssi | default(0) }}", "dBm", "signal_strength", nullptr, "measurement");
+
     Log.println("[MQTT] HA discovery published (sensors + settings + diagnostics)");
 }
