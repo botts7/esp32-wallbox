@@ -284,14 +284,23 @@ void setup() {
         wallboxBLE.begin(cfg.bleAddr.c_str());
 
         // Yield callback — runs while BLE is waiting on a BAPI response so
-        // the rest of the gateway stays responsive. Critically includes
-        // wallboxMQTT.loop() so PubSubClient's keepalive logic still gets
-        // cycles during long settings polls — without this, several
-        // back-to-back BLE waits could starve MQTT for 15+ seconds and
-        // PubSubClient would close the socket (the "connection closed by
-        // client every 85s" pattern observed in the rc12 broker log).
+        // the rest of the gateway stays responsive. Includes wallboxMQTT.loop()
+        // so PubSubClient's keepalive logic still gets cycles during long
+        // settings polls — without this, several back-to-back BLE waits could
+        // starve MQTT for 15+ seconds and PubSubClient would close the socket
+        // (the "connection closed by client every 85s" pattern observed in the
+        // rc12 broker log).
+        //
+        // CRITICAL: do NOT call webServer.loop() here. This callback fires from
+        // inside sendCommand(), which is itself reached from a web request
+        // handler (handleApiCommand) running inside http.handleClient().
+        // Arduino WebServer is NOT re-entrant — it holds the in-flight request
+        // as member state (_currentClient, parser position, _responseHeaders).
+        // Pumping handleClient() re-entrantly accepts a second connection,
+        // clobbers _currentClient, and the outer handler's http.send() then
+        // writes to a freed socket → panic (LoadProhibited) under overlapping
+        // requests. MQTT + OTA are re-entrancy-safe here; the web server is not.
         wallboxBLE.onYield([]() {
-            webServer.loop();
             ArduinoOTA.handle();
             wallboxMQTT.loop();
         });

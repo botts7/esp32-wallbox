@@ -293,7 +293,14 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
         // a slot is free.
         "<script>(function(){var maxC=1,inflight=0,q=[];var nf=window.fetch.bind(window);"
           "function pump(){while(inflight<maxC&&q.length){var t=q.shift();inflight++;"
-            "nf(t.url,t.opts).then(function(r){inflight--;t.res(r);pump()},"
+            "nf(t.url,t.opts).then(function(r){inflight--;"
+              // Server backpressure: 429 (rate) / 503 (busy) → retry ONCE after
+              // the server's Retry-After, then re-enter the same queue. Honors
+              // the contract for every fetch() in every tab with no per-call code.
+              "if((r.status===429||r.status===503)&&!t._retried){t._retried=true;"
+                "var ra=parseFloat(r.headers.get('Retry-After'))||1.2;"
+                "setTimeout(function(){q.push(t);pump()},ra*1000);pump();return}"
+              "t.res(r);pump()},"
                               "function(e){inflight--;t.rej(e);pump()})}}"
           "window.fetch=function(url,opts){return new Promise(function(res,rej){"
             "q.push({url:url,opts:opts,res:res,rej:rej});pump()})};"
@@ -612,13 +619,53 @@ static void handleApiCharger() {
 static volatile int _apiCmdInflight = 0;
 static const int MAX_API_CMD_INFLIGHT = 2;
 
+// Re-entrancy tripwire for WBWebServer::loop(). Normally 0→1→0 per request;
+// if g_webMaxReentry ever latches >1, something pumped http.handleClient()
+// from inside a handler (the reentrancy class of bug — see onYield in
+// main.cpp). Surfaced on /api/health so we can prove over Wi-Fi, with no
+// serial console, that it stays at 1. Single-threaded handler → plain ints.
+volatile int g_webReentryDepth = 0;
+volatile int g_webMaxReentry   = 0;
+
+// Token bucket on the serialized BLE resource. /api/command ultimately issues
+// one BLE round-trip (~500 ms) behind _cmdMutex; this caps the *rate* so a
+// pathological client (tight curl loop, HA re-sync storm) gets a clean
+// 429 + Retry-After instead of piling up. Sizing: BAPI completes ~1 op / 500 ms,
+// so refill 2 tokens/sec; capacity 4 absorbs a legitimate burst (cold page
+// load, a couple of Saves). millis()-based lazy refill — no timer, ~0 heap.
+// This is rate; MAX_API_CMD_INFLIGHT is concurrency — orthogonal guards.
+static const float TB_CAP    = 4.0f;   // burst capacity (tokens)
+static const float TB_REFILL = 2.0f;   // tokens per second
+static float       _tbTokens = TB_CAP;
+static uint32_t    _tbLastMs = 0;
+
+static bool tbAllow() {
+    uint32_t now = millis();
+    if (_tbLastMs == 0) _tbLastMs = now;
+    _tbTokens += (now - _tbLastMs) * (TB_REFILL / 1000.0f);
+    if (_tbTokens > TB_CAP) _tbTokens = TB_CAP;
+    _tbLastMs = now;
+    if (_tbTokens < 1.0f) return false;
+    _tbTokens -= 1.0f;
+    return true;
+}
+
 static void handleApiCommand() {
     if (!checkAuth()) return;
     if (!wallboxBLE.isConnected()) {
         http.send(503, "application/json", "{\"error\":\"BLE not connected\"}");
         return;
     }
+    // Rate limit before touching the inflight counter so the bucket gates the
+    // true admission point. 429 = slow down (rate); distinct from 503 = busy
+    // (concurrency) below, so the two failure modes stay diagnosable.
+    if (!tbAllow()) {
+        http.sendHeader("Retry-After", "1");
+        http.send(429, "application/json", "{\"error\":\"rate_limited\",\"retry\":true}");
+        return;
+    }
     if (_apiCmdInflight >= MAX_API_CMD_INFLIGHT) {
+        http.sendHeader("Retry-After", "1");
         http.send(503, "application/json", "{\"error\":\"busy\",\"retry\":true}");
         return;
     }
@@ -2416,12 +2463,19 @@ static void registerRoutes() {
     http.on("/api/health", []() {
         String reason;
         bool ok = wb_health::canAcceptOta(reason);
+        // max_reentry is the proof field: it must stay 1. >1 means the web
+        // server was pumped re-entrantly (the panic class of bug). tokens =
+        // current rate-limit budget. Both are cheap to read and let a stress
+        // harness assert correctness over Wi-Fi without a serial console.
+        String diag = ",\"max_reentry\":" + String(g_webMaxReentry)
+                    + ",\"tokens\":" + String((int)_tbTokens)
+                    + ",\"heap_free\":" + String(ESP.getFreeHeap())
+                    + ",\"uptime\":" + String(millis()/1000);
         if (ok) {
-            http.send(200, "application/json",
-                "{\"ok\":true,\"uptime\":" + String(millis()/1000) + "}");
+            http.send(200, "application/json", "{\"ok\":true" + diag + "}");
         } else {
-            String body = "{\"ok\":false,\"reason\":\"" + reason + "\",\"uptime\":" + String(millis()/1000) + "}";
-            http.send(503, "application/json", body);
+            http.send(503, "application/json",
+                "{\"ok\":false,\"reason\":\"" + reason + "\"" + diag + "}");
         }
     });
     http.on("/ota", handleOtaPage);
@@ -2463,7 +2517,10 @@ void WBWebServer::beginSTA() {
 
 void WBWebServer::loop() {
     if (_apMode) dns.processNextRequest();
+    g_webReentryDepth++;
+    if (g_webReentryDepth > g_webMaxReentry) g_webMaxReentry = g_webReentryDepth;
     http.handleClient();
+    g_webReentryDepth--;
     if (_rebootRequested) {
         static uint32_t rt = 0;
         if (rt == 0) rt = millis();
