@@ -251,6 +251,28 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
         ".toast-error{background:#dc2626;color:#fff}"
         ".toast-info{background:#2563eb;color:#fff}"
         "@keyframes toastIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}"
+        // Boot overlay — covers the page while the gateway is still
+        // coming up (BLE handshake/init takes ~3–8s after a reboot).
+        // Prevents users from navigating, firing BAPI calls, or
+        // hammering refresh during the window where requests would
+        // return "BLE not connected" or queue against a busy mutex.
+        // Hidden as soon as WS pushes ble.state === 'connected'.
+        ".wb-overlay{position:fixed;inset:0;background:rgba(15,17,23,.94);"
+        "-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);"
+        "z-index:500;display:none;align-items:center;justify-content:center;padding:20px}"
+        ".wb-overlay.show{display:flex}"
+        ".wb-overlay-card{background:#1a1d28;border:1px solid #2a2d3a;border-radius:14px;"
+        "padding:24px 28px;max-width:380px;width:100%;text-align:center;"
+        "box-shadow:0 16px 48px rgba(0,0,0,.5)}"
+        ".wb-overlay-card h3{margin:0 0 6px;font-size:1.05em;color:#e2e8f0;font-weight:600}"
+        ".wb-overlay-card p{margin:4px 0;color:#94a3b8;font-size:.85em}"
+        ".wb-overlay-card .wb-overlay-hint{color:#64748b;font-size:.78em;margin-top:14px}"
+        ".wb-overlay-spin{width:36px;height:36px;border:3px solid #2a2d3a;"
+        "border-top-color:#3b82f6;border-radius:50%;animation:sp 1s linear infinite;margin:0 auto 14px}"
+        ".wb-overlay-bar-bg{width:100%;height:8px;background:#2a2d3a;border-radius:4px;"
+        "margin:14px 0 6px;overflow:hidden}"
+        ".wb-overlay-bar{height:100%;background:linear-gradient(90deg,#3b82f6,#4fc3f7);"
+        "width:5%;transition:width .4s ease;border-radius:4px}"
         "</style>";
     // Cache-bust CSS/JS with boot time (unique per firmware build + boot)
     static String buildVer;
@@ -276,10 +298,49 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
           "window.fetch=function(url,opts){return new Promise(function(res,rej){"
             "q.push({url:url,opts:opts,res:res,rej:rej});pump()})};"
         "})();</script>"
+        // Auto-retry-once wrapper for /api/command — catches the
+        // transient 503 'BLE not connected' / 'busy' responses that
+        // can happen during page nav + initial BLE handshake without
+        // needing per-call retry logic in each tab loader. Wrapped
+        // *after* the limiter so the retry attempt also queues
+        // through the in-flight cap.
+        "<script>(function(){var orig=window.fetch;"
+        "window.fetch=function(url,opts){"
+            "var doIt=function(){return orig(url,opts)};"
+            "return doIt().then(function(r){"
+                "if(r.status===503&&typeof url==='string'&&url.indexOf('/api/command')>=0){"
+                    "return new Promise(function(res){setTimeout(function(){res(doIt())},1200)})"
+                "}"
+                "return r"
+            "})"
+        "}})();</script>"
         "<script>(function(){try{var t=localStorage.getItem('wb-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}})();</script>"
         "<script>(function(){var handlers={};var sock=null;var rd=1000;var open=false;function connect(){try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.hostname+':81/');sock.onopen=function(){open=true;rd=1000;document.documentElement.setAttribute('data-ws','1')};sock.onmessage=function(e){try{var m=JSON.parse(e.data);var hs=handlers[m.t];if(hs){for(var i=0;i<hs.length;i++){try{hs[i](m.d,m)}catch(ee){}}}}catch(err){}};sock.onclose=function(){open=false;document.documentElement.removeAttribute('data-ws');sock=null;setTimeout(connect,rd);rd=Math.min(rd*2,30000)};sock.onerror=function(){}}catch(e){setTimeout(connect,rd)}}window.wbws={subscribe:function(t,fn){(handlers[t]=handlers[t]||[]).push(fn)},isOpen:function(){return open},send:function(s){if(sock&&open)sock.send(s)}};connect();})();</script>"
         "<script>(function(){var _lastSt=null;function load(){var def={enabled:false,events:{started:true,complete:true,paused:false,error:true,plug_in:false,plug_out:false}};try{var s=JSON.parse(localStorage.getItem('wb-notif')||'null');if(!s)return def;if(!s.events)s.events=def.events;return s}catch(e){return def}}function fire(title,body){try{new Notification(title,{body:body,tag:'wb',silent:false})}catch(e){}}window.wbFireNotif=fire;window.wbCheckStatus=function(s){if(!s||typeof s.st!=='number')return;var st=s.st;if(_lastSt===null){_lastSt=st;return}if(st===_lastSt)return;var N=load();var was=_lastSt;_lastSt=st;if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted')return;var charging=[2,20,179],complete=[21],paused=[3,22,178,193],error=[6,14],ready=[0,7,16,161,189],connected=[1,13,17];function inG(v,g){return g.indexOf(v)>=0}if(inG(st,complete)&&N.events.complete)fire('Charging complete','Your car is ready to go.');else if(inG(st,charging)&&!inG(was,charging)&&N.events.started)fire('Charging started','Active.');else if(inG(st,paused)&&!inG(was,paused)&&N.events.paused)fire('Charging paused','See dashboard.');else if(inG(st,error)&&!inG(was,error)&&N.events.error)fire('Charger error','See dashboard.');else if(inG(st,connected)&&inG(was,ready)&&N.events.plug_in)fire('Plug connected','Ready to charge.');else if(inG(st,ready)&&!inG(was,ready)&&N.events.plug_out)fire('Plug disconnected','Charger idle.')};})();</script>"
-        "</head><body><div class='container'>"
+        "</head><body>";
+    // Boot overlay markup — rendered with initial display state based
+    // on the current BLE state at the moment the page was served. If
+    // BLE is already connected, the overlay starts hidden (no flash).
+    // Otherwise it starts visible and the JS below progresses it via
+    // WS 'ble' pushes until state === 'connected'.
+    bool bootReady = (bleState == "connected");
+    h += "<div id='wb-boot-overlay' class='wb-overlay";
+    h += bootReady ? "" : " show";
+    h += "'><div class='wb-overlay-card'>"
+         "<div class='wb-overlay-spin'></div>"
+         // Title and subtitle are both JS-controlled — they say
+         // "Wallbox Gateway is starting" only during an actual cold
+         // boot / BLE-disconnected state. Navigation transitions show
+         // "Loading…" and WS-drop reconnections show "Reconnecting…"
+         // so users don't see a misleading boot screen during a
+         // quick page change.
+         "<div id='wb-boot-title' style='font-size:1.05em;font-weight:600;color:#e2e8f0;margin:0 0 6px'>"
+         "Wallbox Gateway is starting</div>"
+         "<p id='wb-boot-stage'>Initializing</p>"
+         "<div class='wb-overlay-bar-bg'><div id='wb-boot-bar' class='wb-overlay-bar'></div></div>"
+         "<p id='wb-boot-hint' class='wb-overlay-hint'>This usually takes 5&ndash;15 seconds after a reboot.</p>"
+         "</div></div>";
+    h += "<div class='container'>"
         "<div class='ble-bar'><span class='ble-dot'></span>BLE: <span id='ble-bar-state'>";
     h += bleState;
     h += "</span>";
@@ -290,10 +351,95 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
     h += "</span></div>";
     // Keep the banner live — subscribe to the same 'ble' WS push the page
     // bodies use, so banner + Gateway-card BLE Signal always agree.
-    h += "<script>if(window.wbws){window.wbws.subscribe('ble',function(d){"
-         "var s=document.getElementById('ble-bar-state');if(s)s.textContent=d.state;"
-         "var r=document.getElementById('ble-bar-rssi');if(r)r.textContent=(d.state==='connected'&&d.rssi>-127)?(' ('+d.rssi+' dBm)'):'';"
-         "});}</script>";
+    // Also drive the boot overlay: state→progress map below mirrors the
+    // sequence in WallboxBLE::stateStr(). When connected, overlay fades
+    // out after a short delay so the user sees a 100% finish.
+    h += "<script>(function(){"
+         "var O=document.getElementById('wb-boot-overlay');"
+         "var B=document.getElementById('wb-boot-bar');"
+         "var S=document.getElementById('wb-boot-stage');"
+         "var T=document.getElementById('wb-boot-title');"
+         "var H=document.getElementById('wb-boot-hint');"
+         // Overlay has three independent modes; the active one decides
+         // what title/hint is shown. WS BLE pushes update the progress
+         // bar + stage text regardless, but title/hint are only
+         // touched in 'boot' mode so a click-nav 'Loading' or
+         // watchdog 'Reconnecting' isn't clobbered when the next ble
+         // event arrives.
+         "var mode='boot';"
+         "var M={'disconnected':{p:20,t:'Searching for charger\xE2\x80\xA6'},"
+                 "'connecting':{p:50,t:'Connecting to charger\xE2\x80\xA6'},"
+                 "'authenticating':{p:75,t:'Authenticating\xE2\x80\xA6'},"
+                 "'connected':{p:100,t:'Ready'},"
+                 "'error':{p:15,t:'Retrying\xE2\x80\xA6'},"
+                 "'unknown':{p:10,t:'Starting up\xE2\x80\xA6'}};"
+         "var BOOT_TITLE='Wallbox Gateway is starting';"
+         // 5–15 uses a JS Unicode escape (parsed by the browser)
+         // rather than the equivalent \xE2\x80\x93 C++ hex escape,
+         // which the compiler ate as one variable-length escape
+         // (\x9315) and produced garbage bytes in the binary.
+         "var BOOT_HINT='This usually takes 5\\u201315 seconds after a reboot.';"
+         "function show(){if(O)O.classList.add('show')}"
+         "function hide(){if(O)O.classList.remove('show')}"
+         "if(window.wbws){window.wbws.subscribe('ble',function(d){"
+             "var s=document.getElementById('ble-bar-state');if(s)s.textContent=d.state;"
+             "var r=document.getElementById('ble-bar-rssi');if(r)r.textContent=(d.state==='connected'&&d.rssi>-127)?(' ('+d.rssi+' dBm)'):'';"
+             "var m=M[d.state]||M['disconnected'];"
+             // bar + stage track real BLE state in all modes; the
+             // title/hint only follow BLE state in boot mode.
+             "if(B)B.style.width=m.p+'%';"
+             "if(mode==='boot'){"
+                 "if(S)S.textContent=m.t;"
+                 "if(T)T.textContent=BOOT_TITLE;"
+                 "if(H)H.textContent=BOOT_HINT;"
+             "}"
+             "if(d.state==='connected'){"
+                 // 100% then fade out — reset mode so the next time
+                 // the overlay reappears (e.g. after a reboot) it
+                 // starts fresh in boot mode.
+                 "setTimeout(function(){hide();mode='boot'},600)"
+             "}else if(mode==='boot'){show()}"
+         "});}"
+         // Watchdog: only fires after WS has been confirmed open at
+         // least once (wasOpen starts false). A genuine open→closed
+         // transition means the gateway disappeared — switch to
+         // 'reconnect' mode so subsequent BLE pushes don't reset the
+         // title back to 'Wallbox Gateway is starting'.
+         "var wasOpen=false;setInterval(function(){"
+             "var on=window.wbws&&window.wbws.isOpen();"
+             "if(on)wasOpen=true;"
+             "else if(wasOpen){"
+                 "mode='reconnect';"
+                 "if(T)T.textContent='Reconnecting to gateway';"
+                 "if(S)S.textContent='Please wait\xE2\x80\xA6';"
+                 "if(H)H.textContent='The gateway will return in a few seconds.';"
+                 "if(B)B.style.width='5%';"
+                 "show()"
+             "}"
+         "},1500);"
+         // Nav-click loading hint — switch into 'nav' mode so the WS
+         // 'ble' handler above won't overwrite the title back to the
+         // boot string. 150ms deferred show: fast page transitions
+         // (paint-hold or cache-hit nav) finish before the timer
+         // fires, so the user never sees a flash of overlay. Slow
+         // navs (cold-cache HTML download + parse) fire the overlay.
+         // The browser tearing down the page on navigation cancels
+         // pending setTimeout, so a successful fast nav guarantees
+         // the timer never runs.
+         "document.addEventListener('click',function(e){"
+             "var t=e.target;while(t&&t.nodeName!=='A')t=t.parentNode;"
+             "if(!t||!t.href||t.target||t.host!==location.host)return;"
+             "if(t.getAttribute('href').charAt(0)==='#')return;"
+             "setTimeout(function(){"
+                 "mode='nav';"
+                 "if(T)T.textContent='Loading';"
+                 "if(S)S.textContent='Opening page\xE2\x80\xA6';"
+                 "if(H)H.textContent='';"
+                 "if(B)B.style.width='40%';"
+                 "show();"
+             "},150);"
+         "});"
+         "})();</script>";
     return h;
 }
 
@@ -962,16 +1108,27 @@ function buildScheduleTimeline(schedules){
   legend.innerHTML=lg||'<span style=\"color:var(--text3)\">All schedules disabled</span>';
   wrap.style.display='block';
 }
-function loadSchedules(){
+function loadSchedules(_retry){
+  // _retry: undefined = first attempt, true = the auto-retry. We retry
+  // once after a brief settle when the BAPI call times out or the
+  // gateway returns null (typically because the BLE mutex was busy
+  // with another command \u2014 common right after page load when the
+  // BLE init sequence overlaps the schedule fetch).
   var l=document.getElementById('sch-list');
   if(!l)return;
-  l.innerHTML="<span class='spinner'></span> Loading...";
-  fetch('/api/command?action=bapi&met=r_schs&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){
-    if(d.error){l.innerHTML='<span style="color:var(--danger)">'+d.error+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>';return}
+  l.innerHTML=_retry?"<span class='spinner'></span> Retrying...":"<span class='spinner'></span> Loading...";
+  fetch('/api/command?action=bapi&met=r_schs&par=null',{signal:AbortSignal.timeout(_retry?20000:15000)}).then(function(x){return x.json()}).then(function(d){
+    if(d.error){
+      if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+      l.innerHTML='<span style="color:var(--danger)">'+d.error+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>';return
+    }
     var sc=null;
     if(d.r&&Array.isArray(d.r.schedules))sc=d.r.schedules;
     else if(Array.isArray(d.r))sc=d.r;
-    if(sc===null){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return}
+    if(sc===null){
+      if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+      l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return
+    }
     allSchedules=sc;
     try{buildScheduleTimeline(sc)}catch(e){console.error('timeline failed',e)}
     if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules yet. Tap + Add New to create one.</div>';return}
@@ -985,7 +1142,10 @@ function loadSchedules(){
       html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" \u2013 "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" \u00B7 "+lim+(ek?' \u00B7 '+ek:'')+" \u00B7 #"+s.sid+"</div></div><div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>\u270E</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>\u2716</button></div></div></div>";
     });
     l.innerHTML=html;
-  }).catch(function(e){l.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'});
+  }).catch(function(e){
+    if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+    l.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>'
+  });
 }
 function newSchedule(){
   editingSid=null;
