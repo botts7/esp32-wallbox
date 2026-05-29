@@ -82,7 +82,15 @@ static bool checkAuth() {
 
 // ========== CSS ==========
 static void handleStyleCss() {
-    http.sendHeader("Cache-Control", "no-cache");
+    // Aggressive caching is safe — URL carries ?v=<buildVer> so cache
+    // is naturally busted on upgrade. Was no-cache → every navigation
+    // triggered a conditional GET (304 round-trip) that piled on TCP
+    // sockets alongside in-flight BAPI calls. Under heavy /settings
+    // load the resulting heap pressure was crashing the gateway
+    // (heap_min_ever observed dipping to ~59 KB; panic threshold is
+    // ~30 KB). immutable tells the browser to skip revalidation
+    // entirely until the URL hash changes.
+    http.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
     http.send(200, "text/css", R"CSS(
 :root{--bg:#0f1117;--surface:#1a1d28;--card:#1a1d28;--elevated:#232736;--primary:#3b82f6;--success:#22c55e;--danger:#ef4444;--warning:#f59e0b;--text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;--border:#2a2d3a;--accent:#4fc3f7}
 @media (prefers-color-scheme:light){:root:not([data-theme]){--bg:#f5f7fa;--surface:#ffffff;--card:#ffffff;--elevated:#eef2f7;--text:#1e293b;--text2:#475569;--text3:#64748b;--border:#d8dfe8;--accent:#1d4ed8}}
@@ -140,7 +148,10 @@ input[type=range]::-webkit-slider-runnable-track{border-radius:3px}
 
 // ========== JS (shared) ==========
 static void handleAppJs() {
-    http.sendHeader("Cache-Control", "no-cache");
+    // See handleStyleCss() — same rationale. ?v=<buildVer> in the URL
+    // is the cache-bust signal; immutable means no re-validation
+    // round-trip on subsequent navigations within the same firmware.
+    http.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
     http.send(200, "application/javascript", R"JS(
 function toast(msg,type){type=type||'info';var c=document.getElementById('toast-c');if(!c){c=document.createElement('div');c.id='toast-c';c.className='toast-container';document.body.appendChild(c)}var t=document.createElement('div');t.className='toast toast-'+type;t.textContent=msg;c.appendChild(t);setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove()},300)},3000)}
 function confirm2(msg,cb){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;display:flex;align-items:center;justify-content:center';o.innerHTML="<div style='background:#1a1d28;border:1px solid #2a2d3a;border-radius:14px;padding:24px;max-width:320px;text-align:center'><p style='margin:0 0 16px;color:#e2e8f0'>"+msg+"</p><div style='display:flex;gap:10px'><button style='flex:1;padding:12px;border-radius:8px;border:1px solid #2a2d3a;background:transparent;color:#94a3b8;cursor:pointer' onclick='this.closest(\"div[style]\").remove()'>Cancel</button><button style='flex:1;padding:12px;border-radius:8px;border:none;background:#ef4444;color:#fff;cursor:pointer' id='cf-ok'>Confirm</button></div></div>";document.body.appendChild(o);document.getElementById('cf-ok').onclick=function(){o.remove();cb()};o.onclick=function(e){if(e.target===o)o.remove()}}
@@ -1071,11 +1082,20 @@ function pauseBle(){
     }).catch(function(e){toast('Error: '+e.message,'error');if(btn){btn.disabled=false;btn.innerHTML='\u{1F4F4} Release BLE for App'}});
   });
 }
-// On page load, sync UI with actual pause state
-fetch('/api/status').then(function(x){return x.json()}).then(function(d){
-  if(d.ble_paused&&d.ble_pause_remaining>0)startPauseUI(d.ble_pause_remaining);
-}).catch(function(){});
-loadSchedules();
+// Defer the on-load fetches until window.onload fires (i.e. AFTER
+// /app.js + /style.css + /manifest.json have all finished loading).
+// Was firing at script-parse time, which ran the heavy r_schs BAPI
+// call in parallel with the static-asset GETs. Concurrent ESP32
+// HTTP responses each allocate ~10–20 KB of heap; min-heap was
+// dipping into the malloc-failure / panic zone (~30–60 KB free).
+// Deferring trades ~200 ms of perceived load time for reliable
+// no-panic page loads.
+window.addEventListener('load',function(){
+  fetch('/api/status').then(function(x){return x.json()}).then(function(d){
+    if(d.ble_paused&&d.ble_pause_remaining>0)startPauseUI(d.ble_pause_remaining);
+  }).catch(function(){});
+  loadSchedules();
+});
 </script>
 </div>
 )HTML";
