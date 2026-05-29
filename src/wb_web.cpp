@@ -305,22 +305,10 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
           "window.fetch=function(url,opts){return new Promise(function(res,rej){"
             "q.push({url:url,opts:opts,res:res,rej:rej});pump()})};"
         "})();</script>"
-        // Auto-retry-once wrapper for /api/command — catches the
-        // transient 503 'BLE not connected' / 'busy' responses that
-        // can happen during page nav + initial BLE handshake without
-        // needing per-call retry logic in each tab loader. Wrapped
-        // *after* the limiter so the retry attempt also queues
-        // through the in-flight cap.
-        "<script>(function(){var orig=window.fetch;"
-        "window.fetch=function(url,opts){"
-            "var doIt=function(){return orig(url,opts)};"
-            "return doIt().then(function(r){"
-                "if(r.status===503&&typeof url==='string'&&url.indexOf('/api/command')>=0){"
-                    "return new Promise(function(res){setTimeout(function(){res(doIt())},1200)})"
-                "}"
-                "return r"
-            "})"
-        "}})();</script>"
+        // (Note: 429/503 retry-after-honoring logic now lives INSIDE the
+        // single-flight limiter above, courtesy of the reentrancy-fix
+        // patch. Dropped my separate wrapper that was here — it would
+        // double-wrap fetch() and double-count retries.)
         "<script>(function(){try{var t=localStorage.getItem('wb-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}})();</script>"
         "<script>(function(){var handlers={};var sock=null;var rd=1000;var open=false;function connect(){try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.hostname+':81/');sock.onopen=function(){open=true;rd=1000;document.documentElement.setAttribute('data-ws','1')};sock.onmessage=function(e){try{var m=JSON.parse(e.data);var hs=handlers[m.t];if(hs){for(var i=0;i<hs.length;i++){try{hs[i](m.d,m)}catch(ee){}}}}catch(err){}};sock.onclose=function(){open=false;document.documentElement.removeAttribute('data-ws');sock=null;setTimeout(connect,rd);rd=Math.min(rd*2,30000)};sock.onerror=function(){}}catch(e){setTimeout(connect,rd)}}window.wbws={subscribe:function(t,fn){(handlers[t]=handlers[t]||[]).push(fn)},isOpen:function(){return open},send:function(s){if(sock&&open)sock.send(s)}};connect();})();</script>"
         "<script>(function(){var _lastSt=null;function load(){var def={enabled:false,events:{started:true,complete:true,paused:false,error:true,plug_in:false,plug_out:false}};try{var s=JSON.parse(localStorage.getItem('wb-notif')||'null');if(!s)return def;if(!s.events)s.events=def.events;return s}catch(e){return def}}function fire(title,body){try{new Notification(title,{body:body,tag:'wb',silent:false})}catch(e){}}window.wbFireNotif=fire;window.wbCheckStatus=function(s){if(!s||typeof s.st!=='number')return;var st=s.st;if(_lastSt===null){_lastSt=st;return}if(st===_lastSt)return;var N=load();var was=_lastSt;_lastSt=st;if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted')return;var charging=[2,20,179],complete=[21],paused=[3,22,178,193],error=[6,14],ready=[0,7,16,161,189],connected=[1,13,17];function inG(v,g){return g.indexOf(v)>=0}if(inG(st,complete)&&N.events.complete)fire('Charging complete','Your car is ready to go.');else if(inG(st,charging)&&!inG(was,charging)&&N.events.started)fire('Charging started','Active.');else if(inG(st,paused)&&!inG(was,paused)&&N.events.paused)fire('Charging paused','See dashboard.');else if(inG(st,error)&&!inG(was,error)&&N.events.error)fire('Charger error','See dashboard.');else if(inG(st,connected)&&inG(was,ready)&&N.events.plug_in)fire('Plug connected','Ready to charge.');else if(inG(st,ready)&&!inG(was,ready)&&N.events.plug_out)fire('Plug disconnected','Charger idle.')};})();</script>"
