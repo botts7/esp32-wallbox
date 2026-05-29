@@ -17,9 +17,9 @@ Correctness is asserted over Wi-Fi via /api/health (no serial console needed):
 Stdlib only (urllib + threading). No Node, no pip installs.
 
 Usage:
-  python scripts/stress_api.py --host 192.168.86.125
-  python scripts/stress_api.py --host 192.168.86.125 --seq 200 --conc 8 --rounds 50 --soak 0
-  python scripts/stress_api.py --host 192.168.86.125 --soak 3600   # 1-hour soak
+  python scripts/stress_api.py --host wallbox-gw.local
+  python scripts/stress_api.py --host wallbox-gw.local --seq 200 --conc 8 --rounds 50 --soak 0
+  python scripts/stress_api.py --host wallbox-gw.local --soak 3600   # 1-hour soak
 
 Exit code 0 = PASS (production-grade), 1 = FAIL.
 """
@@ -107,7 +107,7 @@ def report(label, codes, lat):
 
 def main():
     ap = argparse.ArgumentParser(description="Stress /api/command and assert no panic / no reentrancy.")
-    ap.add_argument("--host", required=True, help="gateway IP, e.g. 192.168.86.125")
+    ap.add_argument("--host", required=True, help="gateway IP, e.g. wallbox-gw.local")
     ap.add_argument("--seq", type=int, default=200, help="sequential tight-loop request count")
     ap.add_argument("--conc", type=int, default=8, help="concurrent workers")
     ap.add_argument("--rounds", type=int, default=50, help="conc requests = conc*rounds")
