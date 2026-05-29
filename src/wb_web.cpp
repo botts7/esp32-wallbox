@@ -144,9 +144,9 @@ static void handleAppJs() {
     http.send(200, "application/javascript", R"JS(
 function toast(msg,type){type=type||'info';var c=document.getElementById('toast-c');if(!c){c=document.createElement('div');c.id='toast-c';c.className='toast-container';document.body.appendChild(c)}var t=document.createElement('div');t.className='toast toast-'+type;t.textContent=msg;c.appendChild(t);setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove()},300)},3000)}
 function confirm2(msg,cb){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;display:flex;align-items:center;justify-content:center';o.innerHTML="<div style='background:#1a1d28;border:1px solid #2a2d3a;border-radius:14px;padding:24px;max-width:320px;text-align:center'><p style='margin:0 0 16px;color:#e2e8f0'>"+msg+"</p><div style='display:flex;gap:10px'><button style='flex:1;padding:12px;border-radius:8px;border:1px solid #2a2d3a;background:transparent;color:#94a3b8;cursor:pointer' onclick='this.closest(\"div[style]\").remove()'>Cancel</button><button style='flex:1;padding:12px;border-radius:8px;border:none;background:#ef4444;color:#fff;cursor:pointer' id='cf-ok'>Confirm</button></div></div>";document.body.appendChild(o);document.getElementById('cf-ok').onclick=function(){o.remove();cb()};o.onclick=function(e){if(e.target===o)o.remove()}}
-function selectDevice(addr){document.getElementById('ble_addr').value=addr;document.querySelectorAll('.scan-result').forEach(function(e){e.style.borderColor=''});event.currentTarget.style.borderColor='var(--primary)'}
+function selectDevice(addr,ev){document.getElementById('ble_addr').value=addr;document.querySelectorAll('.scan-result').forEach(function(e){e.style.borderColor=''});if(ev&&ev.currentTarget)ev.currentTarget.style.borderColor='var(--primary)'}
 function formatMAC(i){var v=i.value.replace(/[^0-9a-fA-F]/g,'').toUpperCase(),f='';for(var j=0;j<v.length&&j<12;j++){if(j>0&&j%2===0)f+=':';f+=v[j]}i.value=f}
-function startScan(){var b=document.getElementById('scanBtn'),r=document.getElementById('scanResults');b.disabled=true;b.innerHTML="<span class='spinner'></span>Scanning...";r.innerHTML="<div style='text-align:center;padding:16px;color:var(--text3)'><span class='spinner'></span> Scanning...</div>";fetch('/api/ble-scan').then(function(x){return x.json()}).then(function(d){b.disabled=false;b.innerHTML='Scan for Chargers';if(!d.devices.length){r.innerHTML="<div style='text-align:center;padding:16px;color:var(--text3)'>No devices found</div>";return}var h='';d.devices.forEach(function(v){var c=v.is_wallbox?'scan-result wb':'scan-result';var bg=v.is_wallbox?"<span class='badge badge-success'>WALLBOX</span>":'';h+="<div class='"+c+"' onclick=\"selectDevice('"+v.addr+"')\"><div><span class='scan-name'>"+(v.name||'Unknown')+"</span>"+bg+"<br><span class='scan-addr'>"+v.addr+"</span></div><span class='scan-rssi'>"+v.rssi+" dBm</span></div>"});r.innerHTML=h}).catch(function(e){b.disabled=false;b.innerHTML='Scan for Chargers';r.innerHTML="<div style='color:var(--danger)'>"+e+"</div>"})}
+function startScan(){var b=document.getElementById('scanBtn'),r=document.getElementById('scanResults');b.disabled=true;b.innerHTML="<span class='spinner'></span>Scanning...";r.innerHTML="<div style='text-align:center;padding:16px;color:var(--text3)'><span class='spinner'></span> Scanning...</div>";fetch('/api/ble-scan').then(function(x){return x.json()}).then(function(d){b.disabled=false;b.innerHTML='Scan for Chargers';r.replaceChildren();if(!d.devices.length){var n=document.createElement('div');n.style.cssText='text-align:center;padding:16px;color:var(--text3)';n.textContent='No devices found';r.appendChild(n);return}/* SECURITY: build DOM nodes via createElement+textContent — BLE device name and address are attacker-controllable (any radio in range can advertise arbitrary strings) and previously flowed into innerHTML, an XSS sink that ran in admin auth context. */d.devices.forEach(function(v){var row=document.createElement('div');row.className=v.is_wallbox?'scan-result wb':'scan-result';row.addEventListener('click',function(ev){selectDevice(v.addr,ev)});var left=document.createElement('div');var name=document.createElement('span');name.className='scan-name';name.textContent=v.name||'Unknown';left.appendChild(name);if(v.is_wallbox){var bg=document.createElement('span');bg.className='badge badge-success';bg.textContent='WALLBOX';bg.style.marginLeft='8px';left.appendChild(bg)}left.appendChild(document.createElement('br'));var addr=document.createElement('span');addr.className='scan-addr';addr.textContent=v.addr;left.appendChild(addr);row.appendChild(left);var rssi=document.createElement('span');rssi.className='scan-rssi';rssi.textContent=v.rssi+' dBm';row.appendChild(rssi);r.appendChild(row)})}).catch(function(e){b.disabled=false;b.innerHTML='Scan for Chargers';r.replaceChildren();var er=document.createElement('div');er.style.color='var(--danger)';er.textContent=String(e);r.appendChild(er)})}
 function pickSsid(s){var i=document.getElementById('wifi_ssid');if(i)i.value=s;var r=document.getElementById('wifi-results');if(r)r.style.display='none';toast('Selected: '+s,'info')}
 function scanWifi(){
   var b=document.getElementById('wifiScanBtn');
@@ -157,16 +157,26 @@ function scanWifi(){
   r.innerHTML="<div style='padding:10px;text-align:center;color:var(--text3)'><span class='spinner'></span> Scanning WiFi...</div>";
   fetch('/api/wifi-scan',{signal:AbortSignal.timeout(20000)}).then(function(x){return x.json()}).then(function(d){
     b.disabled=false;b.innerHTML='Scan';
-    if(d.error){r.innerHTML="<div style='padding:10px;color:var(--danger)'>Scan error: "+d.error+"</div>";return}
-    if(!d.networks||!d.networks.length){r.innerHTML="<div style='padding:10px;text-align:center;color:var(--text3)'>No networks found</div>";return}
-    var o='';d.networks.sort(function(a,b){return b.rssi-a.rssi}).forEach(function(n){
-      var ss=n.ssid.replace(/'/g,"\\'");
-      o+="<div onclick=\"pickSsid('"+ss+"')\" style='padding:10px 12px;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center'>";
-      o+="<span style='font-weight:500'>"+n.ssid+"</span>";
-      o+="<span style='color:var(--text3);font-size:.8em'>"+n.rssi+" dBm</span>";
-      o+="</div>";
+    r.replaceChildren();
+    if(d.error){var er=document.createElement('div');er.style.cssText='padding:10px;color:var(--danger)';er.textContent='Scan error: '+d.error;r.appendChild(er);return}
+    if(!d.networks||!d.networks.length){var no=document.createElement('div');no.style.cssText='padding:10px;text-align:center;color:var(--text3)';no.textContent='No networks found';r.appendChild(no);return}
+    /* SECURITY: SSIDs are attacker-controllable (any AP can broadcast arbitrary
+       SSID strings); building via createElement+textContent prevents XSS that
+       would otherwise run in the WiFi-setup admin context. */
+    d.networks.sort(function(a,b){return b.rssi-a.rssi}).forEach(function(n){
+      var row=document.createElement('div');
+      row.style.cssText='padding:10px 12px;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center';
+      row.addEventListener('click',function(){pickSsid(n.ssid)});
+      var nameSpan=document.createElement('span');
+      nameSpan.style.fontWeight='500';
+      nameSpan.textContent=n.ssid;
+      row.appendChild(nameSpan);
+      var rssiSpan=document.createElement('span');
+      rssiSpan.style.cssText='color:var(--text3);font-size:.8em';
+      rssiSpan.textContent=n.rssi+' dBm';
+      row.appendChild(rssiSpan);
+      r.appendChild(row);
     });
-    r.innerHTML=o;
     toast('Found '+d.networks.length+' networks','success');
   }).catch(function(e){
     b.disabled=false;b.innerHTML='Scan';
