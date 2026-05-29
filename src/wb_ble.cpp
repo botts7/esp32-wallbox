@@ -65,14 +65,35 @@ void WallboxBLE::_taskFn(void* arg) {
 }
 
 void WallboxBLE::pause(uint32_t ms) {
+    // CRITICAL: caller may be on the web/main task (e.g. OTA upload start);
+    // _disconnect() tears down NimBLE objects that the BLE task on Core 1
+    // owns and may be reading mid-frame. Calling it from here is a
+    // use-after-free race that reliably panics the gateway under OTA
+    // upload load (root cause of peter-mcc's "OTA still reboots" report
+    // and reproduced locally on rc20 via curl multipart upload).
+    //
+    // Fix: only set the pause flag here. The BLE task's loop() observes
+    // it on its next iteration and disconnects cleanly from its own
+    // task context. Callers that need the BLE to be idle before
+    // proceeding can poll isPaused()/stateStr() — though for OTA the
+    // ~100ms it takes the BLE task to notice is well within the upload
+    // window.
     _pausedUntil = millis() + ms;
-    if (_state == State::CONNECTED) _disconnect();
-    _state = State::DISCONNECTED;
-    Log.printf("[BLE] paused for %u ms (release for official app)\n", ms);
+    Log.printf("[BLE] pause requested for %u ms (BLE task will disconnect on next tick)\n", ms);
 }
 
 void WallboxBLE::loop() {
-    if (isPaused()) return;  // skip all BLE activity during user-requested pause
+    if (isPaused()) {
+        // Tear down BLE from THIS task's context (not the caller's) so we
+        // never race a sendCommand / notification callback. Idempotent —
+        // if we're already disconnected, _disconnect() is a no-op.
+        if (_state == State::CONNECTED) {
+            Log.println("[BLE] pause active — disconnecting from BLE task");
+            _disconnect();
+            _state = State::DISCONNECTED;
+        }
+        return;  // skip all further BLE activity during user-requested pause
+    }
     switch (_state) {
     case State::DISCONNECTED:
     case State::ERROR:

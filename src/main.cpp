@@ -219,6 +219,12 @@ void setup() {
     esp_ota_mark_app_valid_cancel_rollback();
     Log.println("[OTA] Firmware validated (WiFi OK)");
 
+    // Kick off SNTP. Used by wb_health::updateBootTimeIfPossible() so
+    // boot-history entries get a real wall-clock timestamp once sync
+    // lands (typically ~1–3s after WiFi up). Pool.ntp.org is the
+    // canonical anycast resolver — no further config needed for UTC.
+    configTime(0, 0, "pool.ntp.org");
+
     // mDNS — access at http://wallbox-gw.local
     // Retry a few times as mDNS init sometimes fails on first attempt
     bool mdnsOk = false;
@@ -337,6 +343,16 @@ void loop() {
     // partition is good (no rollback on next boot). Only fires once.
     if (!wb_health::isHealthy() && WiFi.status() == WL_CONNECTED && millis() > 30000) {
         wb_health::markHealthy();
+    }
+
+    // Patch the current boot record's wall-clock timestamp once NTP
+    // has actually synced. Slow cadence — once a minute is plenty,
+    // since updateBootTimeIfPossible() is a no-op after the first
+    // successful patch.
+    static uint32_t lastBootTimePatch = 0;
+    if (millis() - lastBootTimePatch >= 60000) {
+        lastBootTimePatch = millis();
+        wb_health::updateBootTimeIfPossible();
     }
 
     // Broadcast BLE health every 5s to any connected WS clients

@@ -2,11 +2,13 @@
 #include "wb_log.h"
 #include "wb_ble.h"
 #include "wb_mqtt.h"
+#include "wb_version.h"
 #include <Preferences.h>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
 #include <WiFi.h>
 #include <ArduinoJson.h>
+#include <time.h>
 
 namespace wb_health {
 
@@ -69,11 +71,44 @@ void recordBootReason() {
     JsonObject e = arr.add<JsonObject>();
     e["reason"] = currentBootReasonStr();
     e["raw"]    = (int)_thisBootReason;
-    // We don't yet know what uptime this firmware will reach — record 0
-    // here, the periodic publishGatewayInfo path could update if we
-    // wanted that, but as a one-shot at boot it's fine to leave 0.
-    e["at"]     = (uint32_t)(millis() / 1000);
+    // `at` is wall-clock epoch when first observed by SNTP. NTP hasn't
+    // synced yet at recordBootReason() time (very early setup), so seed
+    // 0 here. updateBootTimeIfPossible() patches it once NTP comes up.
+    e["at"]     = 0;
+    // `fw` lets /info distinguish "panics on the CURRENT firmware
+    // version" from "panics carried over from older dev firmware in the
+    // NVS ring". Without this, every fresh release would inherit the
+    // bad-boot count of whatever was being debugged on the previous
+    // firmware. Entries written before rc21 have no `fw` field and are
+    // treated by the badge as "prior firmware".
+    e["fw"]     = WB_VERSION;
     while ((int)arr.size() > BOOT_HIST_MAX) arr.remove(0);
+    String out;
+    serializeJson(doc, out);
+    p.putString(NVS_BOOT_HIST, out);
+    p.end();
+}
+
+void updateBootTimeIfPossible() {
+    time_t now = time(nullptr);
+    // Pre-2024 means SNTP hasn't replaced the boot-default 1970 yet.
+    // Threshold is generous on purpose — we don't need a precise cutoff,
+    // just "obviously after a real NTP sync".
+    if (now < 1704067200) return;  // 2024-01-01 00:00:00 UTC
+
+    Preferences p;
+    if (!p.begin(NVS_NS, false)) return;
+    String s = p.getString(NVS_BOOT_HIST, "[]");
+    JsonDocument doc;
+    if (deserializeJson(doc, s) != DeserializationError::Ok || !doc.is<JsonArray>()) {
+        p.end();
+        return;
+    }
+    JsonArray arr = doc.as<JsonArray>();
+    if (arr.size() == 0) { p.end(); return; }
+    JsonObject last = arr[arr.size() - 1];
+    if (last["at"].as<uint32_t>() != 0) { p.end(); return; }  // already patched
+    last["at"] = (uint32_t)now;
     String out;
     serializeJson(doc, out);
     p.putString(NVS_BOOT_HIST, out);

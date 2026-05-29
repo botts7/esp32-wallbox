@@ -31,8 +31,19 @@ void recordBootReason();
 const char* currentBootReasonStr();
 
 // Return the persisted history as a JSON array string (newest first).
-// Each entry: {reason, uptime_was_s}.
+// Each entry: {reason, raw, at, fw}. `at` is the wall-clock epoch when
+// the boot was first observed by SNTP (0 if NTP hadn't synced yet);
+// `fw` is the firmware version that recorded the entry. Both fields
+// let the /info badge distinguish "panics on THIS firmware version,
+// since a known time" from "old dev-testing panics carried over in the
+// NVS ring".
 String bootHistoryJson();
+
+// Patch the most-recent boot entry's `at` field with the current
+// wall-clock time. No-op if (a) NTP hasn't synced yet (`time(NULL)`
+// returns a pre-2024 value), or (b) the current entry already has a
+// non-zero `at`. Cheap to call from the main loop on a slow cadence.
+void updateBootTimeIfPossible();
 
 // Reset the boot counter to 0 (call when healthy).
 void bootCountReset();
