@@ -154,7 +154,7 @@ static void handleAppJs() {
     http.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
     http.send(200, "application/javascript", R"JS(
 function toast(msg,type){type=type||'info';var c=document.getElementById('toast-c');if(!c){c=document.createElement('div');c.id='toast-c';c.className='toast-container';document.body.appendChild(c)}var t=document.createElement('div');t.className='toast toast-'+type;t.textContent=msg;c.appendChild(t);setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove()},300)},3000)}
-function confirm2(msg,cb){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;display:flex;align-items:center;justify-content:center';o.innerHTML="<div style='background:#1a1d28;border:1px solid #2a2d3a;border-radius:14px;padding:24px;max-width:320px;text-align:center'><p style='margin:0 0 16px;color:#e2e8f0'>"+msg+"</p><div style='display:flex;gap:10px'><button style='flex:1;padding:12px;border-radius:8px;border:1px solid #2a2d3a;background:transparent;color:#94a3b8;cursor:pointer' onclick='this.closest(\"div[style]\").remove()'>Cancel</button><button style='flex:1;padding:12px;border-radius:8px;border:none;background:#ef4444;color:#fff;cursor:pointer' id='cf-ok'>Confirm</button></div></div>";document.body.appendChild(o);document.getElementById('cf-ok').onclick=function(){o.remove();cb()};o.onclick=function(e){if(e.target===o)o.remove()}}
+function confirm2(msg,cb){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;display:flex;align-items:center;justify-content:center';o.innerHTML="<div style='background:#1a1d28;border:1px solid #2a2d3a;border-radius:14px;padding:24px;max-width:320px;text-align:center'><p style='margin:0 0 16px;color:#e2e8f0'>"+msg+"</p><div style='display:flex;gap:10px'><button id='cf-cancel' style='flex:1;padding:12px;border-radius:8px;border:1px solid #2a2d3a;background:transparent;color:#94a3b8;cursor:pointer'>Cancel</button><button id='cf-ok' style='flex:1;padding:12px;border-radius:8px;border:none;background:#ef4444;color:#fff;cursor:pointer'>Confirm</button></div></div>";document.body.appendChild(o);document.getElementById('cf-cancel').onclick=function(){o.remove()};document.getElementById('cf-ok').onclick=function(){o.remove();cb()};o.onclick=function(e){if(e.target===o)o.remove()}}
 function selectDevice(addr,ev){document.getElementById('ble_addr').value=addr;document.querySelectorAll('.scan-result').forEach(function(e){e.style.borderColor=''});if(ev&&ev.currentTarget)ev.currentTarget.style.borderColor='var(--primary)'}
 function formatMAC(i){var v=i.value.replace(/[^0-9a-fA-F]/g,'').toUpperCase(),f='';for(var j=0;j<v.length&&j<12;j++){if(j>0&&j%2===0)f+=':';f+=v[j]}i.value=f}
 function startScan(){var b=document.getElementById('scanBtn'),r=document.getElementById('scanResults');b.disabled=true;b.innerHTML="<span class='spinner'></span>Scanning...";r.innerHTML="<div style='text-align:center;padding:16px;color:var(--text3)'><span class='spinner'></span> Scanning...</div>";fetch('/api/ble-scan').then(function(x){return x.json()}).then(function(d){b.disabled=false;b.innerHTML='Scan for Chargers';r.replaceChildren();if(!d.devices.length){var n=document.createElement('div');n.style.cssText='text-align:center;padding:16px;color:var(--text3)';n.textContent='No devices found';r.appendChild(n);return}/* SECURITY: build DOM nodes via createElement+textContent — BLE device name and address are attacker-controllable (any radio in range can advertise arbitrary strings) and previously flowed into innerHTML, an XSS sink that ran in admin auth context. */d.devices.forEach(function(v){var row=document.createElement('div');row.className=v.is_wallbox?'scan-result wb':'scan-result';row.addEventListener('click',function(ev){selectDevice(v.addr,ev)});var left=document.createElement('div');var name=document.createElement('span');name.className='scan-name';name.textContent=v.name||'Unknown';left.appendChild(name);if(v.is_wallbox){var bg=document.createElement('span');bg.className='badge badge-success';bg.textContent='WALLBOX';bg.style.marginLeft='8px';left.appendChild(bg)}left.appendChild(document.createElement('br'));var addr=document.createElement('span');addr.className='scan-addr';addr.textContent=v.addr;left.appendChild(addr);row.appendChild(left);var rssi=document.createElement('span');rssi.className='scan-rssi';rssi.textContent=v.rssi+' dBm';row.appendChild(rssi);r.appendChild(row)})}).catch(function(e){b.disabled=false;b.innerHTML='Scan for Chargers';r.replaceChildren();var er=document.createElement('div');er.style.color='var(--danger)';er.textContent=String(e);r.appendChild(er)})}
@@ -292,18 +292,43 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
         // the happy path; under load the queue holds requests until
         // a slot is free.
         "<script>(function(){var maxC=1,inflight=0,q=[];var nf=window.fetch.bind(window);"
+          // Universal retry policy for /api/command:
+          //   - 429 (rate-limited) → respect Retry-After
+          //   - 503 (busy) → respect Retry-After (default 1.2s)
+          //   - 200 with {error} or null/missing r → backoff retry
+          //   Backoff: 800ms, 2.4s, 7.2s (3x). Max 3 attempts total.
+          //   Non-/api/command URLs are returned as-is (no body parse).
+          "function isCmd(u){return typeof u==='string'&&u.indexOf('/api/command')>=0}"
+          "function delayFor(t,fallback){return new Promise(function(r){setTimeout(r,t.attempt===0?800:t.attempt===1?2400:fallback||7200)})}"
           "function pump(){while(inflight<maxC&&q.length){var t=q.shift();inflight++;"
             "nf(t.url,t.opts).then(function(r){inflight--;"
-              // Server backpressure: 429 (rate) / 503 (busy) → retry ONCE after
-              // the server's Retry-After, then re-enter the same queue. Honors
-              // the contract for every fetch() in every tab with no per-call code.
-              "if((r.status===429||r.status===503)&&!t._retried){t._retried=true;"
-                "var ra=parseFloat(r.headers.get('Retry-After'))||1.2;"
-                "setTimeout(function(){q.push(t);pump()},ra*1000);pump();return}"
-              "t.res(r);pump()},"
-                              "function(e){inflight--;t.rej(e);pump()})}}"
+              "if(!isCmd(t.url)){t.res(r);pump();return}"
+              "var status=r.status;"
+              "if((status===429||status===503)&&t.attempt<2){"
+                "var ra=parseFloat(r.headers.get('Retry-After'));"
+                "var wait=isNaN(ra)?(t.attempt===0?800:2400):ra*1000;"
+                "t.attempt++;setTimeout(function(){q.push(t);pump()},wait);pump();return"
+              "}"
+              "if(status===200&&t.attempt<2){"
+                // peek at body via clone — if {r: null|undefined} or {error}
+                // signals a transient BAPI-side miss, retry with backoff.
+                // Pass the real Response through if body looks good or
+                // if we've exhausted retries.
+                "r.clone().json().then(function(d){"
+                  "var hasErr=d&&typeof d==='object'&&'error' in d;"
+                  "var nullR=d&&typeof d==='object'&&'r' in d&&(d.r===null||d.r===undefined);"
+                  "if(hasErr||nullR){t.attempt++;delayFor(t).then(function(){q.push(t);pump()});pump();return}"
+                  "t.res(r);pump()"
+                "}).catch(function(){t.res(r);pump()});"
+                "return"
+              "}"
+              "t.res(r);pump()"
+            "},function(e){inflight--;"
+              "if(isCmd(t.url)&&t.attempt<2){t.attempt++;delayFor(t).then(function(){q.push(t);pump()});return}"
+              "t.rej(e);pump()"
+            "})}}"
           "window.fetch=function(url,opts){return new Promise(function(res,rej){"
-            "q.push({url:url,opts:opts,res:res,rej:rej});pump()})};"
+            "q.push({url:url,opts:opts,res:res,rej:rej,attempt:0});pump()})};"
         "})();</script>"
         // (Note: 429/503 retry-after-honoring logic now lives INSIDE the
         // single-flight limiter above, courtesy of the reentrancy-fix
@@ -786,8 +811,21 @@ updateBleHealth();setInterval(updateBleHealth,15000);
 
 // ========== PAGE 2: Settings (/settings) ==========
 static void handleSettings() {
-    String page = htmlHead("Settings");
-    page += R"HTML(
+    // /settings is the largest page (~67 KB after rc21 additions).
+    // Build-then-send with one accumulating String was truncating
+    // mid-body around 65 KB on fragmented heap: subsequent += calls
+    // dropped silently, the response was missing its htmlFoot, and
+    // the body.classList.add('ready') script never ran. User saw a
+    // black screen because body{visibility:hidden} was never lifted.
+    //
+    // Fix: stream each section via sendContent() with chunked
+    // encoding. Each temporary String holds only one section, gets
+    // freed as soon as the chunk is on the wire, and never has to
+    // be reallocated past 65 KB.
+    http.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    http.send(200, "text/html", "");
+    http.sendContent(htmlHead("Settings"));
+    http.sendContent(R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Settings...</div>
 <div id='pg' style='display:none'>
 <h1>&#x2699; Settings</h1>
@@ -889,11 +927,13 @@ static void handleSettings() {
   <div class='card'>
     <div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'>
       <button class='btn btn-outline' style='padding:12px' onclick='E("tz")'>&#x1F30D; Timezone</button>
-      <button class='btn btn-outline' style='padding:12px' onclick='Q("gwsta","WiFi Status")'>&#x1F4F6; WiFi Status</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='showWiFi()'>&#x1F4F6; WiFi Status</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("halo")'>&#x1F4A1; Halo LED</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("theme")'>&#x1F3A8; Theme</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("cost")'>&#x1F4B0; Charging Cost</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("notif")'>&#x1F514; Notifications</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='E("pin")'>&#x1F511; Bluetooth Passcode</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='E("ota")'>&#x1F4E6; Firmware Update</button>
       <button id='ble-pause-btn' class='btn btn-outline' style='padding:12px' onclick='pauseBle()'>&#x1F4F4; Release BLE for App</button>
       <button class='btn btn-outline' style='padding:12px' onclick='confirm2("Reboot the charger?",function(){fetch("/api/command?action=reboot").then(function(){toast("Reboot sent","success")})})' style='background:rgba(239,68,68,.08);border-color:var(--danger);color:var(--danger)'>&#x1F504; Reboot</button>
     </div>
@@ -913,7 +953,30 @@ function Q(m,l){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.q
 function F(m,l,r){var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var s={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi',s[r]||'Code '+r)}else if(m==='r_ses'){h+=row('Last Session',r.last);h+=row('Total Sessions',r.size)}else if(m==='r_schs'){var sc=r.schedules||r;if(!Array.isArray(sc)){h+=row('Schedules','None');return h}sc.forEach(function(s,i){var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS[b]+' ';h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'><div style='display:flex;justify-content:space-between'><b>Schedule "+(i+1)+"</b><span class='badge "+(s.enabled?'badge-success':'badge-warning')+"'>"+(s.enabled?'Active':'Off')+"</span></div>";h+=row('Time',utcToLocal(s.start)+' - '+utcToLocal(s.stop));h+=row('Days',ds.trim()||'None');h+=row('Power Limit',(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A');if(s.target&&s.target.type==1)h+=row('Energy Limit',(s.target.value/1000)+' kWh');else h+=row('Energy Limit','No limit');h+="</div>"});if(!sc.length)h+=row('Schedules','None')}else if(m==='r_dca'){if(typeof r==='object'){h+=row('Voltage L1',r.v1+' V');if(r.v2)h+=row('Voltage L2',r.v2+' V');if(r.v3)h+=row('Voltage L3',r.v3+' V');h+=row('Power L1',r.p1+' W');if(r.p2)h+=row('Power L2',r.p2+' W');if(r.p3)h+=row('Power L3',r.p3+' W');h+=row('Current L1',(r.c1/10).toFixed(1)+' A');if(r.c2)h+=row('Current L2',(r.c2/10).toFixed(1)+' A');if(r.c3)h+=row('Current L3',(r.c3/10).toFixed(1)+' A');h+=row('Total Energy',(r.e/1000).toFixed(1)+' kWh')}else{h+=row('Energy Meter',''+r)}}else if(m==='g_alo'){if(typeof r==='object'){h+=row('Auto Lock',r.enabled?'Enabled':'Disabled');if(r.time)h+=row('Lock After',r.time+' seconds')}else{h+=row('Auto Lock',r?'Enabled':'Disabled')}}else if(m==='g_ecos'){var em={0:'Disabled',1:'Full Green (Solar Only)',2:'Eco Smart (Solar + Grid)'};if(typeof r==='object'){h+=row('Status',r.ese?'Active':'Inactive');h+=row('Mode',em[r.esm]||'Mode '+r.esm);h+=row('Solar Power Target',r.esp+'%')}else{h+=row('Eco Smart',em[r]||''+r)}}else if(m==='g_phsw'){if(typeof r==='object'){h+=row('Phase Switch',r.enabled?'Enabled':'Disabled')}else{h+=row('Phase Switch',r?'Enabled':'Disabled')}}else if(m==='read_pin'){if(typeof r==='object'){h+=row('BLE PIN',r.pin||'Not set');h+=row('PIN Version',r.version||'None')}else{h+=row('BLE PIN',''+r)}}else if(m==='r_hsh'){h+=row('ICP Max Current',r+'A')}else if(m==='g_psh'){if(typeof r==='object'){h+=row('Dynamic Power Sharing',r.dyps?'Enabled':'Disabled');h+=row('Max Power Per Charger',r.mcpp?r.mcpp+'W':'Unlimited');h+=row('Min Current',r.minI+'A');h+=row('Chargers in Group',r.nchg)}else{var ps={0:'Disabled',1:'Enabled',2:'Active'};h+=row('Power Sharing',ps[r]||''+r)}}else if(m==='g_tzn'){h+=row('Timezone',r.timezone||r)}else{h+="<pre style='margin:0;white-space:pre-wrap;font-size:.82em'>"+JSON.stringify(r,null,2)+"</pre>"}return h}
 function showTimezone(){E('tz')}
 function saveTz(){var tz=document.getElementById('tz-select').value;var p=JSON.stringify({timezone:tz});toast('Saving timezone...','info');fetch('/api/command?action=bapi&met=s_tzn&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(d.error){toast(d.error,'error')}else{CHARGER_TZ=tz;toast('Timezone set to '+tz,'success')}}).catch(function(e){toast('Error: '+e.message,'error')})}
-function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;r.style.display='block';var h='';if(type==='autolock'){h="<h2>&#x1F510; Auto Lock</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_alo&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn’t read Auto Lock state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("autolock")\'>Retry</button></div>';return}var o=d.r;var en=o.enabled?true:false;var tm=(typeof o.time==='number')?o.time:60;r.innerHTML="<h2>&#x1F510; Auto Lock</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='al-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><label>Lock After (seconds)</label><input type='number' id='al-time' value='"+tm+"' min='10' max='600'><div class='row' style='margin-top:10px'><button class='btn btn-success' onclick='saveAutoLock()'>Save</button></div><div id='al-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='ocpp'){h="<h2>&#x1F517; OCPP</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ocpp&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read OCPP state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("ocpp")\'>Retry</button></div>';return}var o=d.r;r.innerHTML="<h2>&#x1F517; OCPP Configuration</h2><label>Server URL</label><input id='ocpp-url' value='"+(o.u||'')+"' placeholder='ws://server:9000'><div class='row'><div><label>Charger ID</label><input id='ocpp-id' value='"+(o.chid||'')+"'></div><div><label>Password</label><input id='ocpp-pw' type='password' value='"+(o.pw||'')+"'></div></div><label>Enabled</label><select id='ocpp-en'><option value='0'"+(o.e?'':' selected')+">Disabled</option><option value='1'"+(o.e?' selected':'')+">Enabled</option></select><button class='btn btn-success' style='margin-top:10px' onclick='saveOcpp()'>Save OCPP</button><div id='ocpp-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='eco'){h="<h2>&#x2600; Eco Smart</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ecos&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read current Eco Smart state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("eco")\'>Retry</button></div>';return}var o=d.r;var esm=(typeof o.esm==='number')?o.esm:0;var esp=(typeof o.esp==='number')?o.esp:50;var ese=o.ese?true:false;var modes=[{v:0,t:'Disabled'},{v:1,t:'Full Green (Solar Only)'},{v:2,t:'Eco Smart (Solar + Grid)'}];var opts='';modes.forEach(function(m){opts+="<option value='"+m.v+"'"+(m.v===esm?' selected':'')+">"+m.t+"</option>"});r.innerHTML="<h2>&#x2600; Eco Smart</h2>"+row('Current state',ese?'Active':'Inactive')+"<label style='margin-top:12px'>Mode</label><select id='eco-mode'>"+opts+"</select><label>Solar Power Target (%)</label><input type='number' id='eco-esp' value='"+esp+"' min='0' max='100'><p class='help'>Eco Smart uses solar surplus. Full Green only charges from solar.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveEco()'>Save</button><div id='eco-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='tz'){h="<h2>&#x1F30D; Timezone</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'||!d.r.timezone){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read timezone. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("tz")\'>Retry</button></div>';return}var tz=d.r.timezone;CHARGER_TZ=tz;var opts='';var zones=['Australia/Sydney','Australia/Melbourne','Australia/Brisbane','Australia/Adelaide','Australia/Perth','Australia/Darwin','Australia/Hobart','Asia/Tokyo','Asia/Shanghai','Asia/Singapore','Asia/Kolkata','Asia/Dubai','Europe/London','Europe/Paris','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','America/Toronto','Pacific/Auckland','UTC'];zones.forEach(function(z){opts+="<option value='"+z+"'"+(z===tz?' selected':'')+">"+z.replace('_',' ')+"</option>"});r.innerHTML="<h2>&#x1F30D; Timezone</h2>"+row('Current',tz)+"<label style='margin-top:12px'>Change To</label><select id='tz-select'>"+opts+"</select><button class='btn btn-success' style='margin-top:10px' onclick='saveTz()'>Save</button><div id='tz-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='phasesw'){h="<h2>&#x1F504; Phase Switch</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_phsw&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read Phase Switch state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("phasesw")\'>Retry</button></div>';return}var en=d.r.enabled?true:false;r.innerHTML="<h2>&#x1F504; Phase Switch</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='phsw-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><p class='help'>Auto-switches between 1 and 3 phase based on solar surplus.</p><button class='btn btn-success' style='margin-top:10px' onclick='savePhaseSw()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='halo'){h="<h2>&#x1F4A1; Halo LED</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_halocfg&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read Halo state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("halo")\'>Retry</button></div>';return}var o=d.r;var bright=(typeof o.bright==='number')?o.bright:100;var mode=(typeof o.mode==='number')?o.mode:1;var ts=(typeof o.time_s==='number')?o.time_s:10;r.innerHTML="<h2>&#x1F4A1; Halo LED</h2>"+row('Current',(mode?'Standby on':'Standby off')+' \u00B7 '+bright+'%')+"<label style='margin-top:12px'>Standby</label><select id='halo-m'><option value='1'"+(mode===1?' selected':'')+">On (dim when idle)</option><option value='0'"+(mode===0?' selected':'')+">Off (always bright)</option></select><label>Brightness (%)</label><input type='range' id='halo-b' min='0' max='100' value='"+bright+"' oninput=\"document.getElementById('halo-bv').textContent=this.value+'%'\"><div id='halo-bv' style='text-align:center;margin-top:-4px;color:var(--text3);font-size:.85em'>"+bright+"%</div><label>Standby Timeout (seconds)</label><input type='number' id='halo-t' value='"+ts+"' min='0' max='3600'><p class='help'>How long to wait before dimming when standby is on.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveHalo()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='theme'){var cur='auto';try{cur=localStorage.getItem('wb-theme')||'auto'}catch(e){}var opts='';[{v:'auto',t:'Auto (follow system)'},{v:'dark',t:'Dark'},{v:'light',t:'Light'}].forEach(function(o){opts+="<option value='"+o.v+"'"+(o.v===cur?' selected':'')+">"+o.t+"</option>"});r.innerHTML="<h2>&#x1F3A8; Theme</h2><label>Appearance</label><select id='theme-sel' onchange='applyTheme(this.value)'>"+opts+"</select><p class='help'>Auto follows your OS or browser preference.</p>";return}else if(type==='cost'){
+function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;r.style.display='block';var h='';if(type==='autolock'){h="<h2>&#x1F510; Auto Lock</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_alo&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){
+/* The Pulsar MAX returns r as a plain number (0=disabled, non-zero=enabled
+   minutes-until-lock). Newer firmware returns {enabled, time}. Handle both. */
+var en,tm,simple=false;
+if(d.r&&typeof d.r==='object'){en=d.r.enabled?true:false;tm=(typeof d.r.time==='number')?d.r.time:60;}
+else if(typeof d.r==='number'){simple=true;en=d.r>0;tm=d.r>0?d.r:60;}
+else{r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn’t read Auto Lock state. <button class="btn btn-outline" style="padding:4px 10px;margin-top:6px" onclick=\'E("autolock")\'>Retry</button></div>';return}
+r.innerHTML="<h2>&#x1F510; Auto Lock</h2>"+row('Current state',en?'Enabled':'Disabled')+(simple?"<p class='help'>Older firmware: a single value is sent (minutes; 0 = off).</p>":"")+"<label style='margin-top:12px'>Enabled</label><select id='al-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><label>Lock After "+(simple?'(minutes)':'(seconds)')+"</label><input type='number' id='al-time' value='"+tm+"' min='1' max='600'><input type='hidden' id='al-simple' value='"+(simple?'1':'0')+"'><div class='row' style='margin-top:10px'><button class='btn btn-success' onclick='saveAutoLock()'>Save</button></div><div id='al-result' style='display:none;margin-top:10px'></div>"
+}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='ocpp'){h="<h2>&#x1F517; OCPP</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ocpp&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read OCPP state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("ocpp")\'>Retry</button></div>';return}var o=d.r;r.innerHTML="<h2>&#x1F517; OCPP Configuration</h2><label>Server URL</label><input id='ocpp-url' value='"+(o.u||'')+"' placeholder='ws://server:9000'><div class='row'><div><label>Charger ID</label><input id='ocpp-id' value='"+(o.chid||'')+"'></div><div><label>Password</label><input id='ocpp-pw' type='password' value='"+(o.pw||'')+"'></div></div><label>Enabled</label><select id='ocpp-en'><option value='0'"+(o.e?'':' selected')+">Disabled</option><option value='1'"+(o.e?' selected':'')+">Enabled</option></select><button class='btn btn-success' style='margin-top:10px' onclick='saveOcpp()'>Save OCPP</button><div id='ocpp-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='eco'){h="<h2>&#x2600; Eco Smart</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ecos&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read current Eco Smart state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("eco")\'>Retry</button></div>';return}var o=d.r;var esm=(typeof o.esm==='number')?o.esm:0;var esp=(typeof o.esp==='number')?o.esp:50;var ese=o.ese?true:false;var modes=[{v:0,t:'Disabled'},{v:1,t:'Full Green (Solar Only)'},{v:2,t:'Eco Smart (Solar + Grid)'}];var opts='';modes.forEach(function(m){opts+="<option value='"+m.v+"'"+(m.v===esm?' selected':'')+">"+m.t+"</option>"});r.innerHTML="<h2>&#x2600; Eco Smart</h2>"+row('Current state',ese?'Active':'Inactive')+"<label style='margin-top:12px'>Mode</label><select id='eco-mode'>"+opts+"</select><label>Solar Power Target (%)</label><input type='number' id='eco-esp' value='"+esp+"' min='0' max='100'><p class='help'>Eco Smart uses solar surplus. Full Green only charges from solar.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveEco()'>Save</button><div id='eco-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='tz'){h="<h2>&#x1F30D; Timezone</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'||!d.r.timezone){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read timezone. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("tz")\'>Retry</button></div>';return}var tz=d.r.timezone;CHARGER_TZ=tz;var opts='';var zones=['Australia/Sydney','Australia/Melbourne','Australia/Brisbane','Australia/Adelaide','Australia/Perth','Australia/Darwin','Australia/Hobart','Asia/Tokyo','Asia/Shanghai','Asia/Singapore','Asia/Kolkata','Asia/Dubai','Europe/London','Europe/Paris','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','America/Toronto','Pacific/Auckland','UTC'];zones.forEach(function(z){opts+="<option value='"+z+"'"+(z===tz?' selected':'')+">"+z.replace('_',' ')+"</option>"});r.innerHTML="<h2>&#x1F30D; Timezone</h2>"+row('Current',tz)+"<label style='margin-top:12px'>Change To</label><select id='tz-select'>"+opts+"</select><button class='btn btn-success' style='margin-top:10px' onclick='saveTz()'>Save</button><div id='tz-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='phasesw'){h="<h2>&#x1F504; Phase Switch</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_phsw&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read Phase Switch state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("phasesw")\'>Retry</button></div>';return}var en=d.r.enabled?true:false;r.innerHTML="<h2>&#x1F504; Phase Switch</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='phsw-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><p class='help'>Auto-switches between 1 and 3 phase based on solar surplus.</p><button class='btn btn-success' style='margin-top:10px' onclick='savePhaseSw()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='halo'){h="<h2>&#x1F4A1; Halo LED</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_halocfg&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read Halo state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("halo")\'>Retry</button></div>';return}var o=d.r;var bright=(typeof o.bright==='number')?o.bright:100;var mode=(typeof o.mode==='number')?o.mode:1;var ts=(typeof o.time_s==='number')?o.time_s:10;r.innerHTML="<h2>&#x1F4A1; Halo LED</h2>"+row('Current',(mode?'Standby on':'Standby off')+' \u00B7 '+bright+'%')+"<label style='margin-top:12px'>Standby</label><select id='halo-m'><option value='1'"+(mode===1?' selected':'')+">On (dim when idle)</option><option value='0'"+(mode===0?' selected':'')+">Off (always bright)</option></select><label>Brightness (%)</label><input type='range' id='halo-b' min='0' max='100' value='"+bright+"' oninput=\"document.getElementById('halo-bv').textContent=this.value+'%'\"><div id='halo-bv' style='text-align:center;margin-top:-4px;color:var(--text3);font-size:.85em'>"+bright+"%</div><label>Standby Timeout (seconds)</label><input type='number' id='halo-t' value='"+ts+"' min='0' max='3600'><p class='help'>How long to wait before dimming when standby is on.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveHalo()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='pin'){
+  /* Bluetooth Passcode — local-only setting. We store this on the gateway
+     and use it when pairing to the charger via BLE. We do NOT send a
+     setter to the charger; the user creates the passcode in the
+     official Wallbox app and then enters the same value here so we can
+     authenticate. Save updates NVS and reboots so the new value takes
+     effect on the next BLE pair. */
+  r.innerHTML="<h2>&#x1F511; Bluetooth Passcode</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";
+  fetch('/api/status').then(function(x){return x.json()}).then(function(s){
+    var hasPin=s.ble_pin==='***';
+    var statusTxt=hasPin?"<span style='color:#22c55e'>&#x2713; Passcode is configured</span>":"<span style='color:#f59e0b'>&#x26A0; No passcode set</span>";
+    r.innerHTML="<h2>&#x1F511; Bluetooth Passcode</h2>"+row('Current',statusTxt)+"<label style='margin-top:12px'>New Passcode</label><input type='text' id='pin-new' value='' placeholder='8 digits from the Wallbox app' maxlength='16' autocomplete='off' inputmode='numeric'><p class='help'>For Pulsar Plus / newer Pulsar MAX firmware (6.11+): open the Wallbox app \xE2\x86\x92 your charger \xE2\x86\x92 Settings \xE2\x86\x92 Bluetooth Passcode. Copy the 8-digit code here. Leave blank to clear. Saving reboots the gateway so the new value takes effect on the next pair.</p><button class='btn btn-success' style='margin-top:10px' onclick='savePin()'>Save &amp; Reboot</button><div id='pin-result' style='display:none;margin-top:10px'></div>";
+  }).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});
+  return
+}else if(type==='ota'){location.href='/ota';return
+}else if(type==='theme'){var cur='auto';try{cur=localStorage.getItem('wb-theme')||'auto'}catch(e){}var opts='';[{v:'auto',t:'Auto (follow system)'},{v:'dark',t:'Dark'},{v:'light',t:'Light'}].forEach(function(o){opts+="<option value='"+o.v+"'"+(o.v===cur?' selected':'')+">"+o.t+"</option>"});r.innerHTML="<h2>&#x1F3A8; Theme</h2><label>Appearance</label><select id='theme-sel' onchange='applyTheme(this.value)'>"+opts+"</select><p class='help'>Auto follows your OS or browser preference.</p>";return}else if(type==='cost'){
   var T;try{T=JSON.parse(localStorage.getItem('wb-tariff')||'null')}catch(e){T=null}
   if(!T)T={enabled:false,currency:'$',baseRate:0.30,greenRate:0,tiers:[]};
   window._editTariff=T;
@@ -997,11 +1060,65 @@ function watchStatusForNotif(s){
   else if(inGroup(st,ready)&&!inGroup(was,ready)&&N.events.plug_out)fireNotif('Plug disconnected','Charger is now idle.');
   _lastSt=st;
 }
-function saveAutoLock(){var p=JSON.stringify({enabled:parseInt(document.getElementById('al-en').value),time:parseInt(document.getElementById('al-time').value)});toast('Saving auto lock...','info');fetch('/api/command?action=bapi&met=s_alo&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Auto lock saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
+function saveAutoLock(){
+  /* Older firmware (Pulsar MAX): the charger expects a single number par
+     — minutes-until-lock, 0 = off. Newer firmware: full object with
+     enabled+time. The form remembers which shape it loaded with so we
+     send the right one back. */
+  var simple=document.getElementById('al-simple').value==='1';
+  var en=parseInt(document.getElementById('al-en').value);
+  var t=parseInt(document.getElementById('al-time').value);
+  var p=simple?String(en?t:0):JSON.stringify({enabled:en,time:t});
+  toast('Saving auto lock...','info');
+  fetch('/api/command?action=bapi&met=s_alo&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Auto lock saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})
+}
 function saveEco(){var mode=parseInt(document.getElementById('eco-mode').value);var espEl=document.getElementById('eco-esp');var esp=espEl?parseInt(espEl.value)||0:50;var p=JSON.stringify({mode:mode,esp:esp});toast('Saving eco smart...','info');fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function saveOcpp(){var p=JSON.stringify({u:document.getElementById('ocpp-url').value,chid:document.getElementById('ocpp-id').value,pw:document.getElementById('ocpp-pw').value,e:parseInt(document.getElementById('ocpp-en').value)});toast('Saving OCPP...','info');fetch('/api/command?action=bapi&met=s_ocpp&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'OCPP config saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function savePhaseSw(){var en=parseInt(document.getElementById('phsw-en').value);var p=JSON.stringify({enabled:en});toast('Saving phase switch...','info');fetch('/api/command?action=bapi&met=s_phsw&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Phase switch saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function saveHalo(){var b=parseInt(document.getElementById('halo-b').value);var m=parseInt(document.getElementById('halo-m').value);var t=parseInt(document.getElementById('halo-t').value)||0;var p=JSON.stringify({bright:b,mode:m,time_s:t});toast('Saving halo...','info');fetch('/api/command?action=bapi&met=s_halocfg&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Halo saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
+function savePin(){
+  /* Local gateway setting — does NOT call s_pin on the charger.
+     Updates cfg.blePin in NVS so the next BLE pair uses the new value,
+     then reboots. Reboot is required because NimBLE has already
+     established a session under the old credentials. */
+  var v=document.getElementById('pin-new').value.trim();
+  if(v.length>0&&!/^[0-9]+$/.test(v)){toast('Passcode must be digits only','error');return}
+  var res=document.getElementById('pin-result');
+  toast('Saving passcode...','info');
+  fetch('/api/pin?csrf='+window.WB_CSRF+'&pin='+encodeURIComponent(v),{method:'POST'}).then(function(x){return x.json()}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    if(res){res.style.display='block';res.style.color='var(--success)';res.textContent='Saved \xE2\x80\x94 rebooting...'}
+    toast('Passcode saved — gateway is rebooting','success');
+  }).catch(function(e){toast('Error: '+e.message,'error')})
+}
+function showWiFi(){
+  /* Gateway-side WiFi status (from /api/status, no BAPI hop). Shows
+     SSID, IP, RSSI w/ visual strength bars, uptime — all the things
+     you actually want to see when 'WiFi Status' was previously just
+     a single 'Connected' word from the charger's gwsta. */
+  var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;
+  r.style.display='block';
+  r.innerHTML="<h2>&#x1F4F6; WiFi Status</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";
+  fetch('/api/status').then(function(x){return x.json()}).then(function(s){
+    var h="<h2>&#x1F4F6; WiFi Status</h2>";
+    var sBadge=s.wifi==='connected'?"<span class='badge badge-success'>Connected</span>":"<span class='badge badge-warning'>"+(s.wifi||'Unknown')+"</span>";
+    h+=row('Status',sBadge);
+    if(s.ssid)h+=row('Network',s.ssid);
+    if(s.ip)h+=row('IP Address',s.ip);
+    if(typeof s.wifi_rssi==='number'){
+      var bars=s.wifi_rssi>-50?'████':s.wifi_rssi>-60?'███░':s.wifi_rssi>-70?'██░░':s.wifi_rssi>-80?'█░░░':'░░░░';
+      var col=s.wifi_rssi>-60?'#22c55e':s.wifi_rssi>-70?'#f59e0b':'#ef4444';
+      h+=row('Signal',"<span style='font-family:monospace;color:"+col+";letter-spacing:2px'>"+bars+"</span> "+s.wifi_rssi+" dBm");
+    }
+    if(typeof s.uptime==='number'){
+      var u=s.uptime,hr=Math.floor(u/3600),mn=Math.floor((u%3600)/60);
+      h+=row('Gateway uptime',hr>0?hr+'h '+mn+'m':mn+'m');
+    }
+    if(s.dev_mfg||s.dev_model)h+=row('BLE module',(s.dev_mfg||'?')+' '+(s.dev_model||''));
+    if(s.dev_fw)h+=row('BLE module FW',s.dev_fw);
+    r.innerHTML=h;
+  }).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'})
+}
 var allSchedules=[];
 var editingSid=null;
 var DAYS_M=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
@@ -1293,9 +1410,9 @@ window.addEventListener('load',function(){
 });
 </script>
 </div>
-)HTML";
-    page += htmlFoot("/settings");
-    http.send(200, "text/html", page);
+)HTML");
+    http.sendContent(htmlFoot("/settings"));
+    http.sendContent("");  // final empty chunk terminates chunked encoding
 }
 
 // ========== PAGE 3: Config (/config) ==========
@@ -2252,6 +2369,36 @@ static void registerRoutes() {
     http.on("/api/reboot", HTTP_POST, []() {
         if (!checkAuth()) return;
         if (!checkCsrf()) return;
+        http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+        webServer.requestReboot();
+    });
+    // /api/pin?pin=<digits>&csrf=... — local-only update of the
+    // Bluetooth Passcode used to pair to the charger. Does NOT call
+    // any s_* setter on the charger; the user creates the passcode in
+    // the official Wallbox app and copies it here so our NimBLE pair
+    // can authenticate. Empty pin clears the field. Reboots after
+    // save so the new value takes effect on the next pair attempt.
+    http.on("/api/pin", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        if (!checkCsrf()) return;
+        String pin = http.arg("pin");
+        // Light sanity: trim, allow empty (clear), allow digits only
+        // up to 16 chars. Reject anything else so we don't store
+        // garbage that breaks the BLE pair flow.
+        pin.trim();
+        if (pin.length() > 16) {
+            http.send(400, "application/json", "{\"error\":\"passcode too long\"}");
+            return;
+        }
+        for (size_t i = 0; i < pin.length(); i++) {
+            char c = pin[i];
+            if (c < '0' || c > '9') {
+                http.send(400, "application/json", "{\"error\":\"passcode must be digits only\"}");
+                return;
+            }
+        }
+        configMgr.mut().blePin = pin;
+        configMgr.save();
         http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
         webServer.requestReboot();
     });
