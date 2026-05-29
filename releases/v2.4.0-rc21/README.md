@@ -1,18 +1,37 @@
 # v2.4.0-rc21
 
-Production-ready 2.4.0 release candidate. Four changes:
+Production-ready 2.4.0 release candidate. Six changes:
 
-1. Root-cause fix for the OTA-during-upload panic that has been hitting
-   testers since rc14 (peter-mcc #4) and that I reproduced locally on
-   rc20 with a curl multipart POST.
-2. Root-cause fix for the navigation panic documented as a known
-   limitation in rc20 — turned out to fire on a single user opening
-   /settings, not just deliberate rapid nav.
+1. **Root-cause fix for the sustained-load panic** — the BLE yield
+   callback was calling `webServer.loop()` while running *inside* a
+   web request handler. Arduino WebServer is not re-entrant; the
+   nested `handleClient()` clobbered the in-flight `_currentClient`
+   and the outer handler then wrote to a freed socket
+   (LoadProhibited). This is the same root cause as the long-standing
+   "navigation panic" and the sustained-rate panic. Fix is one line
+   in `onYield`. Defense in depth: token bucket rate-limit on
+   `/api/command` (cap 4, refill 2/s) returning 429 + Retry-After,
+   plus a `max_reentry` tripwire on `/api/health` so future
+   regressions are observable without a serial console. Verified via
+   `scripts/stress_api.py`: 600 requests across sequential + 8-way
+   concurrent, zero reboots, max_reentry stayed at 1, heap stable.
+2. Root-cause fix for the OTA-during-upload panic that has been
+   hitting testers since rc14 (peter-mcc #4) and that I reproduced
+   locally on rc20 with a curl multipart POST.
 3. Boot-history hardening so the /info "Last boot" badge reflects
    reality after a firmware upgrade.
-4. XSS fix in the /config scan-results renderers (BLE device names and
-   WiFi SSIDs are both attacker-controllable; they previously flowed
-   into innerHTML).
+4. XSS fix in the /config scan-results renderers (BLE device names
+   and WiFi SSIDs are both attacker-controllable; they previously
+   flowed into innerHTML).
+5. Boot / navigation / reconnect overlay with progress bar — protects
+   the user from clicking around during the post-reboot BLE handshake
+   window. Mode-tracked title so a quick page change doesn't surface
+   a misleading "Starting" message; 150 ms deferred show so fast
+   page transitions never flash the overlay.
+6. JS auto-retry-once wrapper for `/api/command` — honors server-side
+   `Retry-After`, retries 429/503 once via the same single-flight
+   queue, so tab loaders self-heal during transient BLE busy windows
+   without per-call retry code.
 
 ## What was crashing
 
