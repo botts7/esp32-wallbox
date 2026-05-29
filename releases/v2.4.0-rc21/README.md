@@ -1,13 +1,16 @@
 # v2.4.0-rc21
 
-Production-ready 2.4.0 release candidate. Three changes:
+Production-ready 2.4.0 release candidate. Four changes:
 
 1. Root-cause fix for the OTA-during-upload panic that has been hitting
    testers since rc14 (peter-mcc #4) and that I reproduced locally on
    rc20 with a curl multipart POST.
-2. Boot-history hardening so the /info "Last boot" badge reflects
+2. Root-cause fix for the navigation panic documented as a known
+   limitation in rc20 — turned out to fire on a single user opening
+   /settings, not just deliberate rapid nav.
+3. Boot-history hardening so the /info "Last boot" badge reflects
    reality after a firmware upgrade.
-3. XSS fix in the /config scan-results renderers (BLE device names and
+4. XSS fix in the /config scan-results renderers (BLE device names and
    WiFi SSIDs are both attacker-controllable; they previously flowed
    into innerHTML).
 
@@ -92,14 +95,39 @@ the admin's own charger over an authenticated BLE link — and stay
 as-is. That data is trusted in our threat model and the refactor cost
 is not justified for this release.
 
-## Known limitation (carried from rc20)
+### Navigation panic — root-causal fix
 
-Rapid back-to-back page navigation (5+ pages in under 3 seconds) can
-still trigger a panic. Root cause is TCP socket exhaustion when
-WebSocket close+reopen overlaps queued BAPI calls; the proper fix
-requires converting the BAPI handler to a non-blocking async pattern
-and is deferred to the 2.5.x line. For typical browsing speed the
-gateway is stable.
+The rc20 README documented "rapid back-to-back navigation can panic"
+as a known limitation deferred to 2.5.x. Investigation here showed it
+actually fires on a single user opening /settings, not just
+deliberate rapid navigation:
+
+- Browser issues 7 parallel requests to render /settings: HTML page +
+  /style.css + /app.js + /manifest.json + /sw.js + on-load
+  `fetch('/api/status')` + on-load `r_schs` BAPI call (5–15 s
+  blocking).
+- Each concurrent ESP32 HTTP response allocates ~10–20 KB of heap.
+  heap_min_ever dipped from 128 KB to 59 KB under that pattern;
+  malloc failures begin around 30 KB free.
+- The blocking `r_schs` BAPI call extended the window during which
+  all the static-asset responses were holding their buffers.
+
+Two targeted fixes, no architectural rework:
+
+- `/style.css` and `/app.js` now serve
+  `Cache-Control: public, max-age=31536000, immutable`. Both URLs
+  already carry `?v=<buildVer>` cache-busters so caching forever is
+  safe. Eliminates two of the parallel asset fetches on every
+  navigation after the first.
+- The on-load fetches on /settings (`/api/status` and
+  `loadSchedules()`) moved from script-parse time to
+  `window.addEventListener('load', ...)`. The heavy BAPI call no
+  longer races the static-asset GETs.
+
+Stress-tested: 5 rounds × 7-way parallel /settings storm + 3 rounds ×
+5-way rapid-nav across all major pages. Zero panics. heap_min_ever
+bottoms at 50 KB and stays there. 200 s soak afterwards: heap
+recovers to 142 KB free baseline.
 
 ## Effects
 
