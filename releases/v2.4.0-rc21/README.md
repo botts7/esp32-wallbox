@@ -1,9 +1,15 @@
 # v2.4.0-rc21
 
-Root-cause fix for the OTA-during-upload panic that has been hitting
-testers since rc14 (peter-mcc #4) and that I reproduced locally on rc20
-with a curl multipart POST. Plus boot-history hardening so the /info
-"Last boot" badge reflects reality after a firmware upgrade.
+Production-ready 2.4.0 release candidate. Three changes:
+
+1. Root-cause fix for the OTA-during-upload panic that has been hitting
+   testers since rc14 (peter-mcc #4) and that I reproduced locally on
+   rc20 with a curl multipart POST.
+2. Boot-history hardening so the /info "Last boot" badge reflects
+   reality after a firmware upgrade.
+3. XSS fix in the /config scan-results renderers (BLE device names and
+   WiFi SSIDs are both attacker-controllable; they previously flowed
+   into innerHTML).
 
 ## What was crashing
 
@@ -58,6 +64,42 @@ The project had no time sync configured — `time(NULL)` previously
 always returned 0. rc21 calls `configTime(0, 0, "pool.ntp.org")` after
 WiFi connects so the `at` field can be patched once sync lands
 (typically ~1–3s after WiFi up).
+
+### XSS fix in /config scan results
+
+Background security review flagged two XSS sinks in the JS that
+renders BLE-scan and WiFi-scan responses on the /config page. Both
+data sources are attacker-controllable from the radio environment:
+
+- **BLE device names** — any radio within ~30m can advertise an
+  arbitrary string. A name like `<img src=x onerror=...>` previously
+  flowed into innerHTML and would run in the admin-auth context of
+  whoever opened the Scan-for-Chargers card. With OTA in scope, that
+  was a full takeover primitive.
+- **WiFi SSIDs** — same pattern. Trigger is the initial WiFi-setup
+  flow (gateway in AP mode), which is when the operator is most
+  exposed because they're explicitly looking at hostile-radio output.
+
+Fix: both result lists now render via `document.createElement` +
+`textContent` + `addEventListener`. Attacker-controllable strings can
+no longer parse as HTML — the only thing that ever sees the raw SSID
+or device name string is a Text node. No new dependencies, no
+escape-helper to get wrong.
+
+Other innerHTML sites in the file (settings tabs, OCPP / Eco / Halo
+forms, toast etc.) read from BAPI responses — i.e. data sourced from
+the admin's own charger over an authenticated BLE link — and stay
+as-is. That data is trusted in our threat model and the refactor cost
+is not justified for this release.
+
+## Known limitation (carried from rc20)
+
+Rapid back-to-back page navigation (5+ pages in under 3 seconds) can
+still trigger a panic. Root cause is TCP socket exhaustion when
+WebSocket close+reopen overlaps queued BAPI calls; the proper fix
+requires converting the BAPI handler to a non-blocking async pattern
+and is deferred to the 2.5.x line. For typical browsing speed the
+gateway is stable.
 
 ## Effects
 
