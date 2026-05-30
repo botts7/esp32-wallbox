@@ -503,8 +503,25 @@ void WallboxBLE::_connect() {
                 } else if (d["r"]["grounding"].is<const char*>()) {
                     _chgGrounding = d["r"]["grounding"].as<const char*>();
                 } else if (d["r"].is<int>()) {
-                    // Integer status — 0 typically = OK / no fault
-                    _chgGrounding = (d["r"].as<int>() == 0) ? "OK" : "Fault";
+                    // Integer status — render as "Code N" rather than
+                    // guessing OK/Fault. Different charger families use
+                    // different "healthy" codes: MAX returns 0 when
+                    // healthy, Plus returns 1 when healthy (verified on
+                    // peter-mcc's BGX13P unit in issue #4 — charger
+                    // operating normally, Wallbox app shows no
+                    // problems, so 1 must be Plus's nominal value, not
+                    // a fault). The earlier "non-zero = Fault" mapping
+                    // was MAX-specific and false-alarmed Plus users.
+                    //
+                    // 0 is the one value we've observed AND know to be
+                    // healthy (on MAX) — display as "OK" for that one.
+                    // Everything else: raw code. If anyone ever reports
+                    // an actual contactor-weld fault with a specific
+                    // integer we'll map that explicitly. Until then,
+                    // neutral framing avoids both false alarms and
+                    // hidden real ones.
+                    int code = d["r"].as<int>();
+                    _chgGrounding = (code == 0) ? String("OK") : String("Code ") + code;
                 }
             }
             if (_chgGrounding.length()) {
