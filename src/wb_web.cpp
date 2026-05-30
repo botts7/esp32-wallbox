@@ -2220,7 +2220,29 @@ static void handleOtaPage() {
 </div>
 <script>
 document.getElementById('fw').onchange=function(){var f=this.files[0];if(!f)return;var info=document.getElementById('ota-info');info.style.display='block';var sz=(f.size/1024).toFixed(0);var valid=f.name.endsWith('.bin')&&f.size>10000&&f.size<2000000;info.innerHTML=row('File',f.name)+row('Size',sz+' KB')+(valid?'':'<p style="color:var(--danger);margin-top:8px">Invalid: must be .bin, 10KB-2MB</p>')};
-function doOTA(){var f=document.getElementById('fw').files[0];if(!f){toast('Select a firmware file','error');return}if(!f.name.endsWith('.bin')){toast('Must be a .bin file','error');return}if(f.size<10000||f.size>2000000){toast('File size invalid','error');return}var prog=document.getElementById('ota-progress');prog.style.display='block';var bar=document.getElementById('ota-bar');var stat=document.getElementById('ota-status');var xhr=new XMLHttpRequest();xhr.open('POST','/api/ota');xhr.upload.onprogress=function(e){if(e.lengthComputable){var pct=Math.round(e.loaded/e.total*100);bar.style.width=pct+'%';stat.textContent='Uploading... '+pct+'%'}};xhr.onload=function(){if(xhr.status===200){stat.textContent='Update complete! Rebooting...';toast('Firmware updated!','success');bar.style.width='100%';bar.style.background='var(--success)'}else{stat.textContent='Failed: '+xhr.responseText;toast('Update failed','error');bar.style.background='var(--danger)'}};xhr.onerror=function(){stat.textContent='Upload failed';toast('Upload error','error')};xhr.send(f)}
+function doOTA(){
+  var f=document.getElementById('fw').files[0];
+  if(!f){toast('Select a firmware file','error');return}
+  if(!f.name.endsWith('.bin')){toast('Must be a .bin file','error');return}
+  if(f.size<10000||f.size>2000000){toast('File size invalid','error');return}
+  var prog=document.getElementById('ota-progress');prog.style.display='block';
+  var bar=document.getElementById('ota-bar');
+  var stat=document.getElementById('ota-status');
+  var xhr=new XMLHttpRequest();xhr.open('POST','/api/ota');
+  xhr.upload.onprogress=function(e){if(e.lengthComputable){var pct=Math.round(e.loaded/e.total*100);bar.style.width=pct+'%';stat.textContent='Uploading... '+pct+'%'}};
+  xhr.onload=function(){if(xhr.status===200){stat.textContent='Update complete! Rebooting...';toast('Firmware updated!','success');bar.style.width='100%';bar.style.background='var(--success)'}else{stat.textContent='Failed: '+xhr.responseText;toast('Update failed','error');bar.style.background='var(--danger)'}};
+  xhr.onerror=function(){stat.textContent='Upload failed';toast('Upload error','error')};
+  // CRITICAL: wrap the file in FormData so the body is sent as
+  // multipart/form-data. xhr.send(File) by itself sends the raw bytes
+  // with Content-Type set to the file's MIME (octet-stream for .bin),
+  // and the Arduino WebServer routes those through the raw() dispatch
+  // path which never allocates _currentUpload — handleOtaUpload() then
+  // dereferences a null unique_ptr → LoadProhibited panic.
+  // peter-mcc #4: this is what bricked every browser-driven OTA on
+  // his board until decoded from the serial backtrace.
+  var fd=new FormData();fd.append('firmware',f);
+  xhr.send(fd);
+}
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
 </script>
 )HTML";
@@ -2232,6 +2254,31 @@ bool otaInProgress = false;
 static size_t expectedOtaSize = 0;  // Content-Length captured at FILE_START for truncation check
 
 static void handleOtaUpload() {
+    // DEFENCE IN DEPTH — the Arduino WebServer routes both multipart AND
+    // raw POST bodies through this same lambda (FunctionRequestHandler
+    // calls _ufn() from both upload() and raw() dispatch). _currentUpload
+    // is ONLY allocated for multipart; for raw bodies http.upload() returns
+    // *_currentUpload which is a null unique_ptr → LoadProhibited panic on
+    // dereference. peter-mcc #4 hit this because xhr.send(File) without
+    // FormData sends application/octet-stream, not multipart/form-data.
+    //
+    // The client-side fix (wrap in FormData) is in doOTA() above. This
+    // is the server-side safety net for any other tool that POSTs raw
+    // — HA, curl --data-binary, custom OTA scripts — so they get a
+    // clean error instead of bricking the gateway.
+    // Default to REJECT if Content-Type is missing or doesn't say
+    // multipart. The previous version "if header present, check" was
+    // wrong — when WebServer doesn't collect a header it just returns
+    // empty, so the guard fired open on every raw POST and we still
+    // crashed. Now the only path that reaches http.upload() is one
+    // that explicitly says multipart/.
+    String ct = http.header("Content-Type");
+    if (ct.indexOf("multipart/") < 0) {
+        Log.printf("[OTA] REJECTED: Content-Type='%s' (need multipart/form-data, raw body crashes handler)\n",
+                   ct.c_str());
+        return;  // body is consumed by the WebServer; we just don't act on it
+    }
+
     HTTPUpload& upload = http.upload();
     static size_t totalSize = 0;
     static bool otaError = false;
@@ -2397,10 +2444,13 @@ static void handleServiceWorker() {
 }
 
 static void registerRoutes() {
-    // Capture Content-Length so the OTA handler can size Update.begin()
-    // and erase only what's needed.
-    static const char* otaHeaders[] = {"Content-Length"};
-    http.collectHeaders(otaHeaders, 1);
+    // Capture Content-Length so the OTA handler can size Update.begin().
+    // Capture Content-Type so the OTA handler can distinguish multipart
+    // (good) from raw POST (would crash on http.upload() — see #4).
+    // Arduino WebServer drops every header NOT in this list, so the
+    // OTA handler's Content-Type guard depends on this entry existing.
+    static const char* otaHeaders[] = {"Content-Length", "Content-Type"};
+    http.collectHeaders(otaHeaders, 2);
     http.on("/style.css", handleStyleCss);
     http.on("/app.js", handleAppJs);
     http.on("/save", HTTP_POST, handleSave);
