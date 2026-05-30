@@ -338,28 +338,41 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
         "<script>(function(){var handlers={};var sock=null;var rd=1000;var open=false;function connect(){try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.hostname+':81/');sock.onopen=function(){open=true;rd=1000;document.documentElement.setAttribute('data-ws','1')};sock.onmessage=function(e){try{var m=JSON.parse(e.data);var hs=handlers[m.t];if(hs){for(var i=0;i<hs.length;i++){try{hs[i](m.d,m)}catch(ee){}}}}catch(err){}};sock.onclose=function(){open=false;document.documentElement.removeAttribute('data-ws');sock=null;setTimeout(connect,rd);rd=Math.min(rd*2,30000)};sock.onerror=function(){}}catch(e){setTimeout(connect,rd)}}window.wbws={subscribe:function(t,fn){(handlers[t]=handlers[t]||[]).push(fn)},isOpen:function(){return open},send:function(s){if(sock&&open)sock.send(s)}};connect();})();</script>"
         "<script>(function(){var _lastSt=null;function load(){var def={enabled:false,events:{started:true,complete:true,paused:false,error:true,plug_in:false,plug_out:false}};try{var s=JSON.parse(localStorage.getItem('wb-notif')||'null');if(!s)return def;if(!s.events)s.events=def.events;return s}catch(e){return def}}function fire(title,body){try{new Notification(title,{body:body,tag:'wb',silent:false})}catch(e){}}window.wbFireNotif=fire;window.wbCheckStatus=function(s){if(!s||typeof s.st!=='number')return;var st=s.st;if(_lastSt===null){_lastSt=st;return}if(st===_lastSt)return;var N=load();var was=_lastSt;_lastSt=st;if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted')return;var charging=[2,20,179],complete=[21],paused=[3,22,178,193],error=[6,14],ready=[0,7,16,161,189],connected=[1,13,17];function inG(v,g){return g.indexOf(v)>=0}if(inG(st,complete)&&N.events.complete)fire('Charging complete','Your car is ready to go.');else if(inG(st,charging)&&!inG(was,charging)&&N.events.started)fire('Charging started','Active.');else if(inG(st,paused)&&!inG(was,paused)&&N.events.paused)fire('Charging paused','See dashboard.');else if(inG(st,error)&&!inG(was,error)&&N.events.error)fire('Charger error','See dashboard.');else if(inG(st,connected)&&inG(was,ready)&&N.events.plug_in)fire('Plug connected','Ready to charge.');else if(inG(st,ready)&&!inG(was,ready)&&N.events.plug_out)fire('Plug disconnected','Charger idle.')};})();</script>"
         "</head><body>";
-    // Boot overlay markup — rendered with initial display state based
-    // on the current BLE state at the moment the page was served. If
-    // BLE is already connected, the overlay starts hidden (no flash).
-    // Otherwise it starts visible and the JS below progresses it via
-    // WS 'ble' pushes until state === 'connected'.
+    // Boot overlay markup — only rendered when there's a BLE link we'd be
+    // waiting on. Three exclusion cases caught here:
+    //   1. AP / captive-portal mode (no STA WiFi yet) — BLE task never starts.
+    //   2. No charger address configured (STA up but bleAddr blank) — same.
+    //   3. We're serving /config or /ota in setup flow — even if BLE is
+    //      configured, the user is here to change config, don't gate them.
+    //
+    // peter-mcc hit case 1 on a fresh USB-flash of rc21 (#4): the AP-mode
+    // setup page rendered with the overlay's `show` class because BLE
+    // wasn't "connected", and there was no BLE task to push a `connected`
+    // event over WS to dismiss it — page appeared permanently stuck.
+    // Rendering the overlay HTML at all in setup mode means the JS that
+    // follows could still re-show it on a WS-drop watchdog tick. Cleanest
+    // fix: omit the overlay markup entirely when we know there's no BLE
+    // to wait for.
+    bool inSetupMode = webServer.isAPMode() || !configMgr.hasBLE();
     bool bootReady = (bleState == "connected");
-    h += "<div id='wb-boot-overlay' class='wb-overlay";
-    h += bootReady ? "" : " show";
-    h += "'><div class='wb-overlay-card'>"
-         "<div class='wb-overlay-spin'></div>"
-         // Title and subtitle are both JS-controlled — they say
-         // "Wallbox Gateway is starting" only during an actual cold
-         // boot / BLE-disconnected state. Navigation transitions show
-         // "Loading…" and WS-drop reconnections show "Reconnecting…"
-         // so users don't see a misleading boot screen during a
-         // quick page change.
-         "<div id='wb-boot-title' style='font-size:1.05em;font-weight:600;color:#e2e8f0;margin:0 0 6px'>"
-         "Wallbox Gateway is starting</div>"
-         "<p id='wb-boot-stage'>Initializing</p>"
-         "<div class='wb-overlay-bar-bg'><div id='wb-boot-bar' class='wb-overlay-bar'></div></div>"
-         "<p id='wb-boot-hint' class='wb-overlay-hint'>This usually takes 5&ndash;15 seconds after a reboot.</p>"
-         "</div></div>";
+    if (!inSetupMode) {
+        h += "<div id='wb-boot-overlay' class='wb-overlay";
+        h += bootReady ? "" : " show";
+        h += "'><div class='wb-overlay-card'>"
+             "<div class='wb-overlay-spin'></div>"
+             // Title and subtitle are both JS-controlled — they say
+             // "Wallbox Gateway is starting" only during an actual cold
+             // boot / BLE-disconnected state. Navigation transitions show
+             // "Loading…" and WS-drop reconnections show "Reconnecting…"
+             // so users don't see a misleading boot screen during a
+             // quick page change.
+             "<div id='wb-boot-title' style='font-size:1.05em;font-weight:600;color:#e2e8f0;margin:0 0 6px'>"
+             "Wallbox Gateway is starting</div>"
+             "<p id='wb-boot-stage'>Initializing</p>"
+             "<div class='wb-overlay-bar-bg'><div id='wb-boot-bar' class='wb-overlay-bar'></div></div>"
+             "<p id='wb-boot-hint' class='wb-overlay-hint'>This usually takes 5&ndash;15 seconds after a reboot.</p>"
+             "</div></div>";
+    }
     h += "<div class='container'>"
         "<div class='ble-bar'><span class='ble-dot'></span>BLE: <span id='ble-bar-state'>";
     h += bleState;
