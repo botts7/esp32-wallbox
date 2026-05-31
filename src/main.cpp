@@ -381,9 +381,19 @@ void loop() {
     // First iteration's gap is meaningless (no prior timestamp), so
     // skip it via the !=0 check. Unsigned arithmetic handles millis()
     // wraparound at ~49 d correctly.
+    //
+    // Skip the first 60s of uptime. Boot-phase MQTT discovery floods
+    // out ~30 sync publishes back-to-back, blocking the main task for
+    // 3-5 s at a stretch. That gap is real but it's not the kind of
+    // wedge this tripwire was built to detect (peter-mcc #4 was a
+    // *runtime* freeze after hours of uptime). Without this cutoff,
+    // every boot saturates the metric and steady-state regressions
+    // can't be seen because they're permanently smaller than the
+    // boot spike. After 60 s the gateway is settled and any new
+    // spike is meaningful.
     {
         uint32_t now = millis();
-        if (g_loopLastMs != 0) {
+        if (g_loopLastMs != 0 && now > 60000) {
             uint32_t gap = now - g_loopLastMs;
             if (gap > g_loopMaxMs) g_loopMaxMs = gap;
         }
