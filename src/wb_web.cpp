@@ -6,6 +6,7 @@
 #include "wb_health.h"
 #include "wb_ota_history.h"
 #include "wb_diag.h"
+#include "wb_watchdog.h"
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -593,6 +594,17 @@ static void handleApiStatus() {
     json += ",\"chg_sn\":\"" + wallboxBLE.chargerSerial() + "\"";
     json += ",\"chg_mac\":\"" + wallboxBLE.chargerMac() + "\"";
     json += ",\"chg_grounding\":\"" + wallboxBLE.chargerGrounding() + "\"";
+    // chg_app_fw — charger application firmware (the version Wallbox app
+    // shows), distinct from dev_fw which is the BLE module firmware.
+    // chg_project — canonical model identifier (e.g. "prj15-pulsar-max").
+    json += ",\"chg_app_fw\":\"" + wallboxBLE.chargerAppFirmware() + "\"";
+    json += ",\"chg_project\":\"" + wallboxBLE.chargerProject() + "\"";
+    json += ",\"chg_sessions\":" + String((int)wallboxBLE.chargerSessionCount());
+    json += ",\"chg_power_boost\":" + String((int)wallboxBLE.chargerPowerBoost());
+    json += ",\"chg_lock_state\":" + String((int)wallboxBLE.chargerLockState());
+    json += ",\"chg_net_ssid\":\"" + wallboxBLE.chargerNetworkSsid() + "\"";
+    json += ",\"chg_net_ip\":\"" + wallboxBLE.chargerNetworkIp() + "\"";
+    json += ",\"chg_net_rssi\":" + String(wallboxBLE.chargerNetworkRssi());
     json += ",\"chg_fw_changed\":" + String(wallboxBLE.firmwareChanged() ? "true" : "false");
     json += ",\"chg_fw_prev\":\"" + wallboxBLE.previousFirmware() + "\"";
     json += ",\"ble_paused\":" + String(wallboxBLE.isPaused() ? "true" : "false");
@@ -652,6 +664,16 @@ static const int MAX_API_CMD_INFLIGHT = 2;
 // serial console, that it stays at 1. Single-threaded handler → plain ints.
 volatile int g_webReentryDepth = 0;
 volatile int g_webMaxReentry   = 0;
+// Main-loop iteration gap tracker. Updated from main.cpp loop() — the
+// difference between consecutive entries tells us if the main task is
+// being blocked for long stretches. Any iteration > ~500 ms is
+// suspicious; a wedge (per peter-mcc #4 and the maintainer's HAR
+// capture) would show as a value in the multi-second range. The
+// counter latches at the worst gap observed since boot — cheap to
+// read, gives us hard evidence of CPU starvation without needing
+// serial console access.
+volatile uint32_t g_loopLastMs = 0;
+volatile uint32_t g_loopMaxMs  = 0;
 
 // Token bucket on the serialized BLE resource. /api/command ultimately issues
 // one BLE round-trip (~500 ms) behind _cmdMutex; this caps the *rate* so a
@@ -1656,7 +1678,53 @@ static void handleInfo() {
 <p style='text-align:center;color:var(--text3);font-size:.75em;margin-top:16px'>Wallbox BLE Gateway )HTML" WB_VERSION R"HTML(</p>
 
 <script>
-function loadGW(){return fetch('/api/status').then(function(r){return r.json()}).then(function(d){window._lastStatus=d;renderGW(d);var c='';if(d.dev_name)c+=row('Name',d.dev_name);if(d.chg_sn)c+=row('Serial Number',d.chg_sn);if(d.chg_mac)c+=row('Charger MAC',d.chg_mac);if(d.chg_grounding)c+=row('Grounding',d.chg_grounding);if(d.dev_mfg)c+=row('Manufacturer',d.dev_mfg);if(d.dev_model)c+=row('Model',d.dev_model);if(d.dev_fw)c+=row('BLE Module FW',d.dev_fw);document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>';if(d.chg_fw_changed){var b=document.getElementById('fw-changed-banner');var det=document.getElementById('fw-changed-detail');if(b){b.style.display='block';if(det&&d.chg_fw_prev&&d.dev_fw)det.textContent='Was '+d.chg_fw_prev+', now '+d.dev_fw+'.';}}}).catch(function(){})}
+function _sect(title){return "<div style='margin-top:10px;color:var(--text3);font-size:.72em;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border);padding-bottom:3px;margin-bottom:4px;font-weight:600'>"+title+"</div>"}
+function loadGW(){return fetch('/api/status').then(function(r){return r.json()}).then(function(d){
+  window._lastStatus=d;renderGW(d);
+  // /info Charger Details card — grouped into sections for readability.
+  // Each section is hidden if none of its rows have data, so an
+  // unconfigured / un-paired charger doesn't show empty headers.
+  var c='', s='';
+  // Identity
+  s='';
+  if(d.dev_name)s+=row('Name',d.dev_name);
+  if(d.chg_sn)s+=row('Serial Number',d.chg_sn);
+  if(d.chg_mac)s+=row('MAC',d.chg_mac);
+  if(s){c+=_sect('Identity')+s}
+  // Firmware
+  s='';
+  if(d.chg_app_fw)s+=row('Charger',d.chg_app_fw);
+  if(d.chg_project)s+=row('Project',d.chg_project);
+  if(s){c+=_sect('Firmware')+s}
+  // Operation
+  s='';
+  if(d.chg_sessions>=0)s+=row('Total Sessions',d.chg_sessions);
+  if(d.chg_power_boost>=0)s+=row('Power Boost',d.chg_power_boost+' A');
+  if(d.chg_lock_state>=0)s+=row('Lock',d.chg_lock_state===1?'Locked':'Unlocked');
+  if(d.chg_grounding)s+=row('Grounding',d.chg_grounding);
+  if(s){c+=_sect('Operation')+s}
+  // Charger Network (the charger's own WiFi link, not our gateway's)
+  s='';
+  if(d.chg_net_ssid)s+=row('WiFi',d.chg_net_ssid);
+  if(d.chg_net_ip)s+=row('IP',d.chg_net_ip);
+  if(typeof d.chg_net_rssi==='number'&&d.chg_net_rssi>-127)s+=row('Signal',d.chg_net_rssi+' dBm');
+  if(s){c+=_sect('Charger Network')+s}
+  // BLE Module
+  s='';
+  if(d.dev_mfg)s+=row('Manufacturer',d.dev_mfg);
+  if(d.dev_model)s+=row('Model',d.dev_model);
+  if(d.dev_fw)s+=row('Firmware',d.dev_fw);
+  if(s){c+=_sect('BLE Module')+s}
+  // Gateway WiFi — the ESP32's link to the user's network. Many users
+  // care more about this signal than the charger's own WiFi.
+  s='';
+  if(d.ssid)s+=row('WiFi',d.ssid);
+  if(d.ip)s+=row('IP',d.ip);
+  if(typeof d.wifi_rssi==='number')s+=row('Signal',d.wifi_rssi+' dBm');
+  if(s){c+=_sect('Gateway WiFi')+s}
+  document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>';
+  if(d.chg_fw_changed){var b=document.getElementById('fw-changed-banner');var det=document.getElementById('fw-changed-detail');if(b){b.style.display='block';if(det&&d.chg_fw_prev&&d.dev_fw)det.textContent='Was '+d.chg_fw_prev+', now '+d.dev_fw+'.';}}
+}).catch(function(){})}
 function dismissFwBanner(){fetch('/api/fw/dismiss',{method:'POST'}).then(function(){var b=document.getElementById('fw-changed-banner');if(b)b.style.display='none'}).catch(function(){})}
 function loadOtaHistory(){return fetch('/api/ota/history').then(function(r){return r.json()}).then(function(arr){if(!Array.isArray(arr)||!arr.length)return;var c=document.getElementById('ota-history');var rows=document.getElementById('ota-history-rows');var h='';arr.forEach(function(e){var dot=e.ok?'<span style="color:#22c55e">&#x25CF;</span>':'<span style="color:#ef4444">&#x25CF;</span>';var sz=e.bytes?(' '+Math.round(e.bytes/1024)+'KB'):'';var rsn=e.ok?'':(' — '+(e.reason||'failed'));h+='<div style="margin:3px 0">'+dot+' '+(e.from||'unknown')+sz+rsn+'</div>'});rows.innerHTML=h;c.style.display='block'}).catch(function(){})}
 function loadBootReason(){return fetch('/api/boot/history').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('boot-reason');if(!el)return;var cur=d.current||'unknown';var curFw=d.current_fw||'';var isBad=function(r){r=r||'';return r.indexOf('panic')>=0||r.indexOf('watchdog')>=0||r.indexOf('brownout')>=0};var bad=isBad(cur);var col=bad?'#ef4444':'var(--text3)';var prefix=bad?'&#x26A0; ':'';el.innerHTML='<span style=\"color:'+col+'\">'+prefix+'Last boot: '+cur+'</span>';if(d.history&&d.history.length>1){var thisFw=d.history.filter(function(e){return isBad(e.reason)&&e.fw===curFw});var olderFw=d.history.filter(function(e){return isBad(e.reason)&&e.fw!==curFw});if(thisFw.length){el.innerHTML+=' <span style=\"color:var(--danger);font-size:.92em\">('+thisFw.length+' bad boot'+(thisFw.length>1?'s':'')+' on this firmware)</span>'}else if(olderFw.length){el.innerHTML+=' <span style=\"color:var(--text3);font-size:.85em;opacity:.7\">('+olderFw.length+' from older firmware)</span>'}}}).catch(function(){})}
@@ -1670,7 +1738,55 @@ function loadInfoChained(){loadGW().then(loadBootReason).then(loadOtaHistory).th
 loadInfoChained();setInterval(function(){loadGW().then(loadDiag).catch(function(){})},15000);
 function fmtUptime(s){if(!s)return 'never';var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60);return (d?d+'d ':'')+(h?h+'h ':'')+m+'m'}
 function fmtDur(s){if(s<60)return s+'s';if(s<3600)return Math.round(s/60)+'m '+(s%60)+'s';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m'}
-function loadDiag(){return fetch('/api/diag/disconnects').then(function(r){return r.json()}).then(function(d){var rows=document.getElementById('diag-rows');if(!rows)return;var curUp=d.uptime_s||0;var h='';h+=row('BLE reconnects (this boot)',d.ble_reconnects+(d.ble_longest_s?' (longest '+fmtDur(d.ble_longest_s)+')':''));h+=row('MQTT reconnects (this boot)',d.mqtt_reconnects+(d.mqtt_longest_s?' (longest '+fmtDur(d.mqtt_longest_s)+')':''));if(d.ble_last_at_s)h+=row('Last BLE reconnect',fmtUptime(d.ble_last_at_s)+' after boot');if(d.mqtt_last_at_s)h+=row('Last MQTT reconnect',fmtUptime(d.mqtt_last_at_s)+' after boot');if(d.events&&d.events.length){var thisBoot=d.events.filter(function(e){return e.start<=curUp});var prior=d.events.filter(function(e){return e.start>curUp});if(thisBoot.length){h+='<div style=\"margin-top:8px;font-size:.82em;color:var(--text2)\">Events this boot:</div>';thisBoot.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style=\"font-family:monospace;font-size:.78em;margin:2px 0\"><span style=\"color:'+kc+'\">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+', down '+fmtDur(e.dur)+'</div>'})}if(prior.length){h+='<div style=\"margin-top:8px;font-size:.82em;color:var(--text3)\">From prior boots (NVS-persisted):</div>';prior.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style=\"font-family:monospace;font-size:.78em;margin:2px 0;opacity:.55\"><span style=\"color:'+kc+'\">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+' of that boot, down '+fmtDur(e.dur)+'</div>'})}}rows.innerHTML=h||'<div style=\"color:var(--text3)\">No disconnects logged yet.</div>'}).catch(function(){})}
+function loadDiag(){
+  // Fetch /api/diag/disconnects AND /api/health in parallel — disconnect
+  // counters plus runtime-health tripwires (loop_max_ms, max_reentry,
+  // tokens, heap_free) in a single Diagnostics card. The latter were
+  // previously only visible via curl; now they're on /info so wedge /
+  // reentrancy regressions are spotable without a shell.
+  return Promise.all([
+    fetch('/api/diag/disconnects').then(function(r){return r.json()}).catch(function(){return{}}),
+    fetch('/api/health').then(function(r){return r.json()}).catch(function(){return{}})
+  ]).then(function(results){
+    var d=results[0]||{}, h2=results[1]||{};
+    var rows=document.getElementById('diag-rows');if(!rows)return;
+    var curUp=d.uptime_s||h2.uptime||0;
+    var h='';
+    // Runtime health section — the wedge / reentrancy tripwires.
+    if(typeof h2.max_reentry==='number'||typeof h2.loop_max_ms==='number'){
+      h+=_sect('Runtime Health');
+      if(typeof h2.max_reentry==='number'){
+        var rcol = h2.max_reentry > 1 ? '#ef4444' : 'var(--text)';
+        h+=row('Max reentry depth',"<span style='color:"+rcol+"'>"+h2.max_reentry+(h2.max_reentry>1?' &#x26A0;':'')+"</span>");
+      }
+      if(typeof h2.loop_max_ms==='number'){
+        var lcol = h2.loop_max_ms > 500 ? '#f59e0b' : (h2.loop_max_ms > 2000 ? '#ef4444' : 'var(--text)');
+        h+=row('Longest loop iteration',"<span style='color:"+lcol+"'>"+h2.loop_max_ms+' ms'+(h2.loop_max_ms>2000?' &#x26A0;':'')+"</span>");
+      }
+      if(typeof h2.tokens==='number')h+=row('Rate-limit tokens',h2.tokens+' / 4');
+      if(typeof h2.heap_free==='number')h+=row('Heap free',(h2.heap_free/1024).toFixed(1)+' KB');
+    }
+    // Existing disconnect counters / events.
+    h+=_sect('Reconnect counters');
+    h+=row('BLE reconnects (this boot)',d.ble_reconnects+(d.ble_longest_s?' (longest '+fmtDur(d.ble_longest_s)+')':''));
+    h+=row('MQTT reconnects (this boot)',d.mqtt_reconnects+(d.mqtt_longest_s?' (longest '+fmtDur(d.mqtt_longest_s)+')':''));
+    if(d.ble_last_at_s)h+=row('Last BLE reconnect',fmtUptime(d.ble_last_at_s)+' after boot');
+    if(d.mqtt_last_at_s)h+=row('Last MQTT reconnect',fmtUptime(d.mqtt_last_at_s)+' after boot');
+    if(d.events&&d.events.length){
+      var thisBoot=d.events.filter(function(e){return e.start<=curUp});
+      var prior=d.events.filter(function(e){return e.start>curUp});
+      if(thisBoot.length){
+        h+='<div style="margin-top:8px;font-size:.82em;color:var(--text2)">Events this boot:</div>';
+        thisBoot.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+', down '+fmtDur(e.dur)+'</div>'});
+      }
+      if(prior.length){
+        h+='<div style="margin-top:8px;font-size:.82em;color:var(--text3)">From prior boots (NVS-persisted):</div>';
+        prior.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0;opacity:.55"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+' of that boot, down '+fmtDur(e.dur)+'</div>'});
+      }
+    }
+    rows.innerHTML=h||'<div style="color:var(--text3)">No diagnostics logged yet.</div>';
+  }).catch(function(){})
+}
 function clearDiag(){if(!confirm('Reset disconnect counters and clear event history?'))return;fetch('/api/diag/clear?csrf='+window.WB_CSRF,{method:'POST'}).then(function(){loadDiag()}).catch(function(){})}
 function renderGW(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi Signal',d.wifi_rssi+' dBm');h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h}
 // Live-update the Gateway card off the same WS push the top banner uses,
@@ -1801,7 +1917,8 @@ static void handleSessionsPage() {
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading...</div>
 <div id='pg' style='display:none'>
-<h1>&#x1F4CA; Charging Sessions</h1>
+<h1>&#x1F4CA; Charging Sessions<span id='sess-total' style='font-size:.55em;vertical-align:middle;margin-left:10px;padding:3px 9px;border-radius:10px;background:rgba(59,130,246,.12);color:var(--accent);font-weight:500;display:none'></span></h1>
+<script>fetch('/api/status').then(function(r){return r.json()}).then(function(d){if(typeof d.chg_sessions==='number'&&d.chg_sessions>=0){var el=document.getElementById('sess-total');if(el){el.textContent=d.chg_sessions+' total';el.style.display='inline-block'}}}).catch(function(){})</script>
 <p class='subtitle'>Charging history and patterns</p>
 
 <div class='card'>
@@ -2220,17 +2337,70 @@ static void handleOtaPage() {
 </div>
 <script>
 document.getElementById('fw').onchange=function(){var f=this.files[0];if(!f)return;var info=document.getElementById('ota-info');info.style.display='block';var sz=(f.size/1024).toFixed(0);var valid=f.name.endsWith('.bin')&&f.size>10000&&f.size<2000000;info.innerHTML=row('File',f.name)+row('Size',sz+' KB')+(valid?'':'<p style="color:var(--danger);margin-top:8px">Invalid: must be .bin, 10KB-2MB</p>')};
+// Single retry budget — admission rejections (just-rebooted, BLE still
+// settling, WiFi briefly down) are usually transient. Retrying more than
+// once invites flash-storm behaviour we expressly designed the admission
+// guard to prevent.
+var _otaRetried=false;
 function doOTA(){
   var f=document.getElementById('fw').files[0];
   if(!f){toast('Select a firmware file','error');return}
   if(!f.name.endsWith('.bin')){toast('Must be a .bin file','error');return}
   if(f.size<10000||f.size>2000000){toast('File size invalid','error');return}
+  _otaRetried=false;
+  _doOtaUpload(f);
+}
+function _doOtaUpload(f){
   var prog=document.getElementById('ota-progress');prog.style.display='block';
   var bar=document.getElementById('ota-bar');
   var stat=document.getElementById('ota-status');
   var xhr=new XMLHttpRequest();xhr.open('POST','/api/ota');
   xhr.upload.onprogress=function(e){if(e.lengthComputable){var pct=Math.round(e.loaded/e.total*100);bar.style.width=pct+'%';stat.textContent='Uploading... '+pct+'%'}};
-  xhr.onload=function(){if(xhr.status===200){stat.textContent='Update complete! Rebooting...';toast('Firmware updated!','success');bar.style.width='100%';bar.style.background='var(--success)'}else{stat.textContent='Failed: '+xhr.responseText;toast('Update failed','error');bar.style.background='var(--danger)'}};
+  xhr.onload=function(){
+    if(xhr.status===200){
+      stat.textContent='Update complete! Rebooting...';
+      toast('Firmware updated!','success');
+      bar.style.width='100%';bar.style.background='var(--success)';
+      return;
+    }
+    if(xhr.status===503&&!_otaRetried){
+      // Admission rejected — the gateway is asking us to back off and
+      // try again shortly. Parse Retry-After (seconds) and schedule one
+      // automatic retry. Avoids the user having to manually re-click
+      // Upload after a reboot when the device hasn't quite passed the
+      // settling window yet.
+      var ra=parseInt(xhr.getResponseHeader('Retry-After')||'',10);
+      if(!(ra>0)){
+        try{var j=JSON.parse(xhr.responseText||'{}');if(j&&j.retry_after>0)ra=j.retry_after}catch(e){}
+      }
+      if(!(ra>0))ra=10;
+      _otaRetried=true;
+      bar.style.width='0%';bar.style.background='var(--accent)';
+      var reason='';try{var j2=JSON.parse(xhr.responseText||'{}');reason=j2&&j2.error?j2.error:''}catch(e){}
+      var remain=ra;
+      stat.textContent='Gateway busy ('+(reason||'admission')+ ') — retrying in '+remain+'s...';
+      toast('Gateway busy, auto-retrying in '+remain+'s','info');
+      var timer=setInterval(function(){
+        remain--;
+        if(remain>0){stat.textContent='Gateway busy — retrying in '+remain+'s...';return}
+        clearInterval(timer);
+        stat.textContent='Retrying upload...';
+        // Guard against synchronous throws inside _doOtaUpload (FormData
+        // / XHR constructor failures on exotic browsers). The interval is
+        // already cleared above, but without this catch the user is left
+        // staring at "Retrying upload..." with no feedback if it throws.
+        try{_doOtaUpload(f)}catch(e){
+          stat.textContent='Retry failed: '+(e&&e.message?e.message:e);
+          bar.style.background='var(--danger)';
+          toast('Retry failed','error');
+        }
+      },1000);
+      return;
+    }
+    stat.textContent='Failed: '+xhr.responseText;
+    toast('Update failed','error');
+    bar.style.background='var(--danger)';
+  };
   xhr.onerror=function(){stat.textContent='Upload failed';toast('Upload error','error')};
   // CRITICAL: wrap the file in FormData so the body is sent as
   // multipart/form-data. xhr.send(File) by itself sends the raw bytes
@@ -2252,6 +2422,13 @@ document.getElementById('ld').style.display='none';document.getElementById('pg')
 
 bool otaInProgress = false;
 static size_t expectedOtaSize = 0;  // Content-Length captured at FILE_START for truncation check
+// When admission rejects an upload at FILE_START we set otaRetryAfterSec so
+// FILE_END can emit a proper 503 + Retry-After. doOTA() in the browser
+// parses Retry-After and schedules one auto-retry — peter-mcc #4 follow-up:
+// the typical "rejected because we just rebooted" case should self-heal
+// without the user re-clicking Upload.
+static uint16_t otaRetryAfterSec = 0;
+static String   otaRejectReason;
 
 static void handleOtaUpload() {
     // DEFENCE IN DEPTH — the Arduino WebServer routes both multipart AND
@@ -2284,6 +2461,10 @@ static void handleOtaUpload() {
     static bool otaError = false;
 
     if (upload.status == UPLOAD_FILE_START) {
+        // Clear any retry hint left over from a prior aborted upload —
+        // FILE_END below only emits 503+Retry-After if THIS upload sets it.
+        otaRetryAfterSec = 0;
+        otaRejectReason  = String();
         // SECURITY — auth check must happen BEFORE the admission guard,
         // BEFORE Update.begin() erases the partition. Without this anyone
         // on the WiFi can flash arbitrary firmware and brick or backdoor
@@ -2300,13 +2481,17 @@ static void handleOtaUpload() {
         // settling window) and re-entrant uploads.
         if (otaInProgress) {
             Log.println("[OTA] REJECTED: another OTA already in progress");
-            otaError = true;
+            otaError          = true;
+            otaRetryAfterSec  = 10;  // the other OTA should be done by then
+            otaRejectReason   = "another OTA already in progress";
             return;
         }
         String reason;
         if (!wb_health::canAcceptOta(reason)) {
             Log.printf("[OTA] REJECTED: %s\n", reason.c_str());
-            otaError = true;
+            otaError         = true;
+            otaRetryAfterSec = (uint16_t)wb_health::otaRetryAfterSeconds();
+            otaRejectReason  = reason;
             return;
         }
 
@@ -2324,8 +2509,10 @@ static void handleOtaUpload() {
         // erase that's about to happen inside Update.begin(). On an empty
         // / fully-used OTA partition the erase can take 10+ seconds, well
         // beyond the default 5s WDT — which would otherwise panic-reboot
-        // mid-upload (reported by peter-mcc in #4).
-        esp_task_wdt_init(60, false);
+        // mid-upload (reported by peter-mcc in #4). Restored on FILE_END
+        // and ABORTED so a failed OTA doesn't leave the WDT permanently
+        // relaxed — see wb_watchdog.h.
+        wb_wdt::extendTo(60);
 
         // Use the HTTP Content-Length to size Update.begin() — this
         // erases only as much as needed instead of the whole 1.9 MB
@@ -2355,6 +2542,29 @@ static void handleOtaUpload() {
         if (!ok) {
             Log.printf("[OTA] Begin failed: %s\n", Update.errorString());
             otaError = true;
+        } else if (http.hasHeader("X-Firmware-MD5")) {
+            // Optional end-to-end integrity check. When supplied, the
+            // Update library streams an MD5 alongside the partition
+            // writes and fails Update.end() if the final hash doesn't
+            // match — so a flipped byte mid-flight (rare on TCP, but
+            // possible on Wi-Fi with marginal signal) gets caught
+            // before we mark the partition valid and reboot into it.
+            String md5 = http.header("X-Firmware-MD5");
+            md5.trim();
+            md5.toLowerCase();
+            // 32 hex chars = 16 bytes. Anything else is malformed —
+            // skip rather than fail so a typo on the client side doesn't
+            // brick the upload outright.
+            if (md5.length() == 32) {
+                if (Update.setMD5(md5.c_str())) {
+                    Log.printf("[OTA] Expecting MD5 %s\n", md5.c_str());
+                } else {
+                    Log.println("[OTA] WARN: Update.setMD5() rejected — proceeding without integrity check");
+                }
+            } else {
+                Log.printf("[OTA] WARN: X-Firmware-MD5 has wrong length (%u, expected 32) — ignored\n",
+                           (unsigned)md5.length());
+            }
         }
     } else if (upload.status == UPLOAD_FILE_WRITE && !otaError) {
         // First chunk — validate ESP32 magic byte
@@ -2374,6 +2584,10 @@ static void handleOtaUpload() {
         totalSize += upload.currentSize;
     } else if (upload.status == UPLOAD_FILE_END) {
         otaInProgress = false;
+        // Restore the WDT regardless of success or error. Doing it here
+        // catches every terminal path below — success branch reboots
+        // anyway, but error paths must not leave the WDT relaxed.
+        wb_wdt::restore();
         // Truncation check — if we received fewer bytes than Content-Length
         // promised, refuse to commit. Otherwise `Update.end(true)` will
         // happily mark a partial OTA partition as valid and brick the device.
@@ -2390,12 +2604,31 @@ static void handleOtaUpload() {
         }
         if (otaError) {
             Update.abort();
-            Log.println("[OTA] Aborted due to errors");
-            wb_ota_history::record(millis() / 1000, WB_VERSION, totalSize, false, "aborted");
-            http.send(500, "text/plain", "Upload failed");
+            // Admission-rejection path: emit a proper 503 with Retry-After
+            // so the browser can auto-retry once the window opens. Other
+            // errors (truncation, magic byte, Update.begin failure) get
+            // 500 — those won't help by retrying.
+            if (otaRetryAfterSec > 0) {
+                Log.printf("[OTA] Rejected — telling client to retry in %us: %s\n",
+                           (unsigned)otaRetryAfterSec, otaRejectReason.c_str());
+                wb_ota_history::record(millis() / 1000, WB_VERSION, totalSize, false,
+                                       (String("rejected: ") + otaRejectReason).c_str());
+                http.sendHeader("Retry-After", String(otaRetryAfterSec));
+                String body = "{\"error\":\"" + otaRejectReason
+                            + "\",\"retry_after\":" + String(otaRetryAfterSec) + "}";
+                http.send(503, "application/json", body);
+            } else {
+                Log.println("[OTA] Aborted due to errors");
+                wb_ota_history::record(millis() / 1000, WB_VERSION, totalSize, false, "aborted");
+                http.send(500, "text/plain", "Upload failed");
+            }
         } else if (Update.end(true)) {
             Log.printf("[OTA] Success! %u bytes written to partition\n", totalSize);
             wb_ota_history::record(millis() / 1000, WB_VERSION, totalSize, true, "ok");
+            // Mark this device as OTA-proven so future flashes use the
+            // relaxed 15s admission window instead of the conservative
+            // 60s one. Safe to call repeatedly — internally NVS-cached.
+            wb_health::markOtaSuccess();
             http.send(200, "text/plain", "OK");
             delay(1000);
             ESP.restart();
@@ -2412,6 +2645,7 @@ static void handleOtaUpload() {
         if (otaInProgress) {
             Update.abort();
             otaInProgress = false;
+            wb_wdt::restore();
             Log.println("[OTA] Upload aborted by client — partition left untouched");
         }
     }
@@ -2449,8 +2683,14 @@ static void registerRoutes() {
     // (good) from raw POST (would crash on http.upload() — see #4).
     // Arduino WebServer drops every header NOT in this list, so the
     // OTA handler's Content-Type guard depends on this entry existing.
-    static const char* otaHeaders[] = {"Content-Length", "Content-Type"};
-    http.collectHeaders(otaHeaders, 2);
+    // X-Firmware-MD5 is honored by the OTA handler — when present, the
+    // Arduino Update library computes the hash as bytes stream in and
+    // refuses to commit on mismatch. Tools that can compute MD5 of the
+    // .bin (curl --header, HA OTA scripts) get end-to-end integrity for
+    // free; browsers don't send it today (kept off the upload page to
+    // avoid the multi-second hash step on a 1.5 MB file).
+    static const char* otaHeaders[] = {"Content-Length", "Content-Type", "X-Firmware-MD5"};
+    http.collectHeaders(otaHeaders, 3);
     http.on("/style.css", handleStyleCss);
     http.on("/app.js", handleAppJs);
     http.on("/save", HTTP_POST, handleSave);
@@ -2695,8 +2935,20 @@ static void registerRoutes() {
         // harness assert correctness over Wi-Fi without a serial console.
         String diag = ",\"max_reentry\":" + String(g_webMaxReentry)
                     + ",\"tokens\":" + String((int)_tbTokens)
+                    // loop_max_ms = longest gap between consecutive main
+                    // loop() iterations since boot. Healthy: under
+                    // ~200 ms in steady state. A wedge (peter-mcc #4)
+                    // would show as multi-second values here.
+                    + ",\"loop_max_ms\":" + String((uint32_t)g_loopMaxMs)
                     + ",\"heap_free\":" + String(ESP.getFreeHeap())
-                    + ",\"uptime\":" + String(millis()/1000);
+                    + ",\"uptime\":" + String(millis()/1000)
+                    // ota_proven flips to true the first time an OTA
+                    // commits + the new firmware reaches healthy state.
+                    // ota_min_uptime is the threshold currently in force
+                    // (60s fresh, 15s once proven). Lets a tester confirm
+                    // the relaxed window engaged without scraping logs.
+                    + ",\"ota_proven\":" + String(wb_health::otaProven() ? "true" : "false")
+                    + ",\"ota_min_uptime\":" + String(wb_health::effectiveOtaMinUptimeMs()/1000);
         if (ok) {
             http.send(200, "application/json", "{\"ok\":true" + diag + "}");
         } else {

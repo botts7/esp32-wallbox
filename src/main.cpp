@@ -119,6 +119,8 @@ static void publishCachedNotificationsIfNew() {
 // translation unit that needs them, and the rc21 reentry tripwire is
 // already documented in handleApiCommand.
 extern volatile int g_webMaxReentry;
+extern volatile uint32_t g_loopLastMs;
+extern volatile uint32_t g_loopMaxMs;
 int wb_web_tokens_remaining();
 
 static void publishGatewayInfo() {
@@ -152,6 +154,11 @@ static void publishGatewayInfo() {
     json += String((int)g_webMaxReentry);
     json += ",\"tokens\":";
     json += String(wb_web_tokens_remaining());
+    // Longest main-loop iteration gap since boot — wedge tripwire.
+    // Same shape as max_reentry. Healthy: < ~200 ms. Multi-second
+    // values mean the main task was blocked (peter-mcc #4 wedge class).
+    json += ",\"loop_max_ms\":";
+    json += String((uint32_t)g_loopMaxMs);
     // Boot reason + per-firmware bad-boot count — same data /info badge
     // shows, now visible from HA. Useful for fleet monitoring.
     json += ",\"boot_reason\":\"";
@@ -165,6 +172,19 @@ static void publishGatewayInfo() {
     json += ",\"ble_pause_remaining_s\":";
     json += String(wallboxBLE.pauseRemainingMs() / 1000);
     json += ",\"chg_grounding\":\"" + wallboxBLE.chargerGrounding() + "\"";
+    // Charger application firmware (the version Wallbox app shows) +
+    // canonical project name from fw_v_ BAPI. Distinct from dev_fw
+    // (the BLE radio module's firmware) — peter-mcc #4 flagged the
+    // confusion when our HA "BLE Firmware" label was being compared
+    // to the Wallbox app's charger-firmware number.
+    json += ",\"chg_app_fw\":\"" + wallboxBLE.chargerAppFirmware() + "\"";
+    json += ",\"chg_project\":\"" + wallboxBLE.chargerProject() + "\"";
+    json += ",\"chg_sessions\":" + String((int)wallboxBLE.chargerSessionCount());
+    json += ",\"chg_power_boost\":" + String((int)wallboxBLE.chargerPowerBoost());
+    json += ",\"chg_lock_state\":" + String((int)wallboxBLE.chargerLockState());
+    json += ",\"chg_net_ssid\":\"" + wallboxBLE.chargerNetworkSsid() + "\"";
+    json += ",\"chg_net_ip\":\"" + wallboxBLE.chargerNetworkIp() + "\"";
+    json += ",\"chg_net_rssi\":" + String(wallboxBLE.chargerNetworkRssi());
     json += ",\"dev_mfg\":\"" + wallboxBLE.deviceManufacturer() + "\"";
     json += ",\"dev_model\":\"" + wallboxBLE.deviceModel() + "\"";
     json += ",\"dev_fw\":\"" + wallboxBLE.deviceFirmware() + "\"";
@@ -357,6 +377,19 @@ void setup() {
 }
 
 void loop() {
+    // Loop-iteration gap tracker — see g_loopMaxMs in wb_web.cpp.
+    // First iteration's gap is meaningless (no prior timestamp), so
+    // skip it via the !=0 check. Unsigned arithmetic handles millis()
+    // wraparound at ~49 d correctly.
+    {
+        uint32_t now = millis();
+        if (g_loopLastMs != 0) {
+            uint32_t gap = now - g_loopLastMs;
+            if (gap > g_loopMaxMs) g_loopMaxMs = gap;
+        }
+        g_loopLastMs = now;
+    }
+
     // Always run web server + OTA + telnet
     ArduinoOTA.handle();
     webServer.loop();
