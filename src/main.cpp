@@ -184,7 +184,7 @@ static void publishGatewayInfo() {
     json += ",\"chg_lock_state\":" + String((int)wallboxBLE.chargerLockState());
     json += ",\"chg_net_ssid\":\"" + wallboxBLE.chargerNetworkSsid() + "\"";
     json += ",\"chg_net_ip\":\"" + wallboxBLE.chargerNetworkIp() + "\"";
-    json += ",\"chg_net_rssi\":" + String(wallboxBLE.chargerNetworkRssi());
+    json += ",\"chg_net_signal\":" + String(wallboxBLE.chargerNetworkSignal());
     json += ",\"dev_mfg\":\"" + wallboxBLE.deviceManufacturer() + "\"";
     json += ",\"dev_model\":\"" + wallboxBLE.deviceModel() + "\"";
     json += ",\"dev_fw\":\"" + wallboxBLE.deviceFirmware() + "\"";

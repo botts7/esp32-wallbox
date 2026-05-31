@@ -606,14 +606,27 @@ void WallboxBLE::_connect() {
                 if (!first.isNull()) {
                     if (first["ssid"].is<const char*>())   _chgNetSsid = first["ssid"].as<const char*>();
                     if (first["ip"].is<const char*>())     _chgNetIp   = first["ip"].as<const char*>();
-                    if (first["rssi"].is<int>())           _chgNetRssi = first["rssi"].as<int>();
-                    if (first["signal"].is<int>() && _chgNetRssi == -127) _chgNetRssi = first["signal"].as<int>();
+                    // Pulsar MAX returns a `signal` quality percent (0-100).
+                    // No `rssi` field observed in the live BAPI probe. We
+                    // accept either with `signal` winning if both appear.
+                    if (first["signal"].is<int>()) _chgNetSignal = first["signal"].as<int>();
+                    else if (first["rssi"].is<int>()) {
+                        int r = first["rssi"].as<int>();
+                        // Convert RSSI in dBm to a rough quality % so HA's
+                        // single sensor renders consistently across firmware
+                        // variants. -50 dBm -> ~100 %, -100 dBm -> ~0 %.
+                        if (r < 0) {
+                            int q = 2 * (r + 100);
+                            if (q < 0) q = 0; if (q > 100) q = 100;
+                            _chgNetSignal = q;
+                        } else _chgNetSignal = r;
+                    }
                 }
             }
             if (_chgNetIp.length()) {
                 Log.printf("[BLE] Charger network: ssid=%s ip=%s rssi=%d\n",
                     _chgNetSsid.length() ? _chgNetSsid.c_str() : "(none)",
-                    _chgNetIp.c_str(), _chgNetRssi);
+                    _chgNetIp.c_str(), _chgNetSignal);
             }
         }
 

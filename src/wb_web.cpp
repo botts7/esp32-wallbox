@@ -604,7 +604,7 @@ static void handleApiStatus() {
     json += ",\"chg_lock_state\":" + String((int)wallboxBLE.chargerLockState());
     json += ",\"chg_net_ssid\":\"" + wallboxBLE.chargerNetworkSsid() + "\"";
     json += ",\"chg_net_ip\":\"" + wallboxBLE.chargerNetworkIp() + "\"";
-    json += ",\"chg_net_rssi\":" + String(wallboxBLE.chargerNetworkRssi());
+    json += ",\"chg_net_signal\":" + String(wallboxBLE.chargerNetworkSignal());
     json += ",\"chg_fw_changed\":" + String(wallboxBLE.firmwareChanged() ? "true" : "false");
     json += ",\"chg_fw_prev\":\"" + wallboxBLE.previousFirmware() + "\"";
     json += ",\"ble_paused\":" + String(wallboxBLE.isPaused() ? "true" : "false");
@@ -1707,7 +1707,7 @@ function loadGW(){return fetch('/api/status').then(function(r){return r.json()})
   s='';
   if(d.chg_net_ssid)s+=row('WiFi',d.chg_net_ssid);
   if(d.chg_net_ip)s+=row('IP',d.chg_net_ip);
-  if(typeof d.chg_net_rssi==='number'&&d.chg_net_rssi>-127)s+=row('Signal',d.chg_net_rssi+' dBm');
+  if(typeof d.chg_net_signal==='number'&&d.chg_net_signal>0)s+=row('Signal',d.chg_net_signal+' %');
   if(s){c+=_sect('Charger Network')+s}
   // BLE Module
   s='';

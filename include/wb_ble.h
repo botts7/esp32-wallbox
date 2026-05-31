@@ -135,7 +135,9 @@ public:
     // first network entry as a stringified summary.
     String chargerNetworkSsid() const { return _chgNetSsid; }
     String chargerNetworkIp()   const { return _chgNetIp; }
-    int    chargerNetworkRssi() const { return _chgNetRssi; }
+    // gnsta returns a 0-100 quality percentage in the `signal` field
+    // (no `rssi`/dBm field on Pulsar MAX). Surfaced as a percent.
+    int    chargerNetworkSignal() const { return _chgNetSignal; }
 
     // Best-effort mapping from fw_v_.p to our internal model key
     // (max/plus/copper/quasar/quasar2). Empty when fw_v_ hasn't been
@@ -270,7 +272,7 @@ private:
     int32_t _chgLockState    = -1;  // r_lck — 0=unlocked, 1=locked
     String  _chgNetSsid;
     String  _chgNetIp;
-    int     _chgNetRssi = -127;
+    int     _chgNetSignal = 0;  // 0-100 quality % (gnsta.signal)
     String _chargerModel = "max";
     String _prevFw;
     bool _fwChanged = false;

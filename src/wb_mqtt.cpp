@@ -767,21 +767,33 @@ void WallboxMQTT::sendDiscovery() {
     publishDiscoveryEntity(*_client, "sensor", "chg_power_boost", "Power Boost Limit",
         "mdi:home-lightning-bolt-outline", gTopic.c_str(),
         "{{ value_json.chg_power_boost | default(0) }}", "A", "current", nullptr, "measurement");
-    // Dedicated lock-state binary from r_lck — cleaner than parsing
-    // r_sta.lock_status. HA renders as a binary_sensor (door-class
-    // since it's a physical lock state).
+    // Dedicated lock-state binary from r_lck. BAPI r_lck returns
+    //   r:0 = unlocked, r:1 = locked.
+    // HA's device_class:lock has *inverted* binary_sensor semantics:
+    //   on = "problem detected" = UNLOCKED
+    //   off = "no problem"      = LOCKED
+    // So publish ON when chg_lock_state == 0 (unlocked) and OFF when
+    // == 1 (locked). Live-tested on a Pulsar MAX: with the charger
+    // unlocked (chg_lock_state=0) HA now shows "Unlocked" instead of
+    // the incorrect "Locked" we observed before the inversion fix.
     publishDiscoveryEntity(*_client, "binary_sensor", "chg_lock_state", "Lock State",
         "mdi:lock", gTopic.c_str(),
-        "{% if value_json.chg_lock_state == 1 %}ON{% else %}OFF{% endif %}", nullptr, "lock");
+        "{% if value_json.chg_lock_state == 0 %}ON{% else %}OFF{% endif %}", nullptr, "lock");
     // Charger-side WiFi (gnsta) — the charger has its own WiFi link
     // for cloud/OCPP/firmware updates, separate from the gateway's link.
+    // NOTE: gnsta does NOT return an RSSI in dBm — the field is
+    // literally named `signal` and is a 0-100 quality percentage on
+    // Pulsar MAX (confirmed by raw BAPI probe). Older drafts of this
+    // discovery mis-labelled it as dBm with device_class:signal_strength
+    // and produced "60 dBm" — wrong on both unit and class. Now it's a
+    // plain percentage with no device_class so HA renders "60 %".
     publishDiscoveryEntity(*_client, "sensor", "chg_net_ssid", "Charger WiFi SSID",
         "mdi:wifi", gTopic.c_str(), "{{ value_json.chg_net_ssid | default('') }}");
     publishDiscoveryEntity(*_client, "sensor", "chg_net_ip", "Charger IP",
         "mdi:ip-network-outline", gTopic.c_str(), "{{ value_json.chg_net_ip | default('') }}");
-    publishDiscoveryEntity(*_client, "sensor", "chg_net_rssi", "Charger WiFi Signal",
+    publishDiscoveryEntity(*_client, "sensor", "chg_net_signal", "Charger WiFi Signal",
         "mdi:wifi", gTopic.c_str(),
-        "{{ value_json.chg_net_rssi | default(-127) }}", "dBm", "signal_strength", nullptr, "measurement");
+        "{{ value_json.chg_net_signal | default(0) }}", "%", nullptr, nullptr, "measurement");
 
     // rc22 — diagnostic sensors backed by the rc20/rc21 observability
     // surface (max_reentry, tokens, boot_reason, heap watermark, BLE pause
