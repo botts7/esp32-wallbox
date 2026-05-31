@@ -148,10 +148,42 @@ void markHealthy() {
 
 bool isHealthy() { return _healthy; }
 
+// "OTA-proven" flag in NVS. Set the first time an OTA commits successfully
+// AND the new firmware reaches healthy state. Once set, future OTAs use
+// the relaxed uptime window — the device has demonstrated it can survive
+// a flash cycle, so the conservative 60s settling window isn't needed.
+static const char* NVS_OTA_PROVEN = "ota_proven";
+static int8_t _otaProvenCache = -1;  // -1=unread, 0=false, 1=true
+
+bool otaProven() {
+    if (_otaProvenCache >= 0) return _otaProvenCache == 1;
+    Preferences p;
+    if (!p.begin(NVS_NS, true)) { _otaProvenCache = 0; return false; }
+    uint8_t v = p.getUChar(NVS_OTA_PROVEN, 0);
+    p.end();
+    _otaProvenCache = v ? 1 : 0;
+    return v != 0;
+}
+
+void markOtaSuccess() {
+    if (otaProven()) return;
+    Preferences p;
+    if (!p.begin(NVS_NS, false)) return;
+    p.putUChar(NVS_OTA_PROVEN, 1);
+    p.end();
+    _otaProvenCache = 1;
+    Log.println("[Health] OTA-proven flag set — future OTAs use relaxed admission window");
+}
+
+uint32_t effectiveOtaMinUptimeMs() {
+    return otaProven() ? OTA_MIN_UPTIME_PROVEN_MS : OTA_MIN_UPTIME_MS;
+}
+
 bool canAcceptOta(String& reasonOut) {
     uint32_t up = millis();
-    if (up < OTA_MIN_UPTIME_MS) {
-        reasonOut = "uptime too low (need >" + String(OTA_MIN_UPTIME_MS / 1000) + "s, have " + String(up / 1000) + "s)";
+    uint32_t need = effectiveOtaMinUptimeMs();
+    if (up < need) {
+        reasonOut = "uptime too low (need >" + String(need / 1000) + "s, have " + String(up / 1000) + "s)";
         return false;
     }
     if (WiFi.status() != WL_CONNECTED) {
@@ -163,6 +195,20 @@ bool canAcceptOta(String& reasonOut) {
         return false;
     }
     return true;
+}
+
+uint32_t otaRetryAfterSeconds() {
+    uint32_t up = millis();
+    uint32_t need = effectiveOtaMinUptimeMs();
+    if (up < need) {
+        // Caller should wait until we cross the threshold, plus a small
+        // cushion so the next admission check definitely passes.
+        uint32_t remainSec = (need - up + 999) / 1000;
+        return remainSec + 2;
+    }
+    // Other rejection reasons (WiFi, healthy gate) are transient and
+    // typically self-heal within a few seconds — short retry is fine.
+    return 5;
 }
 
 }  // namespace wb_health

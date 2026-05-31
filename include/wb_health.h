@@ -58,12 +58,31 @@ void markHealthy();
 // Has the current boot reached a healthy state yet?
 bool isHealthy();
 
-// Minimum uptime (ms) before OTA upload is accepted.
-// Prevents flash storms — gateway has to be settled before reflashing.
-static const uint32_t OTA_MIN_UPTIME_MS = 60000;
+// Minimum uptime (ms) before OTA upload is accepted on a *fresh*
+// device. Once the device has completed at least one OTA + reached
+// healthy state on the new firmware, we drop to OTA_MIN_UPTIME_PROVEN_MS
+// so the next user-driven OTA doesn't wait a full minute.
+static const uint32_t OTA_MIN_UPTIME_MS        = 60000;
+static const uint32_t OTA_MIN_UPTIME_PROVEN_MS = 15000;
+
+// Returns the effective min-uptime threshold for THIS device (fresh or
+// proven). Exposed for /api/health to surface in diagnostics.
+uint32_t effectiveOtaMinUptimeMs();
+
+// Has this device previously completed an OTA and reached healthy state
+// on the new firmware? Persisted in NVS — survives reboots.
+bool otaProven();
+
+// Set by the OTA path just before ESP.restart() on a successful commit.
+// Subsequent canAcceptOta() calls use the relaxed window.
+void markOtaSuccess();
 
 // Returns true if it's safe to start a new OTA upload now.
 // Caller should reply 503 with the reason if false.
 bool canAcceptOta(String& reasonOut);
+
+// If admission failed, how many seconds the caller should wait before
+// retrying. Used to populate the Retry-After header.
+uint32_t otaRetryAfterSeconds();
 
 }  // namespace wb_health
