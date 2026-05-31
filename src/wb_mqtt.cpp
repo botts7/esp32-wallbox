@@ -743,8 +743,45 @@ void WallboxMQTT::sendDiscovery() {
         "mdi:factory", gTopic.c_str(), "{{ value_json.dev_mfg | default('') }}");
     publishDiscoveryEntity(*_client, "sensor", "dev_model", "BLE Radio Model",
         "mdi:chip", gTopic.c_str(), "{{ value_json.dev_model | default('') }}");
-    publishDiscoveryEntity(*_client, "sensor", "dev_fw", "BLE Firmware",
+    // BLE Module FW — the radio chip's firmware (BGX13P on Plus,
+    // NINA-B22 on MAX). Distinct from the charger's application FW
+    // below. Renamed in 2.4.1 from the old "BLE Firmware" label
+    // which was being mistaken for the charger app FW. peter-mcc #4.
+    publishDiscoveryEntity(*_client, "sensor", "dev_fw", "BLE Module FW",
         "mdi:cog", gTopic.c_str(), "{{ value_json.dev_fw | default('') }}");
+    // Charger application firmware — the version Wallbox app shows.
+    // Sourced from fw_v_.s BAPI (per jagheterfredrik/wallbox-ble's
+    // GET_CHARGER_VERSIONS).
+    publishDiscoveryEntity(*_client, "sensor", "chg_app_fw", "Charger Firmware",
+        "mdi:package-variant-closed", gTopic.c_str(),
+        "{{ value_json.chg_app_fw | default('') }}");
+    // Project name from fw_v_.p — canonical model identifier.
+    publishDiscoveryEntity(*_client, "sensor", "chg_project", "Charger Project",
+        "mdi:tag-outline", gTopic.c_str(),
+        "{{ value_json.chg_project | default('') }}");
+    // Lifetime session count from r_ses.size.
+    publishDiscoveryEntity(*_client, "sensor", "chg_sessions", "Total Charging Sessions",
+        "mdi:counter", gTopic.c_str(),
+        "{{ value_json.chg_sessions | default(0) }}", nullptr, nullptr, nullptr, "total_increasing");
+    // Power Boost from r_hsh — household-meter-tied current cap (amps).
+    publishDiscoveryEntity(*_client, "sensor", "chg_power_boost", "Power Boost Limit",
+        "mdi:home-lightning-bolt-outline", gTopic.c_str(),
+        "{{ value_json.chg_power_boost | default(0) }}", "A", "current", nullptr, "measurement");
+    // Dedicated lock-state binary from r_lck — cleaner than parsing
+    // r_sta.lock_status. HA renders as a binary_sensor (door-class
+    // since it's a physical lock state).
+    publishDiscoveryEntity(*_client, "binary_sensor", "chg_lock_state", "Lock State",
+        "mdi:lock", gTopic.c_str(),
+        "{% if value_json.chg_lock_state == 1 %}ON{% else %}OFF{% endif %}", nullptr, "lock");
+    // Charger-side WiFi (gnsta) — the charger has its own WiFi link
+    // for cloud/OCPP/firmware updates, separate from the gateway's link.
+    publishDiscoveryEntity(*_client, "sensor", "chg_net_ssid", "Charger WiFi SSID",
+        "mdi:wifi", gTopic.c_str(), "{{ value_json.chg_net_ssid | default('') }}");
+    publishDiscoveryEntity(*_client, "sensor", "chg_net_ip", "Charger IP",
+        "mdi:ip-network-outline", gTopic.c_str(), "{{ value_json.chg_net_ip | default('') }}");
+    publishDiscoveryEntity(*_client, "sensor", "chg_net_rssi", "Charger WiFi Signal",
+        "mdi:wifi", gTopic.c_str(),
+        "{{ value_json.chg_net_rssi | default(-127) }}", "dBm", "signal_strength", nullptr, "measurement");
 
     // rc22 — diagnostic sensors backed by the rc20/rc21 observability
     // surface (max_reentry, tokens, boot_reason, heap watermark, BLE pause
@@ -760,6 +797,12 @@ void WallboxMQTT::sendDiscovery() {
         "mdi:shield-bug-outline", gTopic.c_str(), "{{ value_json.max_reentry | default(1) }}");
     publishDiscoveryEntity(*_client, "sensor", "tokens", "Rate-Limit Tokens",
         "mdi:gauge", gTopic.c_str(), "{{ value_json.tokens | default(0) }}", nullptr, nullptr, nullptr, "measurement");
+    // loop_max_ms tripwire — surfaces main-task wedges in HA.
+    // alarm if > ~500 ms in steady state; multi-second value =
+    // gateway blocked unbounded somewhere.
+    publishDiscoveryEntity(*_client, "sensor", "loop_max_ms", "Loop Max ms",
+        "mdi:timer-alert-outline", gTopic.c_str(),
+        "{{ value_json.loop_max_ms | default(0) }}", "ms", "duration", nullptr, "measurement");
     publishDiscoveryEntity(*_client, "sensor", "heap_min_ever", "Heap Min Watermark",
         "mdi:memory", gTopic.c_str(), "{{ value_json.heap_min_ever | default(0) }}", "B", nullptr, nullptr, "measurement");
     publishDiscoveryEntity(*_client, "sensor", "heap_free", "Heap Free",

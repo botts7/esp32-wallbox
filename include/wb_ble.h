@@ -106,6 +106,59 @@ public:
     // Empty if not yet polled / not supported on this firmware.
     String chargerGrounding() const { return _chgGrounding; }
 
+    // Charger application firmware (fw_v_.s) — the version Wallbox app
+    // shows the user (e.g. "6.11.16" on MAX, "6.7.38" on Plus). This is
+    // distinct from deviceFirmware() which is the BLE module's firmware.
+    String chargerAppFirmware() const { return _chgAppFw; }
+    // Charger project name (fw_v_.p, e.g. "prj15-pulsar-max"). Source of
+    // truth for charger model — preferred over the user-config dropdown.
+    String chargerProject() const { return _chgProject; }
+    // Total number of charging sessions recorded on the charger (r_ses.size).
+    // Read at BLE init + refreshed on the slow settings-poll cadence.
+    // -1 = not yet read / unsupported.
+    int32_t chargerSessionCount() const { return _chgSessionCount; }
+
+    // Power Boost current limit (r_hsh) — the household-meter-tied
+    // dynamic current cap. Returns the configured value as an integer
+    // (amps on observed chargers). -1 = not yet read / unsupported.
+    int32_t chargerPowerBoost() const { return _chgPowerBoost; }
+
+    // Discrete lock status (r_lck) — 0 = unlocked, 1 = locked, -1 = unread.
+    // Same data as r_sta.lock_status but exposed as a dedicated read
+    // for cleaner HA lock-entity wiring.
+    int32_t chargerLockState() const { return _chgLockState; }
+
+    // Charger-side network status (gnsta) — IP/gateway/DNS/SSID/RSSI
+    // as the charger sees them. Distinct from the gateway's own WiFi
+    // (the ESP32 connects to user's WiFi; the charger connects to its
+    // OWN WiFi for cloud / OCPP / firmware updates). Returns the
+    // first network entry as a stringified summary.
+    String chargerNetworkSsid() const { return _chgNetSsid; }
+    String chargerNetworkIp()   const { return _chgNetIp; }
+    int    chargerNetworkRssi() const { return _chgNetRssi; }
+
+    // Best-effort mapping from fw_v_.p to our internal model key
+    // (max/plus/copper/quasar/quasar2). Empty when fw_v_ hasn't been
+    // read yet or the project string doesn't match a known prefix.
+    // Read-only — does NOT update cfg.chargerModel (a wrong user
+    // config would have prevented BLE from connecting in the first
+    // place, so a mismatch at this point is informational, not load-
+    // bearing). Used by /info to surface "your config vs what the
+    // charger says" for the user to manually reconcile.
+    String inferredModel() const {
+        if (_chgProject.length() == 0) return "";
+        // Lowercase strstr-style match — projects observed so far:
+        //   "prj15-pulsar-max" (MAX, confirmed)
+        //   pulsar-plus / copper / quasar / quasar2 expected to follow
+        //   the same pattern based on jagheterfredrik's project list.
+        if (_chgProject.indexOf("pulsar-max") >= 0) return "max";
+        if (_chgProject.indexOf("pulsar-plus") >= 0) return "plus";
+        if (_chgProject.indexOf("quasar2") >= 0) return "quasar2";
+        if (_chgProject.indexOf("quasar") >= 0) return "quasar";
+        if (_chgProject.indexOf("copper") >= 0) return "copper";
+        return "";
+    }
+
     // Firmware-change tracking — set when the GATT-reported FW differs
     // from the value persisted from the previous boot. Catches Wallbox
     // silent auto-OTAs that change behaviour overnight.
@@ -210,6 +263,14 @@ private:
     int _scanRSSI = -127;
     String _devMfg, _devModel, _devFw, _devName;
     String _chgSerial, _chgMac, _chgGrounding;
+    String _chgAppFw;     // fw_v_.s — charger application FW (e.g. "6.11.16")
+    String _chgProject;   // fw_v_.p — project name (e.g. "prj15-pulsar-max")
+    int32_t _chgSessionCount = -1;  // r_ses.size — lifetime session counter
+    int32_t _chgPowerBoost   = -1;  // r_hsh — household-meter current cap
+    int32_t _chgLockState    = -1;  // r_lck — 0=unlocked, 1=locked
+    String  _chgNetSsid;
+    String  _chgNetIp;
+    int     _chgNetRssi = -127;
     String _chargerModel = "max";
     String _prevFw;
     bool _fwChanged = false;

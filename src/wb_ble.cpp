@@ -529,6 +529,94 @@ void WallboxBLE::_connect() {
             }
         }
 
+        // Charger application firmware + project (fw_v_) — the version
+        // Wallbox app shows the user, plus the project name we use as
+        // canonical model identification. Both are stable across the
+        // session — read once at init. Method name documented by
+        // jagheterfredrik/wallbox-ble (GET_CHARGER_VERSIONS = "fw_v_").
+        // Response shape (confirmed on MAX, expected to match on Plus):
+        //   { id, c, db, fw, p, r, s }
+        // where s = human-readable version, p = project ("prj15-pulsar-max").
+        String fwvResp = sendCommand(bapi::MET_GET_CHARGER_VER, "null", 2000);
+        if (!fwvResp.isEmpty()) {
+            JsonDocument d;
+            if (deserializeJson(d, fwvResp) == DeserializationError::Ok) {
+                if (d["s"].is<const char*>()) _chgAppFw = d["s"].as<const char*>();
+                if (d["p"].is<const char*>()) _chgProject = d["p"].as<const char*>();
+            }
+            if (_chgAppFw.length() || _chgProject.length()) {
+                Log.printf("[BLE] Charger FW: %s  project: %s\n",
+                    _chgAppFw.length() ? _chgAppFw.c_str() : "(none)",
+                    _chgProject.length() ? _chgProject.c_str() : "(none)");
+            }
+        }
+
+        // Total session count (r_ses.size). Stable across boot —
+        // increments only on session completion. Read once at init;
+        // a periodic refresh elsewhere keeps it up to date if the
+        // user is watching during a session end.
+        String sesResp = sendCommand(bapi::MET_GET_SESSIONS, "null", 2000);
+        if (!sesResp.isEmpty()) {
+            JsonDocument d;
+            if (deserializeJson(d, sesResp) == DeserializationError::Ok) {
+                if (d["r"]["size"].is<int>()) {
+                    _chgSessionCount = d["r"]["size"].as<int32_t>();
+                    Log.printf("[BLE] Total sessions: %d\n", (int)_chgSessionCount);
+                }
+            }
+        }
+
+        // Power Boost limit (r_hsh) — household-meter-tied current cap.
+        // Per jagheterfredrik/wallbox-ble: GET_POWER_BOOST = "r_hsh".
+        // Observed return on MAX: plain integer (e.g. 63). Refreshed
+        // each (re)connect — config changes are rare.
+        String hshResp = sendCommand(bapi::MET_GET_POWER_BOOST, "null", 2000);
+        if (!hshResp.isEmpty()) {
+            JsonDocument d;
+            if (deserializeJson(d, hshResp) == DeserializationError::Ok && d["r"].is<int>()) {
+                _chgPowerBoost = d["r"].as<int32_t>();
+                Log.printf("[BLE] Power Boost: %d\n", (int)_chgPowerBoost);
+            }
+        }
+
+        // Discrete lock state (r_lck). Same fact as r_sta.lock_status
+        // but as its own field, which lets HA wire a dedicated lock
+        // entity rather than parsing the realtime blob.
+        String lckResp = sendCommand(bapi::MET_GET_LOCK_STATE, "null", 2000);
+        if (!lckResp.isEmpty()) {
+            JsonDocument d;
+            if (deserializeJson(d, lckResp) == DeserializationError::Ok && d["r"].is<int>()) {
+                _chgLockState = d["r"].as<int32_t>();
+                Log.printf("[BLE] Lock state: %d\n", (int)_chgLockState);
+            }
+        }
+
+        // Charger-side network status (gnsta). Returns an array of
+        // active network configurations — we pull the first one for
+        // SSID/IP/RSSI. The charger has its OWN WiFi link (separate
+        // from our gateway's link to the user's WiFi), so this is
+        // distinct diagnostic information.
+        String nstaResp = sendCommand(bapi::MET_GET_NETWORKS, "null", 2000);
+        if (!nstaResp.isEmpty()) {
+            JsonDocument d;
+            if (deserializeJson(d, nstaResp) == DeserializationError::Ok) {
+                JsonVariant first;
+                if (d["r"].is<JsonArray>() && d["r"].size() > 0) first = d["r"][0];
+                else if (d["r"].is<JsonObject>()) first = d["r"];
+                if (!first.isNull()) {
+                    if (first["ssid"].is<const char*>())   _chgNetSsid = first["ssid"].as<const char*>();
+                    if (first["ip"].is<const char*>())     _chgNetIp   = first["ip"].as<const char*>();
+                    if (first["rssi"].is<int>())           _chgNetRssi = first["rssi"].as<int>();
+                    if (first["signal"].is<int>() && _chgNetRssi == -127) _chgNetRssi = first["signal"].as<int>();
+                }
+            }
+            if (_chgNetIp.length()) {
+                Log.printf("[BLE] Charger network: ssid=%s ip=%s rssi=%d\n",
+                    _chgNetSsid.length() ? _chgNetSsid.c_str() : "(none)",
+                    _chgNetIp.c_str(), _chgNetRssi);
+            }
+        }
+
         Log.println("[BLE] Ready");
     }
 }

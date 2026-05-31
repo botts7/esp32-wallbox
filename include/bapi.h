@@ -47,7 +47,8 @@ constexpr const char* MET_GET_SESSIONS   = "r_ses";   // session info
 constexpr const char* MET_GET_SESSION    = "r_log";   // session log
 constexpr const char* MET_GET_SCHEDULE   = "r_sch";   // schedule
 constexpr const char* MET_GET_SCHEDULES  = "r_schs";  // all schedules
-constexpr const char* MET_GET_LOCK       = "gulck";   // socket locking
+constexpr const char* MET_GET_LOCK       = "gulck";   // socket locking (legacy / per-config)
+constexpr const char* MET_GET_LOCK_STATE = "r_lck";   // discrete lock status — 0=unlocked, 1=locked (confirmed on MAX, per jagheterfredrik/wallbox-ble)
 constexpr const char* MET_GET_WIFI       = "gwsta";   // wifi status
 constexpr const char* MET_GET_WIFI_NETS  = "gwnet";   // wifi networks
 constexpr const char* MET_GET_TIMEZONE   = "g_tzn";   // timezone
