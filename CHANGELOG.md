@@ -4,6 +4,81 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.4.1] - 2026-05-31
+
+### Added
+
+- **Charger firmware + project identity.** New `fw_v_` BAPI read at BLE init
+  pulls the charger's app firmware and project string (e.g. `prj15-pulsar-max`).
+  Surfaced on `/info` (new "Firmware" section under Charger Details) and as a
+  separate **Charger Firmware** entity in Home Assistant — previously only the
+  BLE module's firmware was visible, which routinely got mistaken for the
+  charger's app version.
+- **Model auto-detection.** `inferredModel()` maps the charger's project
+  string to a friendly name (Pulsar MAX / Plus / Copper SB / Quasar / Quasar 2).
+- **Total charging sessions counter.** Reads `r_ses` once per BLE connection,
+  exposes as `chg_sessions` on `/api/status`, ships a `total_increasing`
+  sensor to HA, and renders as a badge next to the Charging Sessions page
+  header.
+- **Power Boost (ICP) limit.** `r_hsh` BAPI read; surfaced as `chg_power_boost`
+  and an HA sensor with `A` unit.
+- **Discrete lock state.** `r_lck` returns 0=unlocked / 1=locked; published as
+  a `binary_sensor` with `device_class: lock`.
+- **Charger-side network detail.** `gnsta` BAPI read; the charger's own
+  WiFi SSID / IP / RSSI are now exposed alongside the gateway's network
+  in a "Charger Network" section on `/info`.
+- **Gateway WiFi panel.** `/info` Charger Details card now also shows the
+  ESP32's own SSID / IP / RSSI in a "Gateway WiFi" section.
+- **Loop-wedge tripwire (`loop_max_ms`).** Tracks the longest gap between
+  consecutive main `loop()` iterations since boot. Healthy values are under
+  ~200 ms in steady state; multi-second values indicate a wedge of the kind
+  observed during long HTTP responses in earlier RCs. Surfaced on
+  `/api/health`, MQTT, and the new "Runtime Health" card in `/info`'s
+  Diagnostics view.
+
+### Changed — OTA hardening
+
+- **503 + Retry-After on admission rejection.** The OTA upload path no
+  longer responds with a generic 500 when admission denies an upload — it
+  emits a proper `503` with `Retry-After` indicating when to retry (the
+  exact uptime crossover, plus a small cushion).
+- **Browser auto-retry on 503.** `/ota` page's upload script parses
+  `Retry-After`, runs a live countdown, and automatically re-fires the
+  upload once. Eliminates the manual re-click that previously followed
+  every just-after-reboot OTA attempt.
+- **Relaxed admission window after first successful OTA.** A device that
+  has completed one OTA + reached healthy state on the new firmware
+  flips a NVS-backed `ota_proven` flag. Subsequent admission checks drop
+  the minimum uptime threshold from 60 s to 15 s.
+- **RAII watchdog scope (`wb_watchdog` module).** Backport of the
+  ESPHome PR #16138 pattern. `wb_wdt::extendTo(60)` / `wb_wdt::restore()`
+  guarantee the Task WDT is restored to its default 5 s timeout even
+  when the OTA path early-returns on error — previously a failed OTA
+  could leave the WDT permanently relaxed.
+- **Optional MD5 verification.** When clients (curl, HA OTA scripts) send
+  an `X-Firmware-MD5` header, the Update library streams the hash
+  alongside the partition writes and refuses to commit on mismatch.
+  Browser uploads continue to skip this to avoid the multi-second
+  hash step on 1.5 MB files.
+- **`ota_proven` and `ota_min_uptime` exposed on `/api/health`** so
+  testers can confirm the relaxed admission window engaged without
+  scraping logs.
+
+### Documentation
+
+- **`RELEASING.md`** documents the four pre-release gates introduced
+  after the rc23/24/25 cycle: fresh-install smoke, browser OTA, stress +
+  tripwires, and read-only BAPI probe. A tagged non-RC release must pass
+  all four.
+
+### Background / Why
+
+A run of release candidates (rc23 → rc25) shipped fixes that passed the
+maintainer's curl-based tests but failed when @peter-mcc actually exercised
+them in a browser. 2.4.1 closes the surface gap: every new diagnostic,
+every OTA path, and every charger-side exposure was validated end-to-end on
+a live Pulsar MAX before tagging.
+
 ## [2.3.0] - 2026-05-22
 
 ### 🙏 Community contributions
