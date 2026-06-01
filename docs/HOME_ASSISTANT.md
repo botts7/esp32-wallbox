@@ -39,7 +39,7 @@ and reduce responsiveness.
 - `switch.wallbox_power_sharing` — dynamic power sharing
 - `switch.wallbox_phase_switch`
 - `number.wallbox_max_charging_current` — 6-32A slider
-- `number.wallbox_autolock_timeout` — 10-600s
+- `number.wallbox_autolock_timeout` — 1-60 min
 - `number.wallbox_eco_smart_solar_percent` — 0-100%
 - `select.wallbox_eco_smart_mode` — Off / Solar + Grid / Full Green
 - `select.wallbox_halo_led` — Off / Low / Medium / High

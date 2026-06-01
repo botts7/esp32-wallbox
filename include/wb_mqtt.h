@@ -24,9 +24,9 @@ public:
     // Send HA MQTT auto-discovery configs
     void sendDiscovery();
 
-    // Last auto-lock timeout (seconds) seen from polling. Used so toggling
+    // Last auto-lock timeout (minutes) seen from polling. Used so toggling
     // the Auto Lock switch ON restores the real timeout instead of a default.
-    int lastAutolockTime = 60;
+    int lastAutolockMin = 1;
 
 private:
     void _connect();

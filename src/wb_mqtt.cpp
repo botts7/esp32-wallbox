@@ -346,20 +346,22 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
 
     // ---- Native HA entity handlers (Batch 1) ----
     } else if (sub == "autolock_enable") {
-        // s_alo takes a bare scalar: 0 = off, N = on and lock after N seconds.
+        // s_alo takes seconds: 0 = off, N = on and lock after N seconds.
         // Toggling ON restores the last-known timeout instead of resetting it.
         String s = payload; s.toLowerCase();
         bool on = (s == "1" || s == "on" || s == "true");
-        int secs = on ? (lastAutolockTime >= 10 ? lastAutolockTime : 60) : 0;
+        int mins = lastAutolockMin >= 1 ? lastAutolockMin : 1;
+        int secs = on ? mins * 60 : 0;
         wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, String(secs).c_str());
 
     } else if (sub == "autolock_time") {
-        // Setting a timeout implies enabling auto-lock (scalar: N = on after Ns).
-        int secs = atoi(payload);
-        if (secs < 10) secs = 60;
-        if (secs > 600) secs = 600;
-        lastAutolockTime = secs;
-        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, String(secs).c_str());
+        // HA sends minutes (matching the Wallbox app); the charger wants
+        // seconds. Setting a timeout implies enabling auto-lock.
+        int mins = atoi(payload);
+        if (mins < 1) mins = 1;
+        if (mins > 60) mins = 60;
+        lastAutolockMin = mins;
+        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, String(mins * 60).c_str());
 
     } else if (sub == "eco_mode") {
         // HA sends: "Off", "Full Green (Solar Only)", "Solar + Grid"
@@ -611,7 +613,7 @@ void WallboxMQTT::sendDiscovery() {
     // Auto Lock timeout (number)
     publishDiscoveryNumber(*_client, "autolock_time", "Auto Lock Timeout",
         "mdi:timer-lock", cmdAutolockTime.c_str(), sTopic_,
-        "{{ value_json.autolock_time | default(60) }}", 10, 600, 10, "s", "box");
+        "{{ value_json.autolock_time | default(1) }}", 1, 60, 1, "min", "box");
 
     // Eco Smart Mode (select). BAPI esm: 0=Off, 1=Full Green, 2=Solar+Grid
     static const char* ecoOptions[] = {"Off", "Full Green (Solar Only)", "Solar + Grid"};

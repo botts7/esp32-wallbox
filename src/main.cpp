@@ -86,9 +86,14 @@ static void pollSettings() {
                 t = d["r"].as<int>();
                 merged["autolock"] = t > 0 ? 1 : 0;
             }
-            merged["autolock_time"] = (t >= 10) ? t : 60;
-            // Remember a real timeout so an HA switch-ON can restore it.
-            if (t >= 10) wallboxMQTT.lastAutolockTime = t;
+            // The charger stores seconds (multiples of 60); HA shows minutes
+            // to match the Wallbox app. Keep the last value while it's off.
+            if (t > 0) {
+                int mins = (t + 30) / 60;
+                if (mins < 1) mins = 1;
+                wallboxMQTT.lastAutolockMin = mins;
+            }
+            merged["autolock_time"] = wallboxMQTT.lastAutolockMin;
         }
     }
 
