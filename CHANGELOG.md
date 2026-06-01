@@ -4,6 +4,57 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.4.2] - 2026-06-01
+
+Follow-up release driven by @peter-mcc's testing of 2.4.1 on his
+Pulsar Plus. Two real bugs and a quiet drift between the discovery
+helpers — all fixed live on the maintainer's MAX before tagging.
+
+### Fixed
+
+- **Total Charging Sessions sensor was reading the wrong field.** 2.4.1
+  surfaced `r_ses.size` which is actually the log-buffer capacity
+  sentinel (99 999 on MAX, missing on Plus) — not a lifetime count.
+  Switched to `r_ses.last` (verified 233 on the maintainer's MAX);
+  kept `size` as a fallback but only when in a plausible range so the
+  sentinel can't sneak in. When neither field yields a real value
+  (some Plus firmwares), `chg_sessions` publishes JSON `null` so the
+  HA sensor goes unavailable instead of sticking at 0 or -1 forever.
+- **HA Device-page firmware label was hardcoded.** 2.4.1 wrote
+  `dev["sw_version"] = "6.11.16"` in the discovery device block, so
+  every Pulsar — Plus, Quasar, Copper, anything that isn't a MAX —
+  showed `6.11.16` in HA even though the per-entity Charger Firmware
+  sensor was correct. Now driven by `wallboxBLE.chargerAppFirmware()`
+  with a `WB_VERSION` fallback until `fw_v_` has been read. BLE init
+  raises a one-shot `_discoveryStale` flag the first time the value
+  populates, and the main loop triggers `wallboxMQTT.sendDiscovery()`
+  once to update HA in place.
+
+### Changed
+
+- **Single source of truth for the HA discovery device block.** Six
+  discovery helpers (entity / switch / number / button / select / the
+  inline car-connected binary_sensor) each built the device block
+  inline and had drifted — only the entity helper carried `sw_version`,
+  the others didn't. Consolidated into `populateDeviceBlock()`. Every
+  payload now carries the same complete block:
+    - `identifiers`, `name`, `manufacturer`, `model`, `sw_version`
+    - `connections: [["mac", <wifimac>]]` so the HA Device page header
+      shows the gateway's MAC alongside the firmware label
+    - `configuration_url: http://<gw-ip>/` so the HA Device page header
+      gets a "Visit" button deep-linking to the gateway dashboard
+
+### Migration notes
+
+If you're upgrading from 2.4.1 and your HA Device page still says
+"Connected via Unnamed device" or shows stale entities (the
+`chg_net_rssi` sensor from the dev build), the cleanest reset is to
+delete the Wallbox device in HA (Settings → Devices → device → Delete)
+and reboot the gateway via `/info` → Reboot Gateway. The fresh
+discovery payloads will rebuild the device with everything correct;
+HA stops linking it under the MQTT broker hub once the device block
+carries a full `connections` array.
+
 ## [2.4.1] - 2026-05-31
 
 ### Added
