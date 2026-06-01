@@ -16,6 +16,12 @@ static uint32_t _mqttLongest = 0;
 static uint32_t _bleLastReconnect = 0;
 static uint32_t _mqttLastReconnect = 0;
 
+// loop_max_ms tripwire grace deadline (absolute millis()). 0 = no
+// gate active. extendLoopMaxGate() pushes this forward; the main
+// loop's gap tracker calls loopMaxGateActive() to decide whether to
+// record the gap.
+static uint32_t _loopMaxGateUntilMs = 0;
+
 // Pending disconnect start times (one outstanding per kind)
 static uint32_t _bleDownStart = 0;   // 0 means no outstanding BLE disconnect
 static uint32_t _mqttDownStart = 0;  // 0 means no outstanding MQTT disconnect
@@ -93,6 +99,30 @@ void reportReconnect(Kind kind) {
         Log.printf("[Diag] MQTT reconnected after %us (total %u this boot)\n", dur, (unsigned)_mqttReconnects);
         _mqttDownStart = 0;
     }
+    // Whichever side reconnected, give the loop_max_ms tripwire a
+    // grace window — sync PubSubClient::connect() and the BLE
+    // post-reconnect init burst (5 BAPI reads) are legitimate
+    // blocking events the tripwire was never meant to flag.
+    extendLoopMaxGate();
+}
+
+void extendLoopMaxGate(uint32_t graceMs) {
+    uint32_t deadline = millis() + graceMs;
+    // Only push the deadline forward, never backwards — overlapping
+    // reconnects shouldn't shorten an existing window.
+    if (deadline > _loopMaxGateUntilMs) _loopMaxGateUntilMs = deadline;
+}
+
+bool loopMaxGateActive(uint32_t nowMs) {
+    if (_loopMaxGateUntilMs == 0) return false;
+    if (nowMs >= _loopMaxGateUntilMs) {
+        // Gate has expired — clear it so the next reconnect is free
+        // to set a fresh deadline and we don't carry a stale value
+        // forever.
+        _loopMaxGateUntilMs = 0;
+        return false;
+    }
+    return true;
 }
 
 uint32_t bleReconnects()             { return _bleReconnects; }

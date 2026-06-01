@@ -48,4 +48,24 @@ String toJson();
 // Wipe all stored events (called from a manual "Reset diag" button).
 void clear();
 
+// "Loop-max gate" — peter-mcc 2.4.2 follow-up: the loop_max_ms
+// tripwire was meant to catch unprovoked runtime wedges (the
+// peter-mcc #4 hours-of-uptime freeze class), but it was also
+// triggering on legitimate MQTT/BLE reconnect blocking. Sync
+// PubSubClient::connect() can block the main task for ~15 s per
+// attempt — a transient broker hiccup easily produces a 30-40 s
+// gap that saturates the metric. After every reportReconnect()
+// call we now extend a grace window forward by `graceMs` ms; the
+// main loop's tripwire checks loopMaxGateActive(now) and skips
+// recording gaps that fall inside it. The metric then surfaces
+// only *unprovoked* wedges.
+//
+// Default grace window is 30 s, which generously covers the worst-
+// case sync-connect timeout plus any post-connect work (discovery
+// republish, BLE keepalive catch-up).
+static const uint32_t LOOP_MAX_GATE_DEFAULT_MS = 30000;
+
+void extendLoopMaxGate(uint32_t graceMs = LOOP_MAX_GATE_DEFAULT_MS);
+bool loopMaxGateActive(uint32_t nowMs);
+
 }  // namespace wb_diag

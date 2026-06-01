@@ -386,18 +386,26 @@ void loop() {
     // skip it via the !=0 check. Unsigned arithmetic handles millis()
     // wraparound at ~49 d correctly.
     //
-    // Skip the first 60s of uptime. Boot-phase MQTT discovery floods
-    // out ~30 sync publishes back-to-back, blocking the main task for
-    // 3-5 s at a stretch. That gap is real but it's not the kind of
-    // wedge this tripwire was built to detect (peter-mcc #4 was a
-    // *runtime* freeze after hours of uptime). Without this cutoff,
-    // every boot saturates the metric and steady-state regressions
-    // can't be seen because they're permanently smaller than the
-    // boot spike. After 60 s the gateway is settled and any new
-    // spike is meaningful.
+    // Three things are excluded from the metric, in order:
+    //
+    // 1. The first 60 s of uptime — boot-phase MQTT discovery floods
+    //    out ~30 sync publishes that block the main task for 3-5 s,
+    //    which isn't the kind of *runtime* wedge this tripwire was
+    //    built to detect (peter-mcc #4).
+    // 2. A 30 s grace window after any tracked BLE or MQTT reconnect
+    //    (wb_diag::loopMaxGateActive). Sync PubSubClient::connect()
+    //    can block for ~15 s per attempt; a transient broker hiccup
+    //    easily produces a 30-40 s gap that would otherwise saturate
+    //    the metric. Surfaced by peter-mcc in 2.4.2 follow-up — his
+    //    gateway showed 40 082 ms while two MQTT disconnects sat
+    //    quietly in the reconnect counters.
+    // 3. (Implicit) the first iteration with no prior timestamp.
+    //
+    // After all three filters, any gap that lands in the metric is a
+    // genuine unprovoked wedge worth investigating.
     {
         uint32_t now = millis();
-        if (g_loopLastMs != 0 && now > 60000) {
+        if (g_loopLastMs != 0 && now > 60000 && !wb_diag::loopMaxGateActive(now)) {
             uint32_t gap = now - g_loopLastMs;
             if (gap > g_loopMaxMs) g_loopMaxMs = gap;
         }
