@@ -92,7 +92,8 @@ static void publishDiscoverySwitch(PubSubClient& mqtt, const char* objectId,
 static void publishDiscoveryNumber(PubSubClient& mqtt, const char* objectId,
     const char* name, const char* icon, const char* cmdTopic,
     const char* stateTopic, const char* valTemplate,
-    float minVal, float maxVal, float step, const char* unit = nullptr) {
+    float minVal, float maxVal, float step, const char* unit = nullptr,
+    const char* mode = nullptr) {
 
     const WBConfig& cfg = configMgr.get();
     String topic = cfg.haDiscoveryPrefix + "/number/" + cfg.haDeviceId + "/" + objectId + "/config";
@@ -110,6 +111,8 @@ static void publishDiscoveryNumber(PubSubClient& mqtt, const char* objectId,
     doc["availability_topic"] = availTopic();
     if (icon) doc["icon"] = icon;
     if (unit) doc["unit_of_measurement"] = unit;
+    // "box" renders an exact-value input field instead of HA's default slider.
+    if (mode) doc["mode"] = mode;
 
     JsonObject dev = doc["device"].to<JsonObject>();
     dev["identifiers"][0] = configMgr.get().haDeviceId;
@@ -605,7 +608,7 @@ void WallboxMQTT::sendDiscovery() {
     // Auto Lock timeout (number)
     publishDiscoveryNumber(*_client, "autolock_time", "Auto Lock Timeout",
         "mdi:timer-lock", cmdAutolockTime.c_str(), sTopic_,
-        "{{ value_json.autolock_time | default(60) }}", 10, 600, 10, "s");
+        "{{ value_json.autolock_time | default(60) }}", 10, 600, 10, "s", "box");
 
     // Eco Smart Mode (select). BAPI esm: 0=Off, 1=Full Green, 2=Solar+Grid
     static const char* ecoOptions[] = {"Off", "Full Green (Solar Only)", "Solar + Grid"};
