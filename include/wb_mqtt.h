@@ -15,6 +15,9 @@ public:
     // Publish charger state (call after each BLE poll)
     void publishStatus(const String& json);
     void publishRealtime(const String& json);
+    // Derived "car connected" state — needs both r_dat (st) and r_sta
+    // (charger_status), which live on separate topics, so it's computed here.
+    void publishCarConnected(const String& statusJson, const String& realtimeJson);
     void publishSettings(const String& json);
     void publishAvailability(bool online);
 

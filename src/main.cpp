@@ -129,6 +129,7 @@ static void pollStatus() {
     if (!resp.isEmpty()) {
         lastStatus = resp;
         wallboxMQTT.publishStatus(resp);
+        wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
         webServer.updateCache(lastStatus, lastRealtime);
         wbws::broadcast("status", resp);
     }
@@ -142,6 +143,7 @@ static void pollRealtime() {
     if (!resp.isEmpty()) {
         lastRealtime = resp;
         wallboxMQTT.publishRealtime(resp);
+        wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
         webServer.updateCache(lastStatus, lastRealtime);
     }
 }
