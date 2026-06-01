@@ -346,17 +346,20 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
 
     // ---- Native HA entity handlers (Batch 1) ----
     } else if (sub == "autolock_enable") {
-        // switch: "1"/"ON" = enable, else disable. Reuses existing time value.
+        // s_alo takes a bare scalar: 0 = off, N = on and lock after N seconds.
+        // Toggling ON restores the last-known timeout instead of resetting it.
         String s = payload; s.toLowerCase();
-        int en = (s == "1" || s == "on" || s == "true") ? 1 : 0;
-        String p = "{\"enabled\":" + String(en) + ",\"time\":60}";
-        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, p.c_str());
+        bool on = (s == "1" || s == "on" || s == "true");
+        int secs = on ? (lastAutolockTime >= 10 ? lastAutolockTime : 60) : 0;
+        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, String(secs).c_str());
 
     } else if (sub == "autolock_time") {
+        // Setting a timeout implies enabling auto-lock (scalar: N = on after Ns).
         int secs = atoi(payload);
         if (secs < 10) secs = 60;
-        String p = "{\"enabled\":1,\"time\":" + String(secs) + "}";
-        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, p.c_str());
+        if (secs > 600) secs = 600;
+        lastAutolockTime = secs;
+        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, String(secs).c_str());
 
     } else if (sub == "eco_mode") {
         // HA sends: "Off", "Full Green (Solar Only)", "Solar + Grid"

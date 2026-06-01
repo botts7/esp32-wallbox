@@ -77,16 +77,18 @@ static void pollSettings() {
             // g_alo returns the lock timeout in seconds as a bare scalar:
             // 0 = auto-lock off, >0 = on and locks after that many seconds.
             // (Object shape kept as a defensive fallback.)
+            int t;
             if (d["r"].is<JsonObject>()) {
-                int t = d["r"]["time"] | 0;
+                t = d["r"]["time"] | 0;
                 bool en = d["r"]["enabled"].as<bool>() || t > 0;
                 merged["autolock"] = en ? 1 : 0;
-                merged["autolock_time"] = (t >= 10) ? t : 60;
             } else {
-                int t = d["r"].as<int>();
+                t = d["r"].as<int>();
                 merged["autolock"] = t > 0 ? 1 : 0;
-                merged["autolock_time"] = (t >= 10) ? t : 60;
             }
+            merged["autolock_time"] = (t >= 10) ? t : 60;
+            // Remember a real timeout so an HA switch-ON can restore it.
+            if (t >= 10) wallboxMQTT.lastAutolockTime = t;
         }
     }
 
