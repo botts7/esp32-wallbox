@@ -59,7 +59,8 @@ static void publishDiscoveryEntity(PubSubClient& mqtt, const char* component,
 static void publishDiscoverySwitch(PubSubClient& mqtt, const char* objectId,
     const char* name, const char* icon, const char* cmdTopic,
     const char* stateTopic, const char* valTemplate,
-    const char* payloadOn = "1", const char* payloadOff = "0") {
+    const char* payloadOn = "1", const char* payloadOff = "0",
+    const char* stateOn = "1", const char* stateOff = "0") {
 
     const WBConfig& cfg = configMgr.get();
     String topic = cfg.haDiscoveryPrefix + "/switch/" + cfg.haDeviceId + "/" + objectId + "/config";
@@ -73,6 +74,8 @@ static void publishDiscoverySwitch(PubSubClient& mqtt, const char* objectId,
     doc["value_template"] = valTemplate;
     doc["payload_on"] = payloadOn;
     doc["payload_off"] = payloadOff;
+    doc["state_on"] = stateOn;
+    doc["state_off"] = stateOff;
     doc["availability_topic"] = availTopic();
     if (icon) doc["icon"] = icon;
 
