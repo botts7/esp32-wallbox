@@ -74,12 +74,18 @@ static void pollSettings() {
     String r1 = wallboxBLE.sendCommand(bapi::MET_GET_AUTOLOCK);
     if (!r1.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r1) == DeserializationError::Ok) {
+            // g_alo returns the lock timeout in seconds as a bare scalar:
+            // 0 = auto-lock off, >0 = on and locks after that many seconds.
+            // (Object shape kept as a defensive fallback.)
             if (d["r"].is<JsonObject>()) {
-                merged["autolock"] = d["r"]["enabled"] | 0;
-                merged["autolock_time"] = d["r"]["time"] | 60;
+                int t = d["r"]["time"] | 0;
+                bool en = d["r"]["enabled"].as<bool>() || t > 0;
+                merged["autolock"] = en ? 1 : 0;
+                merged["autolock_time"] = (t >= 10) ? t : 60;
             } else {
-                merged["autolock"] = d["r"] | 0;
-                merged["autolock_time"] = 60;
+                int t = d["r"].as<int>();
+                merged["autolock"] = t > 0 ? 1 : 0;
+                merged["autolock_time"] = (t >= 10) ? t : 60;
             }
         }
     }
@@ -95,14 +101,14 @@ static void pollSettings() {
     String r3 = wallboxBLE.sendCommand("g_psh", "null");
     if (!r3.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r3) == DeserializationError::Ok) {
-            merged["power_sharing"] = d["r"]["dyps"] | 0;
+            merged["power_sharing"] = d["r"]["dyps"].as<bool>() ? 1 : 0;
         }
     }
 
     String r4 = wallboxBLE.sendCommand("g_phsw", "null");
     if (!r4.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r4) == DeserializationError::Ok) {
-            merged["phase_switch"] = d["r"]["enabled"] | 0;
+            merged["phase_switch"] = d["r"]["enabled"].as<bool>() ? 1 : 0;
         }
     }
 
