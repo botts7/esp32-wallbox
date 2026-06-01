@@ -19,6 +19,58 @@ static PubSubClient mqttClient(wifiClient);
 
 // ---- HA Discovery helpers ----
 
+// Single source of truth for the `device` block embedded in every HA
+// discovery payload. Previously each helper (entity/switch/number/
+// button/select/binary_sensor) built this inline and they drifted —
+// only the entity helper carried sw_version, so HA's "merge by
+// identifiers" semantics flickered between payloads depending on
+// arrival order. peter-mcc 2.4.1 follow-up.
+//
+// Includes:
+//   - identifiers:    the haDeviceId, stable across reboots
+//   - name/mfg/model: product info from configMgr
+//   - sw_version:     live charger app FW once BLE has read fw_v_;
+//                     falls back to the gateway version pre-read so
+//                     HA always shows *something* during boot
+//   - connections:    [["mac", <wifimac>]] so HA can identify the
+//                     device by its WiFi MAC even if the friendly
+//                     name changes (helps the device-merge logic
+//                     when a user renames in HA UI)
+//   - configuration_url: deep link to the gateway dashboard from
+//                       the HA Device page header
+static void populateDeviceBlock(JsonObject dev) {
+    const WBConfig& cfg = configMgr.get();
+    dev["identifiers"][0] = cfg.haDeviceId;
+    const char* _fullName = nullptr; const char* _shortName = nullptr;
+    configMgr.productName(_fullName, _shortName);
+    dev["name"]         = _fullName;
+    dev["manufacturer"] = "Wallbox";
+    dev["model"]        = _shortName;
+    // Live charger FW once BLE init has read fw_v_ — otherwise fall
+    // back to the gateway version so HA never renders an empty string.
+    {
+        String fw = wallboxBLE.chargerAppFirmware();
+        dev["sw_version"] = fw.length() ? fw : String(WB_VERSION);
+    }
+    // MAC connection — uses the gateway's WiFi MAC. Helps HA's device
+    // registry merge entities that arrive via different code paths.
+    {
+        String mac = WiFi.macAddress();  // upper-case colon-separated
+        mac.toLowerCase();
+        JsonArray conns = dev["connections"].to<JsonArray>();
+        JsonArray pair  = conns.add<JsonArray>();
+        pair.add("mac");
+        pair.add(mac);
+    }
+    // Direct link to the gateway dashboard from the HA Device page
+    // header. STA mode -> use the WiFi IP; AP fallback skipped (HA
+    // can't reach a captive-portal address anyway).
+    if (WiFi.status() == WL_CONNECTED) {
+        String url = "http://" + WiFi.localIP().toString() + "/";
+        dev["configuration_url"] = url;
+    }
+}
+
 static void publishDiscoveryEntity(PubSubClient& mqtt, const char* component,
     const char* objectId, const char* name, const char* icon,
     const char* stateTopic, const char* valTemplate,
@@ -41,30 +93,10 @@ static void publishDiscoveryEntity(PubSubClient& mqtt, const char* component,
     if (stateClass) doc["state_class"] = stateClass;
     if (cmdTopic) doc["command_topic"] = cmdTopic;
 
-    // Device block
-    JsonObject dev = doc["device"].to<JsonObject>();
-    dev["identifiers"][0] = configMgr.get().haDeviceId;
-    {
-        const char* _fullName = nullptr; const char* _shortName = nullptr;
-        configMgr.productName(_fullName, _shortName);
-        dev["name"] = _fullName;
-        dev["manufacturer"] = "Wallbox";
-        dev["model"] = _shortName;
-    }
-    // Charger application firmware drives the HA Device page's
-    // top-left "Firmware" label. Use the live value once BLE has read
-    // fw_v_; fall back to the gateway version while we wait for that
-    // read so HA always shows *something* during boot.
-    // peter-mcc 2.4.1 follow-up: previously hardcoded to "6.11.16",
-    // which made Plus devices misleadingly show the maintainer's MAX
-    // version on the HA Device screen. Discovery is re-published when
-    // BLE init completes so HA gets the correct value as soon as the
-    // charger reports it (see wb_ble.cpp markDiscoveryStale()).
-    {
-        String fw = wallboxBLE.chargerAppFirmware();
-        dev["sw_version"] = fw.length() ? fw : String(WB_VERSION);
-    }
-    // No via_device — the ESP32 gateway IS the device
+    // Device block — populated by the shared helper so every helper
+    // emits the same fields. See populateDeviceBlock() comment for
+    // what's in there. No via_device — the ESP32 gateway IS the device.
+    populateDeviceBlock(doc["device"].to<JsonObject>());
 
     String payload;
     serializeJson(doc, payload);
@@ -93,15 +125,7 @@ static void publishDiscoverySwitch(PubSubClient& mqtt, const char* objectId,
     doc["availability_topic"] = availTopic();
     if (icon) doc["icon"] = icon;
 
-    JsonObject dev = doc["device"].to<JsonObject>();
-    dev["identifiers"][0] = configMgr.get().haDeviceId;
-    {
-        const char* _fullName = nullptr; const char* _shortName = nullptr;
-        configMgr.productName(_fullName, _shortName);
-        dev["name"] = _fullName;
-        dev["manufacturer"] = "Wallbox";
-        dev["model"] = _shortName;
-    }
+    populateDeviceBlock(doc["device"].to<JsonObject>());
 
     String payload;
     serializeJson(doc, payload);
@@ -132,15 +156,7 @@ static void publishDiscoveryNumber(PubSubClient& mqtt, const char* objectId,
     if (icon) doc["icon"] = icon;
     if (unit) doc["unit_of_measurement"] = unit;
 
-    JsonObject dev = doc["device"].to<JsonObject>();
-    dev["identifiers"][0] = configMgr.get().haDeviceId;
-    {
-        const char* _fullName = nullptr; const char* _shortName = nullptr;
-        configMgr.productName(_fullName, _shortName);
-        dev["name"] = _fullName;
-        dev["manufacturer"] = "Wallbox";
-        dev["model"] = _shortName;
-    }
+    populateDeviceBlock(doc["device"].to<JsonObject>());
 
     String payload;
     serializeJson(doc, payload);
@@ -165,15 +181,7 @@ static void publishDiscoveryButton(PubSubClient& mqtt, const char* objectId,
     doc["availability_topic"] = availTopic();
     if (icon) doc["icon"] = icon;
 
-    JsonObject dev = doc["device"].to<JsonObject>();
-    dev["identifiers"][0] = configMgr.get().haDeviceId;
-    {
-        const char* _fullName = nullptr; const char* _shortName = nullptr;
-        configMgr.productName(_fullName, _shortName);
-        dev["name"] = _fullName;
-        dev["manufacturer"] = "Wallbox";
-        dev["model"] = _shortName;
-    }
+    populateDeviceBlock(doc["device"].to<JsonObject>());
 
     String payload;
     serializeJson(doc, payload);
@@ -204,15 +212,7 @@ static void publishDiscoverySelect(PubSubClient& mqtt, const char* objectId,
     JsonArray opts = doc["options"].to<JsonArray>();
     for (int i = 0; i < optionCount; i++) opts.add(options[i]);
 
-    JsonObject dev = doc["device"].to<JsonObject>();
-    dev["identifiers"][0] = cfg.haDeviceId;
-    {
-        const char* _fullName = nullptr; const char* _shortName = nullptr;
-        configMgr.productName(_fullName, _shortName);
-        dev["name"] = _fullName;
-        dev["manufacturer"] = "Wallbox";
-        dev["model"] = _shortName;
-    }
+    populateDeviceBlock(doc["device"].to<JsonObject>());
 
     String payload;
     serializeJson(doc, payload);
@@ -527,10 +527,6 @@ void WallboxMQTT::sendDiscovery() {
         ? "[1,11]"
         : "[2,20,21,179]";
 
-    const char* deviceModelName = nullptr;
-    const char* deviceModelShort = nullptr;
-    configMgr.productName(deviceModelName, deviceModelShort);
-
     // Sensors from r_dat (status)
     publishDiscoveryEntity(*_client, "sensor", "charging_power", "Charging Power",
         "mdi:flash", st, "{{ value_json.r.cp | round(2) }}", "kW", "power", nullptr, "measurement");
@@ -598,11 +594,7 @@ void WallboxMQTT::sendDiscovery() {
         doc["device_class"] = "plug";
         doc["availability_topic"] = availTopic();
         doc["icon"] = "mdi:ev-plug-type2";
-        JsonObject dev = doc["device"].to<JsonObject>();
-        dev["identifiers"][0] = configMgr.get().haDeviceId;
-        dev["name"] = deviceModelName;
-        dev["manufacturer"] = "Wallbox";
-        dev["model"] = deviceModelShort;
+        populateDeviceBlock(doc["device"].to<JsonObject>());
         String pl;
         serializeJson(doc, pl);
         _client->beginPublish(topic.c_str(), pl.length(), true);
