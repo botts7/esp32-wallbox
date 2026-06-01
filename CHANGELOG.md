@@ -4,6 +4,52 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.4.3] - 2026-06-02
+
+Tightens the `loop_max_ms` tripwire so it stops false-positiving on
+sync MQTT/BLE reconnect blocking. Surfaced by @peter-mcc shortly after
+2.4.2 shipped.
+
+### Fixed
+
+- **`loop_max_ms` saturated by MQTT reconnect blocking.** When the
+  MQTT broker briefly goes away — an HA add-on reload, a router
+  hiccup — sync `PubSubClient::connect()` blocks the gateway's main
+  task for ~15 s per attempt while it retries. The tripwire
+  faithfully measured that as a 30-40 s loop gap, but it wasn't the
+  kind of *unprovoked* runtime wedge the metric was built to catch.
+  Once the value saturated, any real wedge underneath was invisible.
+- New `wb_diag::extendLoopMaxGate(graceMs)` API. Called automatically
+  from `reportReconnect()` (the existing single-source-of-truth for
+  tracked reconnect events) — every successful BLE or MQTT reconnect
+  pushes a 30 s grace window forward. The main loop's gap tracker
+  consults `loopMaxGateActive(now)` and skips recording during that
+  window.
+- Overlapping reconnects only extend the window, never shorten it.
+  The gate auto-clears on expiry so the next event re-arms cleanly.
+
+### Layered filters now stacked on `loop_max_ms`
+
+What lands in the metric after **all three** filters fire is a
+genuine unprovoked wedge worth investigating:
+
+1. First 60 s of uptime (boot-phase MQTT discovery flood — 2.4.1)
+2. 30 s after any tracked BLE/MQTT reconnect (this release)
+3. The trivial "first-iteration timestamp is meaningless" check
+
+### Live-validation
+
+Confirmed on the maintainer's MAX by stopping and restarting the
+Mosquitto broker:
+
+  Before: loop_max_ms = 31 ms, mqtt_reconnects = 0
+  After:  loop_max_ms = 265 ms, mqtt_reconnects = 1, longest 10 s
+
+Without the gate that 10 s outage would have produced 10 000+ ms.
+With the gate it surfaces as 265 ms — comfortably under the 500 ms
+yellow threshold. Heap, BLE, and 2.4.2 fields all intact through and
+after the test.
+
 ## [2.4.2] - 2026-06-01
 
 Follow-up release driven by @peter-mcc's testing of 2.4.1 on his
