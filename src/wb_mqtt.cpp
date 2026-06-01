@@ -522,6 +522,32 @@ void WallboxMQTT::publishRealtime(const String& json) {
     _client->endPublish();
 }
 
+void WallboxMQTT::publishCarConnected(const String& statusJson, const String& realtimeJson) {
+    if (!isConnected()) return;
+    int st = -1, cs = -1;
+    if (!statusJson.isEmpty()) {
+        JsonDocument sd;
+        if (deserializeJson(sd, statusJson) == DeserializationError::Ok)
+            st = sd["r"]["st"] | -1;
+    }
+    if (!realtimeJson.isEmpty()) {
+        JsonDocument rd;
+        if (deserializeJson(rd, realtimeJson) == DeserializationError::Ok)
+            cs = rd["r"]["charger_status"] | -1;
+    }
+    // Local r_dat.st codes where a car is physically plugged in.
+    bool connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
+                      st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
+    // Locked (st==6) carries no plug info in the local BLE protocol — Wallbox
+    // folds locked/no-car and locked/car-connected into the same code 6.
+    // STOPGAP: observed r_sta.charger_status == 19 when locked WITH a car.
+    // This is an unverified, firmware-specific heuristic pending a
+    // locked-with-NO-car measurement to confirm 19 is plug-specific.
+    if (st == 6 && cs == 19) connected = true;
+    String topic = baseTopic() + "/car_connected";
+    _client->publish(topic.c_str(), connected ? "ON" : "OFF", true);  // retain
+}
+
 void WallboxMQTT::publishSettings(const String& json) {
     if (!isConnected()) return;
     String topic = baseTopic() + "/settings";
@@ -556,37 +582,16 @@ void WallboxMQTT::sendDiscovery() {
     const char* st = sTopic.c_str();
     const char* rt = rTopic.c_str();
 
-    // Status code map differs between MAX and Plus — Plus uses a clean 0-18
-    // enum (per jagheterfredrik/wallbox-ble) while MAX uses sparse hardware
-    // codes (161, 178-180, 189-194, 209-210, etc). Plus-family includes
-    // Copper SB, Quasar, Quasar 2 — all use the same protocol.
-    const bool isPlus = configMgr.isPlusFamily();
-    const char* statusMap = isPlus
-        ? "{% set m = {0:'Ready',1:'Charging',2:'Waiting for Car',"
-          "3:'Waiting for Schedule',4:'Paused',5:'Schedule End',6:'Locked',"
-          "7:'Error',8:'Waiting for Current',9:'Power Sharing (Unconfigured)',"
-          "10:'Queue (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',"
-          "13:'MID Safety Margin',14:'OCPP Unavailable',15:'OCPP Finishing',"
-          "16:'OCPP Reserved',17:'Updating',18:'Queue (Eco Smart)'} %}"
-        : "{% set m = {0:'Disconnected',1:'Connected',2:'Charging',3:'Paused',"
-          "4:'Scheduled',5:'Discharging',6:'Error',7:'Disconnected',8:'Locked',"
-          "9:'Updating',14:'Error',16:'Ready',17:'Connected',"
-          "18:'Waiting for Schedule',19:'Scheduled',20:'Charging',"
-          "21:'Charge Complete',22:'Paused by User',23:'Queue (Power Share)',"
-          "24:'Queue (Eco Smart)',25:'Waiting for Schedule',26:'Discharging',"
-          "161:'Ready',178:'Paused',179:'Charging',180:'Scheduled',"
-          "189:'Ready',193:'Paused',194:'Locked',209:'Reserved (OCPP)',"
-          "210:'Updating'} %}";
-
-    // Car-connected codes (anything that's NOT Ready/Locked/Error/Updating/Disconnected)
-    const char* carConnectedCodes = isPlus
-        ? "[1,2,3,4,5,8,9,10,11,12,13,14,15,16,18]"
-        : "[1,2,3,4,5,17,18,19,20,21,22,23,24,25,26,178,179,180,193]";
-
-    // Active-charging codes (CHARGING + DISCHARGING on Plus; the MAX legacy set on MAX)
-    const char* chargingCodes = isPlus
-        ? "[1,11]"
-        : "[2,20,21,179]";
+    // Status enum was previously dispatched by charger model (Plus 0-18
+    // vs MAX cloud-codes) — wrong. Both Pulsar MAX and Plus return the
+    // same local 0-18 enum per jagheterfredrik/wallbox-ble; the MAX
+    // cloud-codes table was inherited from an older Wallbox cloud API
+    // and never matched the actual BLE r_dat.st values. Removed the
+    // dispatch; the templates below inline the local enum directly,
+    // and car-connected is computed in firmware (publishCarConnected)
+    // because it needs to combine st with r_sta.charger_status to
+    // disambiguate the locked-with-car case (st=6 carries no plug
+    // info on its own). benvanmierloo PR #7.
 
     // Sensors from r_dat (status)
     publishDiscoveryEntity(*_client, "sensor", "charging_power", "Charging Power",
@@ -617,18 +622,24 @@ void WallboxMQTT::sendDiscovery() {
     publishDiscoveryEntity(*_client, "sensor", "discharge_energy", "Discharge Energy (V2H)",
         "mdi:battery-arrow-up", st, "{{ (value_json.r.den / 1000) | round(3) }}", "kWh", "energy", nullptr, "total_increasing");
 
-    {
-        String tmpl = String("{% set s = value_json.r.st %}") + statusMap + "{{ m.get(s, 'Code ' ~ s) }}";
-        publishDiscoveryEntity(*_client, "sensor", "status", "Charger Status",
-            "mdi:ev-station", st, tmpl.c_str());
-    }
+    publishDiscoveryEntity(*_client, "sensor", "status", "Charger Status",
+        "mdi:ev-station", st,
+        "{% set s = value_json.r.st %}"
+        "{% set m = {0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',"
+        "4:'Paused',5:'Charge Complete',6:'Locked',7:'Error',"
+        "8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',"
+        "10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',"
+        "13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',"
+        "16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)'} %}"
+        "{{ m.get(s, 'Code ' ~ s) }}");
 
     // Sensors from r_sta (realtime)
-    {
-        String tmpl = String("{% set s = value_json.r.charger_status %}") + statusMap + "{{ m.get(s, 'Code ' ~ s) }}";
-        publishDiscoveryEntity(*_client, "sensor", "charger_status_code", "Status Code",
-            "mdi:information", rt, tmpl.c_str());
-    }
+    // r_sta.charger_status uses a different, unverified enum than r_dat.st
+    // (the authoritative status). Expose it as a raw code only — the
+    // "Charger Status" sensor above (from r_dat.st) is the canonical label.
+    publishDiscoveryEntity(*_client, "sensor", "charger_status_code", "Status Code (raw)",
+        "mdi:information", rt,
+        "{{ value_json.r.charger_status }}");
 
     publishDiscoveryEntity(*_client, "sensor", "lock_status", "Lock Status",
         "mdi:lock", rt,
@@ -650,8 +661,14 @@ void WallboxMQTT::sendDiscovery() {
         doc["name"] = "Car Connected";
         doc["unique_id"] = bsCfg.haDeviceId + "_car_connected";
         doc["object_id"] = bsCfg.haDeviceId + "_car_connected";
-        doc["state_topic"] = st;
-        doc["value_template"] = String("{% if value_json.r.st in ") + carConnectedCodes + " %}ON{% else %}OFF{% endif %}";
+        // Computed in firmware (publishCarConnected) because it needs both
+        // the status (st) and realtime (charger_status) responses, which
+        // arrive on separate topics — a single value_template can't see
+        // both. Locally st=6 means LOCKED with no plug-info embedded; we
+        // disambiguate locked-with-car using r_sta.charger_status.
+        doc["state_topic"] = baseTopic() + "/car_connected";
+        doc["payload_on"] = "ON";
+        doc["payload_off"] = "OFF";
         doc["device_class"] = "plug";
         doc["availability_topic"] = availTopic();
         doc["icon"] = "mdi:ev-plug-type2";
@@ -674,12 +691,10 @@ void WallboxMQTT::sendDiscovery() {
         "{{ value_json.r.cur }}", 6, 32, 1, "A");
 
     // Switch: charging on/off
-    {
-        String chgTmpl = String("{% if value_json.r.st in ") + chargingCodes + " %}1{% else %}0{% endif %}";
-        publishDiscoverySwitch(*_client, "charging", "Charging",
-            "mdi:ev-station", cmdCharging.c_str(), st,
-            chgTmpl.c_str(), "start", "stop");
-    }
+    publishDiscoverySwitch(*_client, "charging", "Charging",
+        "mdi:ev-station", cmdCharging.c_str(), st,
+        "{% if value_json.r.st == 1 %}1{% else %}0{% endif %}",
+        "start", "stop");
 
     // Switch: lock
     publishDiscoverySwitch(*_client, "lock", "Charger Lock",

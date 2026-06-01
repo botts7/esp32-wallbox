@@ -337,7 +337,12 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
         // double-wrap fetch() and double-count retries.)
         "<script>(function(){try{var t=localStorage.getItem('wb-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}})();</script>"
         "<script>(function(){var handlers={};var sock=null;var rd=1000;var open=false;function connect(){try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.hostname+':81/');sock.onopen=function(){open=true;rd=1000;document.documentElement.setAttribute('data-ws','1')};sock.onmessage=function(e){try{var m=JSON.parse(e.data);var hs=handlers[m.t];if(hs){for(var i=0;i<hs.length;i++){try{hs[i](m.d,m)}catch(ee){}}}}catch(err){}};sock.onclose=function(){open=false;document.documentElement.removeAttribute('data-ws');sock=null;setTimeout(connect,rd);rd=Math.min(rd*2,30000)};sock.onerror=function(){}}catch(e){setTimeout(connect,rd)}}window.wbws={subscribe:function(t,fn){(handlers[t]=handlers[t]||[]).push(fn)},isOpen:function(){return open},send:function(s){if(sock&&open)sock.send(s)}};connect();})();</script>"
-        "<script>(function(){var _lastSt=null;function load(){var def={enabled:false,events:{started:true,complete:true,paused:false,error:true,plug_in:false,plug_out:false}};try{var s=JSON.parse(localStorage.getItem('wb-notif')||'null');if(!s)return def;if(!s.events)s.events=def.events;return s}catch(e){return def}}function fire(title,body){try{new Notification(title,{body:body,tag:'wb',silent:false})}catch(e){}}window.wbFireNotif=fire;window.wbCheckStatus=function(s){if(!s||typeof s.st!=='number')return;var st=s.st;if(_lastSt===null){_lastSt=st;return}if(st===_lastSt)return;var N=load();var was=_lastSt;_lastSt=st;if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted')return;var charging=[2,20,179],complete=[21],paused=[3,22,178,193],error=[6,14],ready=[0,7,16,161,189],connected=[1,13,17];function inG(v,g){return g.indexOf(v)>=0}if(inG(st,complete)&&N.events.complete)fire('Charging complete','Your car is ready to go.');else if(inG(st,charging)&&!inG(was,charging)&&N.events.started)fire('Charging started','Active.');else if(inG(st,paused)&&!inG(was,paused)&&N.events.paused)fire('Charging paused','See dashboard.');else if(inG(st,error)&&!inG(was,error)&&N.events.error)fire('Charger error','See dashboard.');else if(inG(st,connected)&&inG(was,ready)&&N.events.plug_in)fire('Plug connected','Ready to charge.');else if(inG(st,ready)&&!inG(was,ready)&&N.events.plug_out)fire('Plug disconnected','Charger idle.')};})();</script>"
+        // Notification dispatcher: state-code groupings use the LOCAL
+        // BLE 0-18 enum (per jagheterfredrik/wallbox-ble + benvanmierloo
+        // PR #7). Older builds used the cloud status_id mapping which
+        // collided with the local enum at several codes — most painfully
+        // st=6 which means LOCKED locally but ERROR in the cloud table.
+        "<script>(function(){var _lastSt=null;function load(){var def={enabled:false,events:{started:true,complete:true,paused:false,error:true,plug_in:false,plug_out:false}};try{var s=JSON.parse(localStorage.getItem('wb-notif')||'null');if(!s)return def;if(!s.events)s.events=def.events;return s}catch(e){return def}}function fire(title,body){try{new Notification(title,{body:body,tag:'wb',silent:false})}catch(e){}}window.wbFireNotif=fire;window.wbCheckStatus=function(s){if(!s||typeof s.st!=='number')return;var st=s.st;if(_lastSt===null){_lastSt=st;return}if(st===_lastSt)return;var N=load();var was=_lastSt;_lastSt=st;if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted')return;var charging=[1],complete=[5],paused=[4],error=[7],ready=[0],connected=[2,3,8,10,12,13,18];function inG(v,g){return g.indexOf(v)>=0}if(inG(st,complete)&&N.events.complete)fire('Charging complete','Your car is ready to go.');else if(inG(st,charging)&&!inG(was,charging)&&N.events.started)fire('Charging started','Active.');else if(inG(st,paused)&&!inG(was,paused)&&N.events.paused)fire('Charging paused','See dashboard.');else if(inG(st,error)&&!inG(was,error)&&N.events.error)fire('Charger error','See dashboard.');else if(inG(st,connected)&&inG(was,ready)&&N.events.plug_in)fire('Plug connected','Ready to charge.');else if(inG(st,ready)&&!inG(was,ready)&&N.events.plug_out)fire('Plug disconnected','Charger idle.')};})();</script>"
         "</head><body>";
     // Boot overlay markup — only rendered when there's a BLE link we'd be
     // waiting on. Three exclusion cases caught here:
@@ -821,21 +826,16 @@ static void handleDashboard() {
 </div>
 
 <script>
-)HTML";
-    // Status-code map depends on charger model — Plus uses 0-18 enum (per
-    // jagheterfredrik/wallbox-ble); MAX uses sparse hardware codes.
-    // Plus-family includes Copper SB, Quasar, Quasar 2 (all share the protocol).
-    if (configMgr.isPlusFamily()) {
-        page += "var SN={0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',4:'Paused',5:'Schedule End',6:'Locked',7:'Error',8:'Waiting for Current',9:'Power Sharing (Unconfigured)',10:'Queue (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',13:'MID Safety Margin',14:'OCPP Unavailable',15:'OCPP Finishing',16:'OCPP Reserved',17:'Updating',18:'Queue (Eco Smart)'};\n";
-    } else {
-        page += "var SN={0:'Disconnected',1:'Connected',2:'Charging',3:'Paused',4:'Scheduled',5:'Discharging',6:'Error',7:'Disconnected',8:'Locked',9:'Updating',10:'Queue (Power)',13:'Waiting for Car',14:'Error',16:'Ready',17:'Connected',18:'Waiting for Schedule',19:'Scheduled',20:'Charging',21:'Charge Complete',22:'Paused by User',23:'Queue (Power Share)',24:'Queue (Eco Smart)',25:'Waiting for Schedule',26:'Discharging',161:'Ready',178:'Paused',179:'Charging',180:'Scheduled',189:'Ready',193:'Paused',194:'Locked',209:'Reserved (OCPP)',210:'Updating'};\n";
-    }
-    page += R"HTML(
+// Local BLE 0-18 status enum (per jagheterfredrik/wallbox-ble +
+// benvanmierloo PR #7). Confirmed on both Pulsar MAX and Pulsar Plus
+// — there's no MAX-specific cloud-code variant, the older
+// model-aware split was incorrect.
+var SN={0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',4:'Paused',5:'Charge Complete',6:'Locked',7:'Error',8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)'};
 var CHARGER_TZ='UTC';try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
 fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function _setText(id,txt){var el=document.getElementById(id);if(el)el.textContent=txt}
 function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;var el=document.getElementById(id);if(!el)return;el.textContent=(fmt?fmt(val):val)+(suffix||'')}
-function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];if(!n&&rt&&typeof rt.charger_status==='number')n=SN[rt.charger_status];_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
+function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
 function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
 function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null')return;var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){applyMeterData(d.r)}).catch(function(){})}
 // Hook WS push handlers
@@ -1114,12 +1114,12 @@ function watchStatusForNotif(s){
   var N=loadNotifSettings();
   if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted'){_lastSt=st;return}
   // Status code groups
-  var charging=[2,20,179];
-  var complete=[21];
-  var paused=[3,22,178,193];
-  var error=[6,14];
-  var ready=[0,7,16,161,189];
-  var connected=[1,13,17];
+  var charging=[1];
+  var complete=[5];
+  var paused=[4];
+  var error=[7];
+  var ready=[0];
+  var connected=[2,3,8,10,12,13,18];
   var was=_lastSt;
   function inGroup(s,g){return g.indexOf(s)>=0}
   if(inGroup(st,complete)&&N.events.complete)fireNotif('Charging complete','Your car is ready to go.');

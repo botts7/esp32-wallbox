@@ -73,6 +73,7 @@ static void publishCachedStatusIfNew() {
         _lastSeqStatus = seq;
         lastStatus = resp;
         wallboxMQTT.publishStatus(resp);
+        wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
         webServer.updateCache(lastStatus, lastRealtime);
         wbws::broadcast("status", resp);
     }
@@ -84,6 +85,7 @@ static void publishCachedRealtimeIfNew() {
         _lastSeqRealtime = seq;
         lastRealtime = resp;
         wallboxMQTT.publishRealtime(resp);
+        wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
         webServer.updateCache(lastStatus, lastRealtime);
     }
 }
