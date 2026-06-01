@@ -51,7 +51,19 @@ static void publishDiscoveryEntity(PubSubClient& mqtt, const char* component,
         dev["manufacturer"] = "Wallbox";
         dev["model"] = _shortName;
     }
-    dev["sw_version"] = "6.11.16";
+    // Charger application firmware drives the HA Device page's
+    // top-left "Firmware" label. Use the live value once BLE has read
+    // fw_v_; fall back to the gateway version while we wait for that
+    // read so HA always shows *something* during boot.
+    // peter-mcc 2.4.1 follow-up: previously hardcoded to "6.11.16",
+    // which made Plus devices misleadingly show the maintainer's MAX
+    // version on the HA Device screen. Discovery is re-published when
+    // BLE init completes so HA gets the correct value as soon as the
+    // charger reports it (see wb_ble.cpp markDiscoveryStale()).
+    {
+        String fw = wallboxBLE.chargerAppFirmware();
+        dev["sw_version"] = fw.length() ? fw : String(WB_VERSION);
+    }
     // No via_device — the ESP32 gateway IS the device
 
     String payload;
@@ -762,7 +774,12 @@ void WallboxMQTT::sendDiscovery() {
     // Lifetime session count from r_ses.size.
     publishDiscoveryEntity(*_client, "sensor", "chg_sessions", "Total Charging Sessions",
         "mdi:counter", gTopic.c_str(),
-        "{{ value_json.chg_sessions | default(0) }}", nullptr, nullptr, nullptr, "total_increasing");
+        // value_json.chg_sessions is `null` on chargers that don't
+        // expose a usable count (Plus). Render null as the literal
+        // "None" HA token so the entity goes unavailable instead of
+        // sticking at 0 forever — peter-mcc 2.4.1 follow-up.
+        "{% if value_json.chg_sessions is none %}None{% else %}{{ value_json.chg_sessions }}{% endif %}",
+        nullptr, nullptr, nullptr, "total_increasing");
     // Power Boost from r_hsh — household-meter-tied current cap (amps).
     publishDiscoveryEntity(*_client, "sensor", "chg_power_boost", "Power Boost Limit",
         "mdi:home-lightning-bolt-outline", gTopic.c_str(),

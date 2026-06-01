@@ -599,7 +599,14 @@ static void handleApiStatus() {
     // chg_project — canonical model identifier (e.g. "prj15-pulsar-max").
     json += ",\"chg_app_fw\":\"" + wallboxBLE.chargerAppFirmware() + "\"";
     json += ",\"chg_project\":\"" + wallboxBLE.chargerProject() + "\"";
-    json += ",\"chg_sessions\":" + String((int)wallboxBLE.chargerSessionCount());
+    // Emit null instead of -1 when r_ses doesn't expose a usable count
+    // (Plus and some MAX firmwares don't fill in `last`). HA's
+    // `value_json.chg_sessions` template renders null as unavailable.
+    {
+        int32_t sc = wallboxBLE.chargerSessionCount();
+        json += sc >= 0 ? (",\"chg_sessions\":" + String((int)sc))
+                        : ",\"chg_sessions\":null";
+    }
     json += ",\"chg_power_boost\":" + String((int)wallboxBLE.chargerPowerBoost());
     json += ",\"chg_lock_state\":" + String((int)wallboxBLE.chargerLockState());
     json += ",\"chg_net_ssid\":\"" + wallboxBLE.chargerNetworkSsid() + "\"";

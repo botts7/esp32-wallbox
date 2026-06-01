@@ -179,7 +179,11 @@ static void publishGatewayInfo() {
     // to the Wallbox app's charger-firmware number.
     json += ",\"chg_app_fw\":\"" + wallboxBLE.chargerAppFirmware() + "\"";
     json += ",\"chg_project\":\"" + wallboxBLE.chargerProject() + "\"";
-    json += ",\"chg_sessions\":" + String((int)wallboxBLE.chargerSessionCount());
+    {
+        int32_t sc = wallboxBLE.chargerSessionCount();
+        json += sc >= 0 ? (",\"chg_sessions\":" + String((int)sc))
+                        : ",\"chg_sessions\":null";
+    }
     json += ",\"chg_power_boost\":" + String((int)wallboxBLE.chargerPowerBoost());
     json += ",\"chg_lock_state\":" + String((int)wallboxBLE.chargerLockState());
     json += ",\"chg_net_ssid\":\"" + wallboxBLE.chargerNetworkSsid() + "\"";
@@ -488,6 +492,15 @@ void loop() {
     // data. Each check is a mutex-protected copy-out + seq compare; ~5 µs
     // each when the cache hasn't advanced. Never blocks on BLE.
     if (wallboxMQTT.isConnected()) {
+        // Re-publish HA discovery when BLE init finishes reading fw_v_,
+        // so the HA Device page's sw_version flips from the WB_VERSION
+        // fallback to the real charger app firmware. One-shot — the
+        // flag is cleared immediately so we don't republish every loop.
+        // peter-mcc 2.4.1 follow-up.
+        if (wallboxBLE.discoveryStale()) {
+            wallboxBLE.clearDiscoveryStale();
+            wallboxMQTT.sendDiscovery();
+        }
         publishCachedStatusIfNew();
         publishCachedRealtimeIfNew();
         publishCachedMeterIfNew();

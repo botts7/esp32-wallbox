@@ -110,6 +110,13 @@ public:
     // shows the user (e.g. "6.11.16" on MAX, "6.7.38" on Plus). This is
     // distinct from deviceFirmware() which is the BLE module's firmware.
     String chargerAppFirmware() const { return _chgAppFw; }
+
+    // True iff fw_v_ has been read and HA discovery should be
+    // re-published so the device's sw_version reflects the real charger
+    // firmware instead of the WB_VERSION fallback. Cleared by the main
+    // loop after it triggers the re-publish.
+    bool discoveryStale() const { return _discoveryStale; }
+    void clearDiscoveryStale() { _discoveryStale = false; }
     // Charger project name (fw_v_.p, e.g. "prj15-pulsar-max"). Source of
     // truth for charger model — preferred over the user-config dropdown.
     String chargerProject() const { return _chgProject; }
@@ -273,6 +280,9 @@ private:
     String  _chgNetSsid;
     String  _chgNetIp;
     int     _chgNetSignal = 0;  // 0-100 quality % (gnsta.signal)
+    // Set true once fw_v_ is read so the main loop can re-trigger HA
+    // discovery with the real charger app FW in dev["sw_version"].
+    bool    _discoveryStale = false;
     String _chargerModel = "max";
     String _prevFw;
     bool _fwChanged = false;

@@ -549,19 +549,41 @@ void WallboxBLE::_connect() {
                     _chgAppFw.length() ? _chgAppFw.c_str() : "(none)",
                     _chgProject.length() ? _chgProject.c_str() : "(none)");
             }
+            // Tell the main loop to re-publish HA discovery so the
+            // device sw_version updates from WB_VERSION fallback to
+            // the real charger app FW. Only useful if we actually got
+            // something — no point re-publishing the fallback as the
+            // fallback.
+            if (_chgAppFw.length()) _discoveryStale = true;
         }
 
-        // Total session count (r_ses.size). Stable across boot —
-        // increments only on session completion. Read once at init;
-        // a periodic refresh elsewhere keeps it up to date if the
-        // user is watching during a session end.
+        // Total session count from r_ses. peter-mcc 2.4.1 follow-up:
+        // 2.4.1 used `size` which is actually the log buffer CAPACITY
+        // sentinel (99999 on MAX, missing on Plus) — not lifetime count.
+        // The real count is in `last`, confirmed via raw BAPI probe on
+        // MAX: {"last":233,"size":99999} — 233 is plausible, 99999 is
+        // the storage-cap marker.
+        //
+        // Defensive parse: prefer `last`. Fall back to `size` only if
+        // it's in a plausible range (< 50000) — anything in the 99999
+        // ballpark is the sentinel and worse than no data at all. If
+        // neither yields a real number, leave _chgSessionCount at -1
+        // and the publish path emits null so HA marks the sensor
+        // unavailable instead of showing -1.
         String sesResp = sendCommand(bapi::MET_GET_SESSIONS, "null", 2000);
         if (!sesResp.isEmpty()) {
             JsonDocument d;
             if (deserializeJson(d, sesResp) == DeserializationError::Ok) {
-                if (d["r"]["size"].is<int>()) {
-                    _chgSessionCount = d["r"]["size"].as<int32_t>();
+                if (d["r"]["last"].is<int>()) {
+                    _chgSessionCount = d["r"]["last"].as<int32_t>();
+                } else if (d["r"]["size"].is<int>()) {
+                    int s = d["r"]["size"].as<int>();
+                    if (s >= 0 && s < 50000) _chgSessionCount = s;
+                }
+                if (_chgSessionCount >= 0) {
                     Log.printf("[BLE] Total sessions: %d\n", (int)_chgSessionCount);
+                } else {
+                    Log.println("[BLE] Total sessions: not exposed by this charger");
                 }
             }
         }
