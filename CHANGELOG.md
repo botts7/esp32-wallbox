@@ -4,6 +4,121 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.5.0] - 2026-06-02
+
+Three community PRs from **@benvanmierloo** that fix real HA-side
+behaviour bugs, plus follow-ups for findings @peter-mcc surfaced on
+2.4.3. All verified live on the maintainer's Pulsar MAX.
+
+### 🙏 Community contributions
+
+- **Decode local BLE status enum instead of cloud codes**
+  ([#7](https://github.com/botts7/esp32-wallbox/pull/7) by
+  @benvanmierloo). The 2.4.x status table was a mix of cloud
+  `status_id` codes (`161`/`178-180`/`189-194`/`209-210`/…) and a
+  partial local-enum set. The local BLE protocol (`r_dat.st`)
+  actually returns a clean 0-18 enum on both MAX and Plus per
+  jagheterfredrik/wallbox-ble. The two clash at several codes,
+  worst at `st=6`: locally it means LOCKED, in the cloud table it
+  meant ERROR. A locked charger was rendering as "Error" + "car
+  unplugged" in HA. This release adopts the local 0-18 enum
+  everywhere — Charger Status sensor, dashboard, notification
+  triggers, car-connected logic. The maintainer's MAX with Eco
+  Smart enabled now correctly reads "Queued (Eco-Smart)" (st=18)
+  instead of the previous "Waiting for Schedule".
+
+- **Render HA charging/lock as real toggles, not assumed-state
+  buttons** ([#8](https://github.com/botts7/esp32-wallbox/pull/8)
+  by @benvanmierloo). The Charging and Charger Lock MQTT switches
+  rendered as a pair of on/off buttons because HA's state never
+  resolved — `payload_on`/`payload_off` were the command strings
+  (`start`/`stop`, `lock`/`unlock`), but the value_template emits
+  `"1"`/`"0"` which matched neither. Added explicit `state_on`/
+  `state_off` to discovery so HA matches the template output and
+  renders proper sliding toggles.
+
+- **Auto Lock controls actually work**
+  ([#9](https://github.com/botts7/esp32-wallbox/pull/9) by
+  @benvanmierloo). Three connected fixes:
+    - `g_alo` returns the timeout as a bare scalar (`{"r":60}`,
+      `0` = off). The 2.4.x poll mis-parsed it as an object, so
+      the Auto Lock switch stuck OFF and the timeout always
+      showed a default.
+    - `s_alo` also expects a bare scalar — HA was sending an
+      object, so writes were silently ignored. Now sends the
+      scalar; toggling ON restores the last-seen timeout
+      instead of resetting to a default.
+    - The HA Auto Lock Timeout is now expressed in **minutes**
+      (1-60) to match the Wallbox app, converted to seconds at
+      the BAPI boundary. Rendered as an exact-value input box
+      instead of a 60-step slider.
+
+  Manual port to the BLE-task architecture (the PR was written
+  against the rc15-era main.cpp polling — periodic settings
+  reads now live on `_pollSettings()` inside the BLE FreeRTOS
+  task).
+
+### Added
+
+- **Persistent boot record in OTA history**. `wb_health::markHealthy()`
+  now writes a `kind: "boot"` entry to the OTA-history NVS ring,
+  capturing the version that successfully reached healthy state.
+  Pairs with the existing `kind: "ota"` upload events (written by
+  the *previous* firmware at upload time) to give `/info` a complete
+  chronological "what got installed AND which versions actually
+  booted" story. The renderer shows boot entries with a blue arrow,
+  upload events with the existing green/red dot. @peter-mcc 2.4.3
+  follow-up: he reported the OTA history was "missing 2.4.2" — the
+  upload event recorded by the old firmware was always there, but
+  there was no record confirming 2.4.2 successfully booted; the new
+  half closes that gap.
+
+### Changed
+
+- **OTA history capacity bumped 5 → 20.** Same NVS-backed ring,
+  same write semantics. The 5-entry limit rolled past Peter's
+  2.4.2 entry after a couple of subsequent OTAs; 20 entries cover
+  a typical month of upgrade activity without bloating NVS
+  (~2 KB max).
+- **"Clear counters" button on `/info` also resets `loop_max_ms`.**
+  Previously the tripwire stuck at its boot-time max until reboot,
+  leaving no recourse for a one-off outlier. The button now zeroes
+  both `g_loopMaxMs` and the in-flight loop-gate deadline alongside
+  the BLE/MQTT reconnect counters.
+
+### Fixed
+
+- **HA discovery device block consolidated** under
+  `populateDeviceBlock()` for all 6 helpers (sensor / switch /
+  number / button / select / car-connected binary_sensor). Before
+  2.4.2 the helpers had drifted — only the sensor one carried
+  `sw_version`, others were missing `connections`. HA's
+  merge-by-identifiers semantics meant the device-page metadata
+  flickered based on payload arrival order. 2.4.2 already
+  consolidated; 2.5.0 re-verifies after the PR #7 / #8 / #9
+  integration that every entity type still emits the same complete
+  block.
+
+### Eliminated, then re-verified as charger behaviour
+
+An "optimistic publish" path was briefly added then **reverted**
+during 2.5.0 development. Live testing revealed that the visible
+toggle "bounce" was the Wallbox charger acting unilaterally — it
+auto-releases the socket lock after ~7 s when no active session
+needs it, and it keeps st=18 (Queue Eco-Smart) when Eco-Smart is
+gating charging regardless of how many manual Start commands you
+fire. Painting over those state transitions optimistically would
+mean lying to the user about what the charger is actually doing.
+The repoll path that confirms reality within ~500 ms after a
+write was kept — bounce window collapsed to fast accurate feedback.
+
+### Migration
+
+If you're upgrading from 2.4.3 via OTA, your existing OTA history
+ring will retain its older entries (the new code reads them
+backwards-compatibly through the `from` field). New entries will
+use the richer `kind`/`version` schema. No action required.
+
 ## [2.4.3] - 2026-06-02
 
 Tightens the `loop_max_ms` tripwire so it stops false-positiving on
