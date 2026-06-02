@@ -155,6 +155,15 @@ static void handleAppJs() {
     http.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
     http.send(200, "application/javascript", R"JS(
 function toast(msg,type){type=type||'info';var c=document.getElementById('toast-c');if(!c){c=document.createElement('div');c.id='toast-c';c.className='toast-container';document.body.appendChild(c)}var t=document.createElement('div');t.className='toast toast-'+type;t.textContent=msg;c.appendChild(t);setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove()},300)},3000)}
+// Catch 403 (CSRF token mismatch) on any state-changing fetch and
+// auto-recover. The token rotates every boot, so a stale page held
+// across an OTA still has the old token in window.WB_CSRF — clicks
+// silently fail. peter-mcc 2.5.0 follow-up: he reported needing 3
+// button presses to clear counters after upgrading.
+// Usage:
+//   fetch(...).then(function(r){if(handleCsrf403(r))return;...})
+// Returns true if the response was a 403 (caller should bail).
+function handleCsrf403(r){if(r&&r.status===403){toast('Session expired (recent reboot?). Refreshing page...','error');setTimeout(function(){location.reload()},1500);return true}return false}
 function confirm2(msg,cb){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;display:flex;align-items:center;justify-content:center';o.innerHTML="<div style='background:#1a1d28;border:1px solid #2a2d3a;border-radius:14px;padding:24px;max-width:320px;text-align:center'><p style='margin:0 0 16px;color:#e2e8f0'>"+msg+"</p><div style='display:flex;gap:10px'><button id='cf-cancel' style='flex:1;padding:12px;border-radius:8px;border:1px solid #2a2d3a;background:transparent;color:#94a3b8;cursor:pointer'>Cancel</button><button id='cf-ok' style='flex:1;padding:12px;border-radius:8px;border:none;background:#ef4444;color:#fff;cursor:pointer'>Confirm</button></div></div>";document.body.appendChild(o);document.getElementById('cf-cancel').onclick=function(){o.remove()};document.getElementById('cf-ok').onclick=function(){o.remove();cb()};o.onclick=function(e){if(e.target===o)o.remove()}}
 function selectDevice(addr,ev){document.getElementById('ble_addr').value=addr;document.querySelectorAll('.scan-result').forEach(function(e){e.style.borderColor=''});if(ev&&ev.currentTarget)ev.currentTarget.style.borderColor='var(--primary)'}
 function formatMAC(i){var v=i.value.replace(/[^0-9a-fA-F]/g,'').toUpperCase(),f='';for(var j=0;j<v.length&&j<12;j++){if(j>0&&j%2===0)f+=':';f+=v[j]}i.value=f}
@@ -1155,11 +1164,11 @@ function savePin(){
   if(v.length>0&&!/^[0-9]+$/.test(v)){toast('Passcode must be digits only','error');return}
   var res=document.getElementById('pin-result');
   toast('Saving passcode...','info');
-  fetch('/api/pin?csrf='+window.WB_CSRF+'&pin='+encodeURIComponent(v),{method:'POST'}).then(function(x){return x.json()}).then(function(d){
+  fetch('/api/pin?csrf='+window.WB_CSRF+'&pin='+encodeURIComponent(v),{method:'POST'}).then(function(x){if(handleCsrf403(x))throw new Error('csrf');return x.json()}).then(function(d){
     if(d.error){toast(d.error,'error');return}
     if(res){res.style.display='block';res.style.color='var(--success)';res.textContent='Saved \xE2\x80\x94 rebooting...'}
     toast('Passcode saved — gateway is rebooting','success');
-  }).catch(function(e){toast('Error: '+e.message,'error')})
+  }).catch(function(e){if(e&&e.message==='csrf')return;toast('Error: '+e.message,'error')})
 }
 function showWiFi(){
   /* Gateway-side WiFi status (from /api/status, no BAPI hop). Shows
@@ -1809,7 +1818,7 @@ function loadDiag(){
     rows.innerHTML=h||'<div style="color:var(--text3)">No diagnostics logged yet.</div>';
   }).catch(function(){})
 }
-function clearDiag(){if(!confirm('Reset disconnect counters and clear event history?'))return;fetch('/api/diag/clear?csrf='+window.WB_CSRF,{method:'POST'}).then(function(){loadDiag()}).catch(function(){})}
+function clearDiag(){if(!confirm('Reset disconnect counters and clear event history?'))return;fetch('/api/diag/clear?csrf='+window.WB_CSRF,{method:'POST'}).then(function(r){if(handleCsrf403(r))return;loadDiag()}).catch(function(){})}
 function renderGW(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi Signal',d.wifi_rssi+' dBm');h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h}
 // Live-update the Gateway card off the same WS push the top banner uses,
 // so BLE Signal here can't drift away from the banner's value.
