@@ -6,9 +6,9 @@ shipped. Integrates three community PRs from
 behaviour bugs, plus follow-ups for findings
 [@peter-mcc](https://github.com/peter-mcc) surfaced on 2.4.3.
 
-All verified live on the maintainer's Pulsar MAX. Plus testers please
-report — the code paths are expected to work identically on Plus per
-upstream references but haven't been physically exercised there yet.
+All verified live on my Pulsar MAX. Plus testers please report — the
+code paths are expected to work identically on Plus per upstream
+references but haven't been physically exercised there yet.
 
 ## Community contributions
 
