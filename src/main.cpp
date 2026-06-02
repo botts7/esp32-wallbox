@@ -407,7 +407,14 @@ void loop() {
     // genuine unprovoked wedge worth investigating.
     {
         uint32_t now = millis();
-        if (g_loopLastMs != 0 && now > 60000 && !wb_diag::loopMaxGateActive(now)) {
+        // BOTH endpoints of the gap must be past the 60 s boot phase.
+        // Earlier we only checked `now > 60000`, which meant a gap that
+        // STRADDLED the boundary (boot-phase work still running at
+        // 60 s + 1 ms) recorded the entire 4-5 s boot block as the
+        // first steady-state measurement. peter-mcc 2.5.0 saw a
+        // loop_max_ms=4156 right after boot from this bug.
+        // Also gate on the post-reconnect grace window.
+        if (g_loopLastMs > 60000 && !wb_diag::loopMaxGateActive(now)) {
             uint32_t gap = now - g_loopLastMs;
             if (gap > g_loopMaxMs) g_loopMaxMs = gap;
         }
