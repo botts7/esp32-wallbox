@@ -76,6 +76,26 @@ public:
     void setStatusPollMs(uint32_t ms)   { if (ms >= 1000) _statusPollMs = ms; }
     void setRealtimePollMs(uint32_t ms) { if (ms >= 1000) _realtimePollMs = ms; }
 
+    // Nudge the BLE task to run _pollRealtime + _pollSettings ahead of
+    // its regular cadence. `delayMs` is the minimum wait before the
+    // re-poll fires — the BAPI write returns as soon as the charger
+    // acknowledges receipt, but the charger's internal state machine
+    // can take another 100-500 ms to actually apply the change. A
+    // re-poll fired immediately can hit that window, read the OLD
+    // value, and undo an optimistic publish (the user-visible
+    // "sometimes it bounces, sometimes it doesn't" symptom). 500 ms
+    // is a safe default — long enough to clear typical apply latency
+    // without making the UI feel laggy.
+    void requestSettingsRepoll(uint32_t delayMs = 500) {
+        // Position _lastRealtimePoll so the BLE task's
+        //   now - _lastRealtimePoll >= _realtimePollMs
+        // becomes true exactly `delayMs` from now.
+        uint32_t now = millis();
+        uint32_t target = (now + delayMs > _realtimePollMs)
+                            ? (now + delayMs - _realtimePollMs) : 0;
+        _lastRealtimePoll = target;
+    }
+
     // Phase-2 polling — thread-safe copy-out accessors. Each one
     // copies the latest cached value plus its seq counter; main task
     // compares to its remembered "last published" seq and only

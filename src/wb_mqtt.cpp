@@ -340,6 +340,35 @@ void WallboxMQTT::_mqttCallback(char* topic, byte* payload, unsigned int len) {
     }
 }
 
+// Optimistic update of selected settings fields. Reads the latest
+// cached settings JSON, overrides the fields named in `overrides`, and
+// republishes the full document so HA renders the new state instantly
+// (~0ms) instead of waiting for the BLE-task repoll (~150ms). The
+// regular repoll then overwrites with reality — if our optimistic
+// guess matches, HA sees no change; if it doesn't, HA corrects within
+// the repoll window.
+// Important: we preserve every other field in the cached settings so
+// unrelated entities (eco_smart, power_sharing, etc.) don't briefly
+// go unavailable because their value disappeared from the payload.
+static void publishOptimisticSettings(PubSubClient& client, JsonDocument& overrides) {
+    String cached; uint32_t seq = 0;
+    wallboxBLE.copyCachedSettings(cached, seq);
+    JsonDocument merged;
+    if (cached.length()) {
+        // Best-effort parse — on failure we still want to publish so the
+        // user's UI updates; HA will accept a minimal payload, the
+        // entities for missing fields just go unavailable until the next
+        // real poll. Far better than not publishing at all.
+        deserializeJson(merged, cached);
+    }
+    for (JsonPair kv : overrides.as<JsonObject>()) merged[kv.key()] = kv.value();
+    String out; serializeJson(merged, out);
+    String topic = baseTopic() + "/settings";
+    client.beginPublish(topic.c_str(), out.length(), false);
+    client.print(out);
+    client.endPublish();
+}
+
 void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
     if (!wallboxBLE.isConnected()) {
         Log.println("[MQTT] BLE not connected, ignoring command");
@@ -414,6 +443,10 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         if (mins < 1) mins = 1;
         int secs = on ? mins * 60 : 0;
         wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, String(secs).c_str());
+        // Optimistic publish so HA reflects the new state immediately
+        // instead of bouncing through the repoll window.
+        JsonDocument o; o["autolock"] = on ? 1 : 0; o["autolock_time"] = mins;
+        publishOptimisticSettings(*_client, o);
 
     } else if (sub == "autolock_time") {
         // HA sends minutes (matching the Wallbox app); charger wants
@@ -423,6 +456,10 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         if (mins > 60) mins = 60;
         wallboxBLE._lastAutolockMin = mins;  // remember for the next switch ON
         wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, String(mins * 60).c_str());
+        // Setting a timeout implies enabling auto-lock — publish both
+        // optimistically so HA's switch flips with the timeout change.
+        JsonDocument o; o["autolock"] = 1; o["autolock_time"] = mins;
+        publishOptimisticSettings(*_client, o);
 
     } else if (sub == "eco_mode") {
         // HA sends: "Off", "Full Green (Solar Only)", "Solar + Grid"
@@ -459,7 +496,14 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
 
     } else {
         Log.printf("[CMD] Unknown command: %s\n", subtopic);
+        return;  // unknown — don't bother nudging the poll
     }
+
+    // Any command that reached this point may have changed charger
+    // state. Tell the BLE task to re-run its realtime + settings poll
+    // on the very next iteration so HA picks up the new state in
+    // ~150 ms instead of bouncing through the regular-cadence window.
+    wallboxBLE.requestSettingsRepoll();
 }
 
 void WallboxMQTT::publishStatus(const String& json) {
