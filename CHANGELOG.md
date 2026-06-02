@@ -4,6 +4,39 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.5.1] - 2026-06-02
+
+Root-cause fix following @peter-mcc's 2.5.0 feedback. He reported
+needing to press "Clear counters" three times after upgrading before
+it took effect.
+
+### Fixed
+
+- **CSRF token now persists in NVS across reboots.** Previously the
+  token regenerated each boot (random-seeded at first `ensureCsrfToken()`
+  call), so a `/info` page held open across an OTA still held the OLD
+  token in `window.WB_CSRF` — every state-changing fetch from that
+  stale page silently 403'd with no UI feedback. Looked like the
+  button was broken. Persisting the token means the browser's cached
+  copy stays valid post-reboot. No client-side recovery dance needed,
+  no toast, no auto-reload — the stale-token problem can't happen.
+  Factory reset explicitly wipes the `wbcsrf` NVS namespace so a
+  reset device generates a fresh token instead of inheriting the
+  previous installation's.
+- Tight-race guard on first-boot token generation: two concurrent
+  `ensureCsrfToken()` calls during the brief window before NVS holds
+  a token could previously generate different tokens and leave the
+  RAM copy out of sync with the persisted one. Now gated by a single
+  `csrfTokenReady` flag.
+
+### Threat-model note
+
+CSRF tokens are double-submit tokens, not session secrets. A
+long-lived per-device random 128-bit hex value is fine — it's only
+ever readable from an already-authenticated session (it's embedded
+in pages rendered behind `checkAuth()`). The previous boot-rotation
+gave no real security benefit and caused the UX bug above.
+
 ## [2.5.0] - 2026-06-02
 
 Three community PRs from **@benvanmierloo** that fix real HA-side
