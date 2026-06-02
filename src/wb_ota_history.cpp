@@ -30,24 +30,52 @@ static void store(const JsonDocument& doc) {
     p.end();
 }
 
-void record(uint32_t uptime_s, const String& from_version,
-            uint32_t size_bytes, bool success, const String& reason) {
+void recordOta(uint32_t uptime_s, const String& was_running,
+               uint32_t size_bytes, bool success, const String& reason) {
     JsonDocument doc;
     load(doc);
     JsonArray arr = doc.as<JsonArray>();
 
     // Append the new entry at the END (we'll re-emit newest-first in toJson)
     JsonObject e = arr.add<JsonObject>();
+    e["kind"]     = "ota";
     e["uptime_s"] = uptime_s;
-    e["from"]     = from_version;
+    e["version"]  = was_running;
     e["bytes"]    = size_bytes;
     e["ok"]       = success;
     e["reason"]   = reason;
+    // Compatibility — older /info renderers still read "from".
+    e["from"]     = was_running;
 
-    // Evict oldest entries (front of array) until size <= MAX_ENTRIES
-    while ((int)arr.size() > MAX_ENTRIES) {
-        arr.remove(0);
+    while ((int)arr.size() > MAX_ENTRIES) arr.remove(0);
+    store(doc);
+}
+
+void recordBoot(uint32_t uptime_s, const String& version) {
+    JsonDocument doc;
+    load(doc);
+    JsonArray arr = doc.as<JsonArray>();
+
+    // Deduplicate — if the most recent entry is a boot of the same
+    // version, don't record again. Avoids duplicate entries from
+    // multiple markHealthy() calls or quick reboots of the same FW.
+    if (arr.size() > 0) {
+        JsonObject last = arr[arr.size() - 1];
+        if (last["kind"].is<const char*>()
+            && String(last["kind"].as<const char*>()) == "boot"
+            && last["version"].is<const char*>()
+            && String(last["version"].as<const char*>()) == version) {
+            return;
+        }
     }
+
+    JsonObject e = arr.add<JsonObject>();
+    e["kind"]     = "boot";
+    e["uptime_s"] = uptime_s;
+    e["version"]  = version;
+    e["ok"]       = true;
+
+    while ((int)arr.size() > MAX_ENTRIES) arr.remove(0);
     store(doc);
 }
 

@@ -1733,7 +1733,22 @@ function loadGW(){return fetch('/api/status').then(function(r){return r.json()})
   if(d.chg_fw_changed){var b=document.getElementById('fw-changed-banner');var det=document.getElementById('fw-changed-detail');if(b){b.style.display='block';if(det&&d.chg_fw_prev&&d.dev_fw)det.textContent='Was '+d.chg_fw_prev+', now '+d.dev_fw+'.';}}
 }).catch(function(){})}
 function dismissFwBanner(){fetch('/api/fw/dismiss',{method:'POST'}).then(function(){var b=document.getElementById('fw-changed-banner');if(b)b.style.display='none'}).catch(function(){})}
-function loadOtaHistory(){return fetch('/api/ota/history').then(function(r){return r.json()}).then(function(arr){if(!Array.isArray(arr)||!arr.length)return;var c=document.getElementById('ota-history');var rows=document.getElementById('ota-history-rows');var h='';arr.forEach(function(e){var dot=e.ok?'<span style="color:#22c55e">&#x25CF;</span>':'<span style="color:#ef4444">&#x25CF;</span>';var sz=e.bytes?(' '+Math.round(e.bytes/1024)+'KB'):'';var rsn=e.ok?'':(' — '+(e.reason||'failed'));h+='<div style="margin:3px 0">'+dot+' '+(e.from||'unknown')+sz+rsn+'</div>'});rows.innerHTML=h;c.style.display='block'}).catch(function(){})}
+function loadOtaHistory(){return fetch('/api/ota/history').then(function(r){return r.json()}).then(function(arr){if(!Array.isArray(arr)||!arr.length)return;var c=document.getElementById('ota-history');var rows=document.getElementById('ota-history-rows');var h='';arr.forEach(function(e){
+  // Two entry kinds: 'boot' (a firmware version reached healthy state)
+  // and 'ota' (an upload event recorded by the *previous* firmware).
+  // Older entries pre-2.5.0 don't carry a `kind` field — those are
+  // implicitly 'ota'. peter-mcc 2.4.2 follow-up.
+  var dot=e.ok?'<span style="color:#22c55e">&#x25CF;</span>':'<span style="color:#ef4444">&#x25CF;</span>';
+  var ver=e.version||e.from||'unknown';
+  if(e.kind==='boot'){
+    // "booted v… ok" — distinct icon + neutral colour.
+    h+='<div style="margin:3px 0;color:var(--text2)"><span style="color:#3b82f6">&#x2192;</span> booted '+ver+'</div>';
+  }else{
+    var sz=e.bytes?(' '+Math.round(e.bytes/1024)+'KB'):'';
+    var rsn=e.ok?'':(' — '+(e.reason||'failed'));
+    h+='<div style="margin:3px 0">'+dot+' '+ver+sz+rsn+'</div>';
+  }
+});rows.innerHTML=h;c.style.display='block'}).catch(function(){})}
 function loadBootReason(){return fetch('/api/boot/history').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('boot-reason');if(!el)return;var cur=d.current||'unknown';var curFw=d.current_fw||'';var isBad=function(r){r=r||'';return r.indexOf('panic')>=0||r.indexOf('watchdog')>=0||r.indexOf('brownout')>=0};var bad=isBad(cur);var col=bad?'#ef4444':'var(--text3)';var prefix=bad?'&#x26A0; ':'';el.innerHTML='<span style=\"color:'+col+'\">'+prefix+'Last boot: '+cur+'</span>';if(d.history&&d.history.length>1){var thisFw=d.history.filter(function(e){return isBad(e.reason)&&e.fw===curFw});var olderFw=d.history.filter(function(e){return isBad(e.reason)&&e.fw!==curFw});if(thisFw.length){el.innerHTML+=' <span style=\"color:var(--danger);font-size:.92em\">('+thisFw.length+' bad boot'+(thisFw.length>1?'s':'')+' on this firmware)</span>'}else if(olderFw.length){el.innerHTML+=' <span style=\"color:var(--text3);font-size:.85em;opacity:.7\">('+olderFw.length+' from older firmware)</span>'}}}).catch(function(){})}
 // Chain /info fetches sequentially instead of firing 4-6 in parallel —
 // ESP32's WebServer has very limited concurrent connection slots, and
@@ -2618,7 +2633,7 @@ static void handleOtaUpload() {
             if (otaRetryAfterSec > 0) {
                 Log.printf("[OTA] Rejected — telling client to retry in %us: %s\n",
                            (unsigned)otaRetryAfterSec, otaRejectReason.c_str());
-                wb_ota_history::record(millis() / 1000, WB_VERSION, totalSize, false,
+                wb_ota_history::recordOta(millis() / 1000, WB_VERSION, totalSize, false,
                                        (String("rejected: ") + otaRejectReason).c_str());
                 http.sendHeader("Retry-After", String(otaRetryAfterSec));
                 String body = "{\"error\":\"" + otaRejectReason
@@ -2626,12 +2641,12 @@ static void handleOtaUpload() {
                 http.send(503, "application/json", body);
             } else {
                 Log.println("[OTA] Aborted due to errors");
-                wb_ota_history::record(millis() / 1000, WB_VERSION, totalSize, false, "aborted");
+                wb_ota_history::recordOta(millis() / 1000, WB_VERSION, totalSize, false, "aborted");
                 http.send(500, "text/plain", "Upload failed");
             }
         } else if (Update.end(true)) {
             Log.printf("[OTA] Success! %u bytes written to partition\n", totalSize);
-            wb_ota_history::record(millis() / 1000, WB_VERSION, totalSize, true, "ok");
+            wb_ota_history::recordOta(millis() / 1000, WB_VERSION, totalSize, true, "ok");
             // Mark this device as OTA-proven so future flashes use the
             // relaxed 15s admission window instead of the conservative
             // 60s one. Safe to call repeatedly — internally NVS-cached.
@@ -2641,7 +2656,7 @@ static void handleOtaUpload() {
             ESP.restart();
         } else {
             Log.printf("[OTA] End failed: %s\n", Update.errorString());
-            wb_ota_history::record(millis() / 1000, WB_VERSION, totalSize, false, Update.errorString());
+            wb_ota_history::recordOta(millis() / 1000, WB_VERSION, totalSize, false, Update.errorString());
             http.send(500, "text/plain", Update.errorString());
         }
     } else if (upload.status == UPLOAD_FILE_ABORTED) {

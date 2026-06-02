@@ -3,6 +3,7 @@
 #include "wb_ble.h"
 #include "wb_mqtt.h"
 #include "wb_version.h"
+#include "wb_ota_history.h"
 #include <Preferences.h>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
@@ -143,7 +144,14 @@ void markHealthy() {
     // the partition would revert on the next reboot. Safe to call even
     // if rollback isn't enabled — it's a no-op then.
     esp_ota_mark_app_valid_cancel_rollback();
-    Log.println("[Health] Marked healthy — boot counter cleared, OTA validated");
+    // Record that THIS firmware reached healthy state. Pairs with the
+    // wb_ota_history `ota` entries (written by the *previous* firmware
+    // at upload time) to give /info a complete chronological story of
+    // "what got installed and which ones actually booted ok". Without
+    // this half, the history shows uploads but not which versions ran
+    // successfully — Peter's 2.4.2 follow-up.
+    wb_ota_history::recordBoot(millis() / 1000, WB_VERSION);
+    Log.println("[Health] Marked healthy — boot counter cleared, OTA validated, boot recorded");
 }
 
 bool isHealthy() { return _healthy; }

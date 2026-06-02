@@ -3,6 +3,14 @@
 #include <Preferences.h>
 #include <ArduinoJson.h>
 
+// loop_max_ms tripwire — defined in wb_web.cpp, written every loop
+// iteration by main.cpp. We reset it inside clear() so the existing
+// "Clear counters" button on /info also resets the tripwire metric;
+// previously it stuck at its boot-time max until the next reboot,
+// which left users no recourse for clearing a one-off outlier
+// (Peter's 586 ms observation on 2.4.3).
+extern volatile uint32_t g_loopMaxMs;
+
 namespace wb_diag {
 
 static const char* NVS_NS = "wbdiag";
@@ -161,7 +169,9 @@ void clear() {
     _bleLongest = _mqttLongest = 0;
     _bleLastReconnect = _mqttLastReconnect = 0;
     _bleDownStart = _mqttDownStart = 0;
-    Log.println("[Diag] Counters cleared");
+    _loopMaxGateUntilMs = 0;
+    g_loopMaxMs = 0;
+    Log.println("[Diag] Counters cleared (incl. loop_max_ms tripwire)");
 }
 
 }  // namespace wb_diag
