@@ -140,7 +140,8 @@ static void publishDiscoverySwitch(PubSubClient& mqtt, const char* objectId,
 static void publishDiscoveryNumber(PubSubClient& mqtt, const char* objectId,
     const char* name, const char* icon, const char* cmdTopic,
     const char* stateTopic, const char* valTemplate,
-    float minVal, float maxVal, float step, const char* unit = nullptr) {
+    float minVal, float maxVal, float step, const char* unit = nullptr,
+    const char* mode = nullptr) {
 
     const WBConfig& cfg = configMgr.get();
     String topic = cfg.haDiscoveryPrefix + "/number/" + cfg.haDeviceId + "/" + objectId + "/config";
@@ -158,6 +159,10 @@ static void publishDiscoveryNumber(PubSubClient& mqtt, const char* objectId,
     doc["availability_topic"] = availTopic();
     if (icon) doc["icon"] = icon;
     if (unit) doc["unit_of_measurement"] = unit;
+    // HA's "box" mode renders an exact-value input field; default is a
+    // slider. Used by the Auto Lock Timeout entity so users can type
+    // 5/10/30 directly instead of dragging across a 60-step range.
+    if (mode) doc["mode"] = mode;
 
     populateDeviceBlock(doc["device"].to<JsonObject>());
 
@@ -398,17 +403,26 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
 
     // ---- Native HA entity handlers (Batch 1) ----
     } else if (sub == "autolock_enable") {
-        // switch: "1"/"ON" = enable, else disable. Reuses existing time value.
+        // s_alo takes a bare scalar in seconds: 0 = off, N = on, lock
+        // after N seconds. Previous version sent an object payload that
+        // the charger silently ignored (benvanmierloo PR #9).
+        // Toggling ON restores the last-known timeout from BLE polling
+        // so the user doesn't see the timeout reset to a default.
         String s = payload; s.toLowerCase();
-        int en = (s == "1" || s == "on" || s == "true") ? 1 : 0;
-        String p = "{\"enabled\":" + String(en) + ",\"time\":60}";
-        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, p.c_str());
+        bool on = (s == "1" || s == "on" || s == "true");
+        int mins = wallboxBLE.lastAutolockMin();
+        if (mins < 1) mins = 1;
+        int secs = on ? mins * 60 : 0;
+        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, String(secs).c_str());
 
     } else if (sub == "autolock_time") {
-        int secs = atoi(payload);
-        if (secs < 10) secs = 60;
-        String p = "{\"enabled\":1,\"time\":" + String(secs) + "}";
-        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, p.c_str());
+        // HA sends minutes (matching the Wallbox app); charger wants
+        // seconds. Setting a timeout implies enabling auto-lock.
+        int mins = atoi(payload);
+        if (mins < 1) mins = 1;
+        if (mins > 60) mins = 60;
+        wallboxBLE._lastAutolockMin = mins;  // remember for the next switch ON
+        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, String(mins * 60).c_str());
 
     } else if (sub == "eco_mode") {
         // HA sends: "Off", "Full Green (Solar Only)", "Solar + Grid"
@@ -691,7 +705,7 @@ void WallboxMQTT::sendDiscovery() {
     // Auto Lock timeout (number)
     publishDiscoveryNumber(*_client, "autolock_time", "Auto Lock Timeout",
         "mdi:timer-lock", cmdAutolockTime.c_str(), sTopic_,
-        "{{ value_json.autolock_time | default(60) }}", 10, 600, 10, "s");
+        "{{ value_json.autolock_time | default(1) }}", 1, 60, 1, "min", "box");
 
     // Eco Smart Mode (select). BAPI esm: 0=Off, 1=Full Green, 2=Solar+Grid
     static const char* ecoOptions[] = {"Off", "Full Green (Solar Only)", "Solar + Grid"};

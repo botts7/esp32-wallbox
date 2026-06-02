@@ -910,13 +910,29 @@ void WallboxBLE::_pollSettings() {
     String r1 = sendCommand(bapi::MET_GET_AUTOLOCK, "null", SETTINGS_TIMEOUT_MS);
     if (!r1.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r1) == DeserializationError::Ok) {
+            // g_alo returns the lock timeout in seconds as a bare scalar:
+            //   {"r": 0}   = auto-lock off
+            //   {"r": 60}  = on, lock 60 s after disconnect
+            // Older or hypothetical object form {r:{enabled, time}} is kept
+            // as a defensive fallback. Confirmed bare-scalar on Pulsar MAX
+            // (per benvanmierloo PR #9 + live probe). The HA timeout shows
+            // minutes to match the Wallbox app — converted at the BAPI
+            // boundary.
+            int t = 0;
             if (d["r"].is<JsonObject>()) {
-                merged["autolock"] = d["r"]["enabled"] | 0;
-                merged["autolock_time"] = d["r"]["time"] | 60;
+                t = d["r"]["time"] | 0;
+                bool en = d["r"]["enabled"].as<bool>() || t > 0;
+                merged["autolock"] = en ? 1 : 0;
             } else {
-                merged["autolock"] = d["r"] | 0;
-                merged["autolock_time"] = 60;
+                t = d["r"].as<int>();
+                merged["autolock"] = t > 0 ? 1 : 0;
             }
+            if (t > 0) {
+                int mins = (t + 30) / 60;  // round-to-nearest, clamp >=1
+                if (mins < 1) mins = 1;
+                _lastAutolockMin = mins;
+            }
+            merged["autolock_time"] = _lastAutolockMin;
         }
     }
     if (_state != State::CONNECTED) return;
@@ -933,7 +949,11 @@ void WallboxBLE::_pollSettings() {
     String r3 = sendCommand("g_psh", "null", SETTINGS_TIMEOUT_MS);
     if (!r3.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r3) == DeserializationError::Ok) {
-            merged["power_sharing"] = d["r"]["dyps"] | 0;
+            // dyps may arrive as bool true/false instead of 1/0 on some
+            // firmwares (benvanmierloo PR #9). The default-coalesce `| 0`
+            // returns 0 on a bool true since ArduinoJson treats them as
+            // different types — cast through bool then int to be safe.
+            merged["power_sharing"] = d["r"]["dyps"].as<bool>() ? 1 : 0;
         }
     }
     if (_state != State::CONNECTED) return;
@@ -941,7 +961,7 @@ void WallboxBLE::_pollSettings() {
     String r4 = sendCommand("g_phsw", "null", SETTINGS_TIMEOUT_MS);
     if (!r4.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r4) == DeserializationError::Ok) {
-            merged["phase_switch"] = d["r"]["enabled"] | 0;
+            merged["phase_switch"] = d["r"]["enabled"].as<bool>() ? 1 : 0;
         }
     }
     if (_state != State::CONNECTED) return;

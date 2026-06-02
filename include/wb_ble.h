@@ -283,6 +283,18 @@ private:
     // Set true once fw_v_ is read so the main loop can re-trigger HA
     // discovery with the real charger app FW in dev["sw_version"].
     bool    _discoveryStale = false;
+
+public:
+    // Last observed auto-lock timeout in minutes (g_alo, converted from
+    // seconds). Defaults to 1 so toggling the HA Auto Lock switch ON
+    // without ever having seen a non-zero value still produces a
+    // sensible 1-minute window. Persisted in RAM across BLE polls; not
+    // in NVS (no need — the next poll re-reads from the charger).
+    // peter-mcc + benvanmierloo PR #9 follow-up.
+    int     _lastAutolockMin = 1;
+    int     lastAutolockMin() const { return _lastAutolockMin; }
+
+private:
     String _chargerModel = "max";
     String _prevFw;
     bool _fwChanged = false;
