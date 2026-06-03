@@ -4,6 +4,69 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.6.0] - 2026-06-03
+
+Architectural fix for the main-loop wedge @peter-mcc reported on 2.5.1:
+his `loop_max_ms` metric showed 80 000 ms overnight, root-caused to
+the HA-discovery burst hitting a stalled MQTT broker and compounding
+~60 sync TCP writes in series.
+
+### Fixed
+
+- **HA discovery is now bounded to one publish per main-loop
+  iteration.** `WallboxMQTT::sendDiscovery()` now ARMS a state
+  machine and returns immediately; a new `tickDiscovery()` called
+  from the main loop publishes one entity per tick. Under a healthy
+  broker the burst still completes in ~600 ms wall-clock (the
+  existing `delay(10)` per loop iter × 57 ticks); under a wedged
+  broker the per-loop cost is now bounded to **one socket timeout**
+  (~1 s) instead of compounding to tens of seconds.
+- **MQTT socket timeout dropped from 5 s default to 1 s.** Combined
+  with one-per-tick, worst-case `loop_max_ms` during a broker outage
+  is now ~1100 ms instead of 80 000 ms. Marginal links may see a
+  publish fail that would previously have succeeded; both discovery
+  (idempotent retained) and state publishes (next BLE-cache advance
+  re-publishes) self-heal.
+
+### Changed
+
+- **HA Device page reorganised**: ~12 debug entities (Loop Max ms,
+  Heap Free, Reentry Tripwire, etc.) now carry
+  `entity_category: diagnostic` so HA collapses them into a separate
+  section instead of mixing with user-facing sensors. peter-mcc
+  2.5.1 feedback on metric clutter.
+- **Dropped "Status Code (raw)" sensor** (was exposing
+  `r_sta.charger_status` as a raw int with an undocumented enum).
+  The friendly "Charger Status" sensor from PR #7 is the canonical
+  user-facing value. Migration: `sendDiscovery()` publishes an empty
+  retained payload to the old discovery topic so existing HA
+  installs delete the stale entity.
+
+### Live-validation on the maintainer's Pulsar MAX
+
+- `loop_max_ms` post-burst: **29 ms** (was 80 000 ms on 2.5.1
+  worst-case, ~500 ms typical)
+- All 56 entities populate in HA within ~1 s under a healthy broker
+- `Charger Firmware` flips from gateway-fw fallback to charger app
+  FW (6.11.16) within ~1 s of BLE init completing — confirms the
+  state machine re-arms correctly on `discoveryStale`
+- Toggle paths (Auto Lock, Charging, Lock) round-trip cleanly
+- Diagnostic-category entities render in their own HA section
+
+### Architecture note
+
+This is the third "move blocking work off the main loop" change on
+this branch. rc16 moved BLE polling onto a FreeRTOS task. 2.4.3
+gated `loop_max_ms` during reconnect windows. 2.6.0 lifts the HA
+discovery burst out of the main loop's hot path. Remaining
+main-loop blockers identified by the 2.5.1 audit and deferred:
+
+- `WiFi.reconnect()` blocking 15-30 s on a stuck AP
+- `/api/command` BLE-passthrough blocking up to 5 s
+
+These are smaller and more targeted; queued for future releases if
+real-world wedges keep landing on them.
+
 ## [2.5.1] - 2026-06-02
 
 Root-cause fix following @peter-mcc's 2.5.0 feedback. He reported
