@@ -24,8 +24,20 @@ public:
     // Publish raw BAPI response on a per-method topic
     void publishResponse(const char* method, const String& json);
 
-    // Send HA MQTT auto-discovery configs
+    // Arm the HA auto-discovery state machine. Returns immediately
+    // (~O(1)) — the actual ~60 sync MQTT publishes are spread across
+    // subsequent main-loop iterations via tickDiscovery(). Previously
+    // this function ran all publishes inline, which on an unhealthy
+    // broker could block the main loop for tens of seconds while TCP
+    // writes hit their socket timeouts in series. peter-mcc 2.5.1
+    // observation: 80 s loop_max_ms overnight.
     void sendDiscovery();
+
+    // Publish AT MOST ONE discovery entity per call. Drives the state
+    // machine armed by sendDiscovery(). Idempotent and no-op once the
+    // burst is complete (or while MQTT is disconnected). Called once
+    // per main loop iteration from main.cpp.
+    void tickDiscovery();
 
 private:
     void _connect();
@@ -39,6 +51,21 @@ private:
     uint32_t _lastConnectAttempt = 0;
     bool _discoveryPublished = false;
     bool _wasConnected = false;  // edge-trigger for wb_diag counters
+
+    // Discovery state machine. SIZE_MAX = idle/complete; 0..N-1 = next
+    // entity to publish on the next tickDiscovery() call.
+    size_t _discoveryIndex = SIZE_MAX;
+    // Per-arm topic cache. Populated once in sendDiscovery() from
+    // configMgr/baseTopic()/cmdPrefix(); read by tickDiscovery() cases.
+    // Lifting these out of the per-iteration switch means we don't
+    // re-walk configMgr or rebuild the same Strings 60 times.
+    struct DiscoveryTopics {
+        String sTopic, rTopic, gTopic, mTopic, nTopic, setTopic;
+        String cmdCurrent, cmdCharging, cmdLock, cmdReboot;
+        String cmdAutolockEnable, cmdAutolockTime;
+        String cmdEcoMode, cmdEcoPower;
+        String cmdPowerShare, cmdPhaseSwitch, cmdHalo, cmdTimezone;
+    } _discTopics;
 };
 
 extern WallboxMQTT wallboxMQTT;

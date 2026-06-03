@@ -17,6 +17,25 @@ WallboxMQTT wallboxMQTT;
 static WiFiClient wifiClient;
 static PubSubClient mqttClient(wifiClient);
 
+// Static option arrays for the HA discovery `select` entities. Lifted
+// out of sendDiscovery() so the state-machine switch can reference
+// them; declared `const char*` (without inner const) to match the
+// publishDiscoverySelect signature.
+static const char* kEcoOptions[]  = {"Off", "Full Green (Solar Only)", "Solar + Grid"};
+static const char* kHaloOptions[] = {"Off", "Low", "Medium", "High"};
+static const char* kTzOptions[]   = {
+    "Australia/Sydney", "Australia/Melbourne", "Australia/Brisbane", "Australia/Perth",
+    "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid",
+    "America/New_York", "America/Chicago", "America/Los_Angeles",
+    "Asia/Tokyo", "Asia/Shanghai", "Asia/Singapore",
+    "Pacific/Auckland", "UTC"
+};
+
+// Total number of discovery entities the state machine publishes.
+// Keep in sync with the cases in tickDiscovery(). Bumping this requires
+// adding a new case and renumbering nothing — cases are dense 0..N-1.
+static const size_t kDiscoveryCount = 57;
+
 // ---- HA Discovery helpers ----
 
 // Single source of truth for the `device` block embedded in every HA
@@ -75,7 +94,8 @@ static void publishDiscoveryEntity(PubSubClient& mqtt, const char* component,
     const char* objectId, const char* name, const char* icon,
     const char* stateTopic, const char* valTemplate,
     const char* unit = nullptr, const char* devClass = nullptr,
-    const char* cmdTopic = nullptr, const char* stateClass = nullptr) {
+    const char* cmdTopic = nullptr, const char* stateClass = nullptr,
+    const char* entityCategory = nullptr) {
 
     const WBConfig& cfg = configMgr.get();
     String topic = cfg.haDiscoveryPrefix + "/" + component + "/" + cfg.haDeviceId + "/" + objectId + "/config";
@@ -92,6 +112,12 @@ static void publishDiscoveryEntity(PubSubClient& mqtt, const char* component,
     if (devClass) doc["device_class"] = devClass;
     if (stateClass) doc["state_class"] = stateClass;
     if (cmdTopic) doc["command_topic"] = cmdTopic;
+    // HA recognises entity_category="diagnostic" — collapses these
+    // entities into a separate "Diagnostic" section on the device
+    // page, out of the main Sensors / Controls list. Use for
+    // observability counters (max_reentry, loop_max_ms, heap_free,
+    // etc.) that are useful for debugging but not for normal use.
+    if (entityCategory) doc["entity_category"] = entityCategory;
 
     // Device block — populated by the shared helper so every helper
     // emits the same fields. See populateDeviceBlock() comment for
@@ -233,6 +259,19 @@ static void publishDiscoverySelect(PubSubClient& mqtt, const char* objectId,
 
 void WallboxMQTT::begin() {
     const WBConfig& cfg = configMgr.get();
+    // Bound per-publish socket blocking. PubSubClient writes are sync
+    // and lwIP's TCP write timeout defaults to whatever the kernel
+    // says (frequently 5-30 s). On a wedged broker each publish ends
+    // up consuming the full timeout, and the ~60-entity discovery
+    // burst compounds to a multi-tens-of-seconds main-loop wedge
+    // (peter-mcc 2.5.1 saw 80 s). Tightening to 1 s bounds the
+    // per-publish worst case at the cost of failing a few publishes
+    // that would otherwise have succeeded on a marginal link. The
+    // tickDiscovery() state machine retries on the next arm; cached
+    // state publishes re-fire on the next BLE seq advance — both
+    // self-healing.
+    // Arduino-ESP32 WiFiClient::setTimeout takes milliseconds.
+    wifiClient.setTimeout(1000);
     mqttClient.setServer(cfg.mqttHost.c_str(), cfg.mqttPort);
     mqttClient.setCallback(_mqttCallback);
     mqttClient.setBufferSize(1024);
@@ -535,57 +574,120 @@ void WallboxMQTT::publishResponse(const char* method, const String& json) {
 
 // ---- HA Auto-Discovery ----
 
+// =================== HA Discovery state machine ====================
+//
+// sendDiscovery() ARMS the state machine: populates _discTopics from
+// the current config and resets _discoveryIndex to 0. Returns instantly.
+// Then on every main-loop iteration (post-MQTT-connected), the main
+// task calls tickDiscovery() which publishes EXACTLY ONE entity from
+// the switch below and increments the index. When the index reaches
+// kDiscoveryCount, the index is set to SIZE_MAX (idle/complete).
+//
+// Why: PubSubClient is sync. A single ~60-entity burst on a wedged
+// broker can compound to tens-of-seconds wall-clock as each
+// publish hits the TCP write timeout in series — peter-mcc saw
+// loop_max_ms = 80,000 ms overnight with 2.5.1. Per-tick publishing
+// bounds the per-iteration cost to ONE publish, so the worst-case
+// loop_max_ms during a broker outage is ~1 socket timeout
+// (wifiClient.setTimeout(1000) is set in begin()).
+//
+// On HA's side, autodiscovery is per-message — entities are merged
+// by `identifiers` from each payload's device block, so partial bursts
+// are safe; HA just gradually populates the device page.
 void WallboxMQTT::sendDiscovery() {
-    Log.println("[MQTT] Publishing HA discovery...");
+    Log.println("[MQTT] HA discovery armed — publishing one entity per main-loop tick");
 
-    String sTopic = statusTopic();
-    String rTopic = realtimeTopic();
+    // ---- 2.6.0 cleanup: remove discovery for entities that we no
+    // longer publish, so existing HA installs don't keep showing them
+    // as stale entities. Empty retained payload to the discovery topic
+    // is HA's documented "delete this entity" mechanism.
+    {
+        const WBConfig& cfg = configMgr.get();
+        // Status Code (raw) — was case 9 in older code, dropped in
+        // 2.6.0 as truly debug-only (the friendly Charger Status
+        // sensor is the canonical user-facing value).
+        String stale = cfg.haDiscoveryPrefix + "/sensor/" + cfg.haDeviceId + "/charger_status_code/config";
+        _client->publish(stale.c_str(), "", true);
+    }
+
+    // Populate the topic cache once per arm. The switch cases read
+    // from _discTopics by reference.
+    _discTopics.sTopic   = statusTopic();
+    _discTopics.rTopic   = realtimeTopic();
+    _discTopics.gTopic   = baseTopic() + "/response/gateway";
+    _discTopics.mTopic   = baseTopic() + "/response/meter";
+    _discTopics.nTopic   = baseTopic() + "/response/notifications";
+    _discTopics.setTopic = baseTopic() + "/settings";
+
     String cPrefix = cmdPrefix();
-    String gTopic = baseTopic() + "/response/gateway";
-    const char* st = sTopic.c_str();
-    const char* rt = rTopic.c_str();
+    _discTopics.cmdCurrent       = cPrefix + "current";
+    _discTopics.cmdCharging      = cPrefix + "charging";
+    _discTopics.cmdLock          = cPrefix + "lock";
+    _discTopics.cmdReboot        = cPrefix + "reboot";
+    _discTopics.cmdAutolockEnable= cPrefix + "autolock_enable";
+    _discTopics.cmdAutolockTime  = cPrefix + "autolock_time";
+    _discTopics.cmdEcoMode       = cPrefix + "eco_mode";
+    _discTopics.cmdEcoPower      = cPrefix + "eco_power";
+    _discTopics.cmdPowerShare    = cPrefix + "power_sharing";
+    _discTopics.cmdPhaseSwitch   = cPrefix + "phase_switch";
+    _discTopics.cmdHalo          = cPrefix + "halo";
+    _discTopics.cmdTimezone      = cPrefix + "timezone";
 
-    // Status enum was previously dispatched by charger model (Plus 0-18
-    // vs MAX cloud-codes) — wrong. Both Pulsar MAX and Plus return the
-    // same local 0-18 enum per jagheterfredrik/wallbox-ble; the MAX
-    // cloud-codes table was inherited from an older Wallbox cloud API
-    // and never matched the actual BLE r_dat.st values. Removed the
-    // dispatch; the templates below inline the local enum directly,
-    // and car-connected is computed in firmware (publishCarConnected)
-    // because it needs to combine st with r_sta.charger_status to
-    // disambiguate the locked-with-car case (st=6 carries no plug
-    // info on its own). benvanmierloo PR #7.
+    _discoveryIndex = 0;
+}
 
-    // Sensors from r_dat (status)
-    publishDiscoveryEntity(*_client, "sensor", "charging_power", "Charging Power",
-        "mdi:flash", st, "{{ value_json.r.cp | round(2) }}", "kW", "power", nullptr, "measurement");
+void WallboxMQTT::tickDiscovery() {
+    if (_discoveryIndex == SIZE_MAX) return;
+    if (!isConnected()) return;
+    if (_discoveryIndex >= kDiscoveryCount) {
+        Log.printf("[MQTT] HA discovery published (%u entities)\n", (unsigned)kDiscoveryCount);
+        _discoveryIndex = SIZE_MAX;
+        return;
+    }
+
+    // Short aliases mirroring the original locals so the switch cases
+    // below stay one-for-one with the previous inline body.
+    const char* st = _discTopics.sTopic.c_str();
+    const char* rt = _discTopics.rTopic.c_str();
+    const char* gTopic_c = _discTopics.gTopic.c_str();
+    const char* mt = _discTopics.mTopic.c_str();
+    const char* nt = _discTopics.nTopic.c_str();
+    const char* sTopic_ = _discTopics.setTopic.c_str();
+
+    // Status enum: both MAX and Plus use the same local 0-18 enum
+    // per jagheterfredrik/wallbox-ble + benvanmierloo PR #7. The
+    // templates below inline that enum directly; car-connected is
+    // computed in firmware (publishCarConnected) because st=6 LOCKED
+    // carries no plug info on its own and needs r_sta.charger_status
+    // to disambiguate.
+    switch (_discoveryIndex) {
+
+    // ---- Sensors from r_dat (status topic) ----
+    case 0: publishDiscoveryEntity(*_client, "sensor", "charging_power", "Charging Power",
+        "mdi:flash", st, "{{ value_json.r.cp | round(2) }}", "kW", "power", nullptr, "measurement"); break;
 
     // Charging currents are in deciamps (tenths of amps), divide by 10
-    publishDiscoveryEntity(*_client, "sensor", "current_l1", "Charging Current L1",
-        "mdi:current-ac", st, "{{ (value_json.r.L1 / 10) | round(1) }}", "A", "current", nullptr, "measurement");
-
-    publishDiscoveryEntity(*_client, "sensor", "current_l2", "Charging Current L2",
-        "mdi:current-ac", st, "{{ (value_json.r.L2 / 10) | round(1) }}", "A", "current", nullptr, "measurement");
-
-    publishDiscoveryEntity(*_client, "sensor", "current_l3", "Charging Current L3",
-        "mdi:current-ac", st, "{{ (value_json.r.L3 / 10) | round(1) }}", "A", "current", nullptr, "measurement");
+    case 1: publishDiscoveryEntity(*_client, "sensor", "current_l1", "Charging Current L1",
+        "mdi:current-ac", st, "{{ (value_json.r.L1 / 10) | round(1) }}", "A", "current", nullptr, "measurement"); break;
+    case 2: publishDiscoveryEntity(*_client, "sensor", "current_l2", "Charging Current L2",
+        "mdi:current-ac", st, "{{ (value_json.r.L2 / 10) | round(1) }}", "A", "current", nullptr, "measurement"); break;
+    case 3: publishDiscoveryEntity(*_client, "sensor", "current_l3", "Charging Current L3",
+        "mdi:current-ac", st, "{{ (value_json.r.L3 / 10) | round(1) }}", "A", "current", nullptr, "measurement"); break;
 
     // en/gen/grid are in 10-Wh units (centi-kWh), divide by 100 for kWh
-    publishDiscoveryEntity(*_client, "sensor", "energy_session", "Session Energy",
-        "mdi:lightning-bolt", st, "{{ (value_json.r.en / 100) | round(2) }}", "kWh", "energy", nullptr, "total_increasing");
+    case 4: publishDiscoveryEntity(*_client, "sensor", "energy_session", "Session Energy",
+        "mdi:lightning-bolt", st, "{{ (value_json.r.en / 100) | round(2) }}", "kWh", "energy", nullptr, "total_increasing"); break;
+    case 5: publishDiscoveryEntity(*_client, "sensor", "grid_energy", "Grid Energy",
+        "mdi:transmission-tower", st, "{{ (value_json.r.grid / 100) | round(2) }}", "kWh", "energy", nullptr, "total_increasing"); break;
+    case 6: publishDiscoveryEntity(*_client, "sensor", "green_energy", "Green Energy",
+        "mdi:leaf", st, "{{ (value_json.r.gen / 100) | round(2) }}", "kWh", "energy", nullptr, "total_increasing"); break;
 
-    publishDiscoveryEntity(*_client, "sensor", "grid_energy", "Grid Energy",
-        "mdi:transmission-tower", st, "{{ (value_json.r.grid / 100) | round(2) }}", "kWh", "energy", nullptr, "total_increasing");
+    // Discharge energy — populates on bidirectional chargers (Quasar 2 V2H).
+    // Always 0 on one-way chargers (Pulsar Plus/MAX, Copper, Commander).
+    case 7: publishDiscoveryEntity(*_client, "sensor", "discharge_energy", "Discharge Energy (V2H)",
+        "mdi:battery-arrow-up", st, "{{ (value_json.r.den / 1000) | round(3) }}", "kWh", "energy", nullptr, "total_increasing"); break;
 
-    publishDiscoveryEntity(*_client, "sensor", "green_energy", "Green Energy",
-        "mdi:leaf", st, "{{ (value_json.r.gen / 100) | round(2) }}", "kWh", "energy", nullptr, "total_increasing");
-
-    // Discharge energy — populates on bidirectional chargers (Quasar 2 V2H)
-    // Always 0 on one-way chargers (Pulsar Plus/MAX, Copper, Commander)
-    publishDiscoveryEntity(*_client, "sensor", "discharge_energy", "Discharge Energy (V2H)",
-        "mdi:battery-arrow-up", st, "{{ (value_json.r.den / 1000) | round(3) }}", "kWh", "energy", nullptr, "total_increasing");
-
-    publishDiscoveryEntity(*_client, "sensor", "status", "Charger Status",
+    case 8: publishDiscoveryEntity(*_client, "sensor", "status", "Charger Status",
         "mdi:ev-station", st,
         "{% set s = value_json.r.st %}"
         "{% set m = {0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',"
@@ -594,41 +696,40 @@ void WallboxMQTT::sendDiscovery() {
         "10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',"
         "13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',"
         "16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)'} %}"
-        "{{ m.get(s, 'Code ' ~ s) }}");
+        "{{ m.get(s, 'Code ' ~ s) }}"); break;
 
-    // Sensors from r_sta (realtime)
-    // r_sta.charger_status uses a different, unverified enum than r_dat.st
-    // (the authoritative status). Expose it as a raw code only — the
-    // "Charger Status" sensor above (from r_dat.st) is the canonical label.
-    publishDiscoveryEntity(*_client, "sensor", "charger_status_code", "Status Code (raw)",
-        "mdi:information", rt,
-        "{{ value_json.r.charger_status }}");
+    // ---- Sensors from r_sta (realtime topic) ----
+    // Case 9 — formerly "Status Code (raw)" exposing r_sta.charger_status
+    // as a raw int. Dropped in 2.6.0 as debug-only; the friendly
+    // "Charger Status" sensor above (from r_dat.st, case 8) is the
+    // canonical user-facing value. Kept as a no-op slot so we don't
+    // have to renumber 47 subsequent cases. The existing HA entity is
+    // deleted via the empty-retained-payload publish in sendDiscovery()
+    // above.
+    case 9: break;
 
-    publishDiscoveryEntity(*_client, "sensor", "lock_status", "Lock Status",
+    case 10: publishDiscoveryEntity(*_client, "sensor", "lock_status", "Lock Status",
         "mdi:lock", rt,
-        "{% if value_json.r.lock_status == 0 %}Unlocked{% else %}Locked{% endif %}");
+        "{% if value_json.r.lock_status == 0 %}Unlocked{% else %}Locked{% endif %}"); break;
 
-    publishDiscoveryEntity(*_client, "sensor", "max_available_current", "Max Available Current",
-        "mdi:current-ac", rt, "{{ value_json.r.max_available_current }}", "A");
+    case 11: publishDiscoveryEntity(*_client, "sensor", "max_available_current", "Max Available Current",
+        "mdi:current-ac", rt, "{{ value_json.r.max_available_current }}", "A"); break;
 
-    publishDiscoveryEntity(*_client, "sensor", "ocpp_status", "OCPP Status",
+    case 12: publishDiscoveryEntity(*_client, "sensor", "ocpp_status", "OCPP Status",
         "mdi:lan-connect", rt,
         "{% set s = value_json.r.ocpp_status %}"
-        "{% if s == 0 %}Not Available{% elif s == 1 %}Not Configured{% elif s == 2 %}Connected{% elif s == 3 %}Charging{% else %}Code {{ s }}{% endif %}");
+        "{% if s == 0 %}Not Available{% elif s == 1 %}Not Configured{% elif s == 2 %}Connected{% elif s == 3 %}Charging{% else %}Code {{ s }}{% endif %}"); break;
 
-    // Binary sensor: car connected (charging power > 0 or status indicates connected)
-    {
+    // Binary sensor: car connected — computed in firmware (publishCarConnected)
+    // because it needs both r_dat.st AND r_sta.charger_status to
+    // disambiguate the locked-with-car case (st=6 carries no plug info).
+    case 13: {
         const WBConfig& bsCfg = configMgr.get();
         String topic = bsCfg.haDiscoveryPrefix + "/binary_sensor/" + bsCfg.haDeviceId + "/car_connected/config";
         JsonDocument doc;
         doc["name"] = "Car Connected";
         doc["unique_id"] = bsCfg.haDeviceId + "_car_connected";
         doc["object_id"] = bsCfg.haDeviceId + "_car_connected";
-        // Computed in firmware (publishCarConnected) because it needs both
-        // the status (st) and realtime (charger_status) responses, which
-        // arrive on separate topics — a single value_template can't see
-        // both. Locally st=6 means LOCKED with no plug-info embedded; we
-        // disambiguate locked-with-car using r_sta.charger_status.
         doc["state_topic"] = baseTopic() + "/car_connected";
         doc["payload_on"] = "ON";
         doc["payload_off"] = "OFF";
@@ -641,241 +742,186 @@ void WallboxMQTT::sendDiscovery() {
         _client->beginPublish(topic.c_str(), pl.length(), true);
         _client->print(pl);
         _client->endPublish();
-    }
+    } break;
 
-    // Number: max charging current (6-32A)
-    String cmdCurrent = cPrefix + "current";
-    String cmdCharging = cPrefix + "charging";
-    String cmdLock = cPrefix + "lock";
-    String cmdReboot = cPrefix + "reboot";
+    // ---- Controls (number / switch / button) ----
+    case 14: publishDiscoveryNumber(*_client, "max_charging_current", "Max Charging Current",
+        "mdi:current-ac", _discTopics.cmdCurrent.c_str(), st,
+        "{{ value_json.r.cur }}", 6, 32, 1, "A"); break;
 
-    publishDiscoveryNumber(*_client, "max_charging_current", "Max Charging Current",
-        "mdi:current-ac", cmdCurrent.c_str(), st,
-        "{{ value_json.r.cur }}", 6, 32, 1, "A");
-
-    // Switch: charging on/off
-    publishDiscoverySwitch(*_client, "charging", "Charging",
-        "mdi:ev-station", cmdCharging.c_str(), st,
+    case 15: publishDiscoverySwitch(*_client, "charging", "Charging",
+        "mdi:ev-station", _discTopics.cmdCharging.c_str(), st,
         "{% if value_json.r.st == 1 %}1{% else %}0{% endif %}",
-        "start", "stop");
+        "start", "stop"); break;
 
-    // Switch: lock
-    publishDiscoverySwitch(*_client, "lock", "Charger Lock",
-        "mdi:lock", cmdLock.c_str(), rt,
+    case 16: publishDiscoverySwitch(*_client, "lock", "Charger Lock",
+        "mdi:lock", _discTopics.cmdLock.c_str(), rt,
         "{% if value_json.r.lock_status == 1 %}1{% else %}0{% endif %}",
-        "lock", "unlock");
+        "lock", "unlock"); break;
 
-    // Button: reboot
-    publishDiscoveryButton(*_client, "reboot", "Reboot Charger",
-        "mdi:restart", cmdReboot.c_str());
+    case 17: publishDiscoveryButton(*_client, "reboot", "Reboot Charger",
+        "mdi:restart", _discTopics.cmdReboot.c_str()); break;
 
-    // Sensor: BLE gateway info
-    publishDiscoveryEntity(*_client, "sensor", "ble_rssi", "BLE Signal",
-        "mdi:bluetooth-connect", gTopic.c_str(),
-        "{{ value_json.rssi }}", "dBm", "signal_strength", nullptr, "measurement");
+    // BLE gateway signal — RSSI to the charger (gTopic).
+    case 18: publishDiscoveryEntity(*_client, "sensor", "ble_rssi", "BLE Signal",
+        "mdi:bluetooth-connect", gTopic_c,
+        "{{ value_json.rssi }}", "dBm", "signal_strength", nullptr, "measurement", "diagnostic"); break;
 
-    // Energy meter sensors (from r_dca, published to wallbox/response/meter)
-    String mTopic = baseTopic() + "/response/meter";
-    const char* mt = mTopic.c_str();
-
-    publishDiscoveryEntity(*_client, "sensor", "mains_voltage", "Mains Voltage",
+    // ---- Energy meter sensors (from r_dca, on response/meter topic) ----
+    case 19: publishDiscoveryEntity(*_client, "sensor", "mains_voltage", "Mains Voltage",
         "mdi:flash-triangle", mt,
-        "{{ value_json.r.v1 }}", "V", "voltage", nullptr, "measurement");
-
-    publishDiscoveryEntity(*_client, "sensor", "grid_power", "House Power",
+        "{{ value_json.r.v1 }}", "V", "voltage", nullptr, "measurement"); break;
+    case 20: publishDiscoveryEntity(*_client, "sensor", "grid_power", "House Power",
         "mdi:home-lightning-bolt", mt,
-        "{{ value_json.r.p1 }}", "W", "power", nullptr, "measurement");
-
-    publishDiscoveryEntity(*_client, "sensor", "meter_current", "House Current",
+        "{{ value_json.r.p1 }}", "W", "power", nullptr, "measurement"); break;
+    case 21: publishDiscoveryEntity(*_client, "sensor", "meter_current", "House Current",
         "mdi:current-ac", mt,
-        "{{ (value_json.r.c1 / 10) | round(1) }}", "A", "current", nullptr, "measurement");
-
-    publishDiscoveryEntity(*_client, "sensor", "meter_total_energy", "Lifetime Energy",
+        "{{ (value_json.r.c1 / 10) | round(1) }}", "A", "current", nullptr, "measurement"); break;
+    case 22: publishDiscoveryEntity(*_client, "sensor", "meter_total_energy", "Lifetime Energy",
         "mdi:counter", mt,
-        "{{ (value_json.r.e / 1000) | round(1) }}", "kWh", "energy", nullptr, "total_increasing");
+        "{{ (value_json.r.e / 1000) | round(1) }}", "kWh", "energy", nullptr, "total_increasing"); break;
 
-    // Charger notifications (from r_not, published every 60s by main.cpp)
-    String notifTopic = baseTopic() + "/response/notifications";
-    const char* nt = notifTopic.c_str();
-
-    publishDiscoveryEntity(*_client, "sensor", "notification_count", "Active Notifications",
+    // ---- Charger notifications (r_not, published every 60s) ----
+    case 23: publishDiscoveryEntity(*_client, "sensor", "notification_count", "Active Notifications",
         "mdi:bell-alert-outline", nt,
-        "{{ value_json.count }}");
-
-    publishDiscoveryEntity(*_client, "sensor", "notification_latest", "Latest Notification",
+        "{{ value_json.count }}"); break;
+    case 24: publishDiscoveryEntity(*_client, "sensor", "notification_latest", "Latest Notification",
         "mdi:bell-outline", nt,
-        "{{ value_json.latest or 'None' }}");
+        "{{ value_json.latest or 'None' }}"); break;
 
-    // ========== Settings entities (from wallbox/settings merged topic) ==========
-    String setTopic = baseTopic() + "/settings";
-    const char* sTopic_ = setTopic.c_str();
-    String cmdAutolock = cPrefix + "autolock_enable";
-    String cmdAutolockTime = cPrefix + "autolock_time";
-    String cmdEcoMode = cPrefix + "eco_mode";
-    String cmdEcoPower = cPrefix + "eco_power";
-    String cmdPowerShare = cPrefix + "power_sharing";
-    String cmdPhaseSwitch = cPrefix + "phase_switch";
-    String cmdHalo = cPrefix + "halo";
-    String cmdTimezone = cPrefix + "timezone";
-
-    // Auto Lock switch
-    publishDiscoverySwitch(*_client, "autolock", "Auto Lock",
-        "mdi:lock-clock", cmdAutolock.c_str(), sTopic_,
+    // ---- Settings entities (wallbox/settings merged topic) ----
+    case 25: publishDiscoverySwitch(*_client, "autolock", "Auto Lock",
+        "mdi:lock-clock", _discTopics.cmdAutolockEnable.c_str(), sTopic_,
         "{% if value_json.autolock == 1 %}1{% else %}0{% endif %}",
-        "1", "0");
+        "1", "0"); break;
 
-    // Auto Lock timeout (number)
-    publishDiscoveryNumber(*_client, "autolock_time", "Auto Lock Timeout",
-        "mdi:timer-lock", cmdAutolockTime.c_str(), sTopic_,
-        "{{ value_json.autolock_time | default(1) }}", 1, 60, 1, "min", "box");
+    case 26: publishDiscoveryNumber(*_client, "autolock_time", "Auto Lock Timeout",
+        "mdi:timer-lock", _discTopics.cmdAutolockTime.c_str(), sTopic_,
+        "{{ value_json.autolock_time | default(1) }}", 1, 60, 1, "min", "box"); break;
 
     // Eco Smart Mode (select). BAPI esm: 0=Off, 1=Full Green, 2=Solar+Grid
-    static const char* ecoOptions[] = {"Off", "Full Green (Solar Only)", "Solar + Grid"};
-    publishDiscoverySelect(*_client, "eco_mode", "Eco Smart Mode",
-        "mdi:solar-power", cmdEcoMode.c_str(), sTopic_,
+    case 27: publishDiscoverySelect(*_client, "eco_mode", "Eco Smart Mode",
+        "mdi:solar-power", _discTopics.cmdEcoMode.c_str(), sTopic_,
         "{% set m = value_json.eco_mode | default(0) %}"
         "{% if m == 0 %}Off{% elif m == 1 %}Full Green (Solar Only){% elif m == 2 %}Solar + Grid{% else %}Off{% endif %}",
-        ecoOptions, 3);
+        kEcoOptions, 3); break;
 
-    // Eco Smart power %
-    publishDiscoveryNumber(*_client, "eco_power", "Eco Smart Solar %",
-        "mdi:percent", cmdEcoPower.c_str(), sTopic_,
-        "{{ value_json.eco_power | default(100) }}", 0, 100, 5, "%");
+    case 28: publishDiscoveryNumber(*_client, "eco_power", "Eco Smart Solar %",
+        "mdi:percent", _discTopics.cmdEcoPower.c_str(), sTopic_,
+        "{{ value_json.eco_power | default(100) }}", 0, 100, 5, "%"); break;
 
-    // Power Sharing (switch — dynamic power sharing)
-    publishDiscoverySwitch(*_client, "power_sharing", "Dynamic Power Sharing",
-        "mdi:transit-connection-variant", cmdPowerShare.c_str(), sTopic_,
+    case 29: publishDiscoverySwitch(*_client, "power_sharing", "Dynamic Power Sharing",
+        "mdi:transit-connection-variant", _discTopics.cmdPowerShare.c_str(), sTopic_,
         "{% if value_json.power_sharing == 1 %}1{% else %}0{% endif %}",
-        "1", "0");
+        "1", "0"); break;
 
-    // Phase Switch
-    publishDiscoverySwitch(*_client, "phase_switch", "Phase Switch",
-        "mdi:numeric-3-circle", cmdPhaseSwitch.c_str(), sTopic_,
+    case 30: publishDiscoverySwitch(*_client, "phase_switch", "Phase Switch",
+        "mdi:numeric-3-circle", _discTopics.cmdPhaseSwitch.c_str(), sTopic_,
         "{% if value_json.phase_switch == 1 %}1{% else %}0{% endif %}",
-        "1", "0");
+        "1", "0"); break;
 
-    // Halo LED brightness (select)
-    static const char* haloOptions[] = {"Off", "Low", "Medium", "High"};
-    publishDiscoverySelect(*_client, "halo", "Halo LED",
-        "mdi:led-on", cmdHalo.c_str(), sTopic_,
+    case 31: publishDiscoverySelect(*_client, "halo", "Halo LED",
+        "mdi:led-on", _discTopics.cmdHalo.c_str(), sTopic_,
         "{% set h = value_json.halo | default(2) %}"
         "{% if h == 0 %}Off{% elif h == 1 %}Low{% elif h == 2 %}Medium{% else %}High{% endif %}",
-        haloOptions, 4);
+        kHaloOptions, 4); break;
 
-    // Timezone (select — common zones)
-    static const char* tzOptions[] = {
-        "Australia/Sydney", "Australia/Melbourne", "Australia/Brisbane", "Australia/Perth",
-        "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid",
-        "America/New_York", "America/Chicago", "America/Los_Angeles",
-        "Asia/Tokyo", "Asia/Shanghai", "Asia/Singapore",
-        "Pacific/Auckland", "UTC"
-    };
-    publishDiscoverySelect(*_client, "timezone", "Timezone",
-        "mdi:earth", cmdTimezone.c_str(), sTopic_,
+    case 32: publishDiscoverySelect(*_client, "timezone", "Timezone",
+        "mdi:earth", _discTopics.cmdTimezone.c_str(), sTopic_,
         "{{ value_json.timezone | default('UTC') }}",
-        tzOptions, 16);
+        kTzOptions, 16); break;
 
-    // Gateway IP (makes it easy to find the web UI from HA)
-    publishDiscoveryEntity(*_client, "sensor", "gateway_ip", "Gateway IP",
-        "mdi:ip-network", gTopic.c_str(), "{{ value_json.ip | default('') }}");
+    // ---- Gateway info diagnostic (gTopic) ----
+    case 33: publishDiscoveryEntity(*_client, "sensor", "gateway_ip", "Gateway IP",
+        "mdi:ip-network", gTopic_c, "{{ value_json.ip | default('') }}"); break;
 
-    // Charger device info (diagnostic)
-    publishDiscoveryEntity(*_client, "sensor", "dev_name", "Charger Name",
-        "mdi:tag", gTopic.c_str(), "{{ value_json.dev_name | default('') }}");
-    publishDiscoveryEntity(*_client, "sensor", "dev_mfg", "Charger Manufacturer",
-        "mdi:factory", gTopic.c_str(), "{{ value_json.dev_mfg | default('') }}");
-    publishDiscoveryEntity(*_client, "sensor", "dev_model", "BLE Radio Model",
-        "mdi:chip", gTopic.c_str(), "{{ value_json.dev_model | default('') }}");
-    // BLE Module FW — the radio chip's firmware (BGX13P on Plus,
-    // NINA-B22 on MAX). Distinct from the charger's application FW
-    // below. Renamed in 2.4.1 from the old "BLE Firmware" label
-    // which was being mistaken for the charger app FW. peter-mcc #4.
-    publishDiscoveryEntity(*_client, "sensor", "dev_fw", "BLE Module FW",
-        "mdi:cog", gTopic.c_str(), "{{ value_json.dev_fw | default('') }}");
+    case 34: publishDiscoveryEntity(*_client, "sensor", "dev_name", "Charger Name",
+        "mdi:tag", gTopic_c, "{{ value_json.dev_name | default('') }}"); break;
+    case 35: publishDiscoveryEntity(*_client, "sensor", "dev_mfg", "Charger Manufacturer",
+        "mdi:factory", gTopic_c, "{{ value_json.dev_mfg | default('') }}"); break;
+    case 36: publishDiscoveryEntity(*_client, "sensor", "dev_model", "BLE Radio Model",
+        "mdi:chip", gTopic_c, "{{ value_json.dev_model | default('') }}"); break;
+    // BLE Module FW — the radio chip's firmware. Distinct from the
+    // charger's application FW below. Renamed in 2.4.1 from "BLE
+    // Firmware" which was being mistaken for the charger app FW.
+    case 37: publishDiscoveryEntity(*_client, "sensor", "dev_fw", "BLE Module FW",
+        "mdi:cog", gTopic_c, "{{ value_json.dev_fw | default('') }}"); break;
     // Charger application firmware — the version Wallbox app shows.
-    // Sourced from fw_v_.s BAPI (per jagheterfredrik/wallbox-ble's
-    // GET_CHARGER_VERSIONS).
-    publishDiscoveryEntity(*_client, "sensor", "chg_app_fw", "Charger Firmware",
-        "mdi:package-variant-closed", gTopic.c_str(),
-        "{{ value_json.chg_app_fw | default('') }}");
-    // Project name from fw_v_.p — canonical model identifier.
-    publishDiscoveryEntity(*_client, "sensor", "chg_project", "Charger Project",
-        "mdi:tag-outline", gTopic.c_str(),
-        "{{ value_json.chg_project | default('') }}");
-    // Lifetime session count from r_ses.size.
-    publishDiscoveryEntity(*_client, "sensor", "chg_sessions", "Total Charging Sessions",
-        "mdi:counter", gTopic.c_str(),
-        // value_json.chg_sessions is `null` on chargers that don't
-        // expose a usable count (Plus). Render null as the literal
-        // "None" HA token so the entity goes unavailable instead of
-        // sticking at 0 forever — peter-mcc 2.4.1 follow-up.
+    case 38: publishDiscoveryEntity(*_client, "sensor", "chg_app_fw", "Charger Firmware",
+        "mdi:package-variant-closed", gTopic_c,
+        "{{ value_json.chg_app_fw | default('') }}"); break;
+    case 39: publishDiscoveryEntity(*_client, "sensor", "chg_project", "Charger Project",
+        "mdi:tag-outline", gTopic_c,
+        "{{ value_json.chg_project | default('') }}"); break;
+    // Lifetime session count from r_ses.last. null on chargers that don't
+    // expose a usable count (some Plus firmwares) — render as "None" so
+    // the entity goes unavailable instead of sticking at 0 (peter-mcc
+    // 2.4.1 follow-up).
+    case 40: publishDiscoveryEntity(*_client, "sensor", "chg_sessions", "Total Charging Sessions",
+        "mdi:counter", gTopic_c,
         "{% if value_json.chg_sessions is none %}None{% else %}{{ value_json.chg_sessions }}{% endif %}",
-        nullptr, nullptr, nullptr, "total_increasing");
-    // Power Boost from r_hsh — household-meter-tied current cap (amps).
-    publishDiscoveryEntity(*_client, "sensor", "chg_power_boost", "Power Boost Limit",
-        "mdi:home-lightning-bolt-outline", gTopic.c_str(),
-        "{{ value_json.chg_power_boost | default(0) }}", "A", "current", nullptr, "measurement");
-    // Dedicated lock-state binary from r_lck. BAPI r_lck returns
-    //   r:0 = unlocked, r:1 = locked.
-    // HA's device_class:lock has *inverted* binary_sensor semantics:
-    //   on = "problem detected" = UNLOCKED
-    //   off = "no problem"      = LOCKED
-    // So publish ON when chg_lock_state == 0 (unlocked) and OFF when
-    // == 1 (locked). Live-tested on a Pulsar MAX: with the charger
-    // unlocked (chg_lock_state=0) HA now shows "Unlocked" instead of
-    // the incorrect "Locked" we observed before the inversion fix.
-    publishDiscoveryEntity(*_client, "binary_sensor", "chg_lock_state", "Lock State",
-        "mdi:lock", gTopic.c_str(),
-        "{% if value_json.chg_lock_state == 0 %}ON{% else %}OFF{% endif %}", nullptr, "lock");
-    // Charger-side WiFi (gnsta) — the charger has its own WiFi link
-    // for cloud/OCPP/firmware updates, separate from the gateway's link.
-    // NOTE: gnsta does NOT return an RSSI in dBm — the field is
-    // literally named `signal` and is a 0-100 quality percentage on
-    // Pulsar MAX (confirmed by raw BAPI probe). Older drafts of this
-    // discovery mis-labelled it as dBm with device_class:signal_strength
-    // and produced "60 dBm" — wrong on both unit and class. Now it's a
-    // plain percentage with no device_class so HA renders "60 %".
-    publishDiscoveryEntity(*_client, "sensor", "chg_net_ssid", "Charger WiFi SSID",
-        "mdi:wifi", gTopic.c_str(), "{{ value_json.chg_net_ssid | default('') }}");
-    publishDiscoveryEntity(*_client, "sensor", "chg_net_ip", "Charger IP",
-        "mdi:ip-network-outline", gTopic.c_str(), "{{ value_json.chg_net_ip | default('') }}");
-    publishDiscoveryEntity(*_client, "sensor", "chg_net_signal", "Charger WiFi Signal",
-        "mdi:wifi", gTopic.c_str(),
-        "{{ value_json.chg_net_signal | default(0) }}", "%", nullptr, nullptr, "measurement");
+        nullptr, nullptr, nullptr, "total_increasing"); break;
+    case 41: publishDiscoveryEntity(*_client, "sensor", "chg_power_boost", "Power Boost Limit",
+        "mdi:home-lightning-bolt-outline", gTopic_c,
+        "{{ value_json.chg_power_boost | default(0) }}", "A", "current", nullptr, "measurement"); break;
+    // HA's device_class:lock has INVERTED semantics: on = problem
+    // (unlocked), off = no problem (locked). r_lck returns 0/1
+    // (unlocked/locked). Publish ON when 0.
+    case 42: publishDiscoveryEntity(*_client, "binary_sensor", "chg_lock_state", "Lock State",
+        "mdi:lock", gTopic_c,
+        "{% if value_json.chg_lock_state == 0 %}ON{% else %}OFF{% endif %}", nullptr, "lock"); break;
+    // Charger-side WiFi (gnsta). The `signal` field is a 0-100 quality
+    // percentage on MAX (no RSSI in dBm). Plain percentage unit.
+    case 43: publishDiscoveryEntity(*_client, "sensor", "chg_net_ssid", "Charger WiFi SSID",
+        "mdi:wifi", gTopic_c, "{{ value_json.chg_net_ssid | default('') }}"); break;
+    case 44: publishDiscoveryEntity(*_client, "sensor", "chg_net_ip", "Charger IP",
+        "mdi:ip-network-outline", gTopic_c, "{{ value_json.chg_net_ip | default('') }}"); break;
+    case 45: publishDiscoveryEntity(*_client, "sensor", "chg_net_signal", "Charger WiFi Signal",
+        "mdi:wifi", gTopic_c,
+        "{{ value_json.chg_net_signal | default(0) }}", "%", nullptr, nullptr, "measurement"); break;
 
-    // rc22 — diagnostic sensors backed by the rc20/rc21 observability
-    // surface (max_reentry, tokens, boot_reason, heap watermark, BLE pause
-    // state). All from the gateway-info topic so they update every minute
-    // alongside the existing dev_* sensors. Useful for HA alarms on the
-    // 'this firmware shouldn't be panicking' invariant and for fleet
-    // health dashboards.
-    publishDiscoveryEntity(*_client, "sensor", "gateway_fw", "Gateway Firmware",
-        "mdi:package-variant", gTopic.c_str(), "{{ value_json.fw | default('') }}");
-    publishDiscoveryEntity(*_client, "sensor", "boot_reason", "Last Boot Reason",
-        "mdi:restart", gTopic.c_str(), "{{ value_json.boot_reason | default('unknown') }}");
-    publishDiscoveryEntity(*_client, "sensor", "max_reentry", "Reentry Tripwire",
-        "mdi:shield-bug-outline", gTopic.c_str(), "{{ value_json.max_reentry | default(1) }}");
-    publishDiscoveryEntity(*_client, "sensor", "tokens", "Rate-Limit Tokens",
-        "mdi:gauge", gTopic.c_str(), "{{ value_json.tokens | default(0) }}", nullptr, nullptr, nullptr, "measurement");
-    // loop_max_ms tripwire — surfaces main-task wedges in HA.
-    // alarm if > ~500 ms in steady state; multi-second value =
-    // gateway blocked unbounded somewhere.
-    publishDiscoveryEntity(*_client, "sensor", "loop_max_ms", "Loop Max ms",
-        "mdi:timer-alert-outline", gTopic.c_str(),
-        "{{ value_json.loop_max_ms | default(0) }}", "ms", "duration", nullptr, "measurement");
-    publishDiscoveryEntity(*_client, "sensor", "heap_min_ever", "Heap Min Watermark",
-        "mdi:memory", gTopic.c_str(), "{{ value_json.heap_min_ever | default(0) }}", "B", nullptr, nullptr, "measurement");
-    publishDiscoveryEntity(*_client, "sensor", "heap_free", "Heap Free",
-        "mdi:memory", gTopic.c_str(), "{{ value_json.heap | default(0) }}", "B", nullptr, nullptr, "measurement");
-    publishDiscoveryEntity(*_client, "sensor", "gw_uptime", "Gateway Uptime",
-        "mdi:clock-outline", gTopic.c_str(), "{{ value_json.uptime | default(0) }}", "s", "duration", nullptr, "measurement");
-    publishDiscoveryEntity(*_client, "sensor", "ble_paused", "BLE Paused",
-        "mdi:bluetooth-off", gTopic.c_str(),
-        "{% if value_json.ble_paused %}Yes ({{ value_json.ble_pause_remaining_s }}s remaining){% else %}No{% endif %}");
-    publishDiscoveryEntity(*_client, "sensor", "chg_grounding", "Charger Grounding",
-        "mdi:earth", gTopic.c_str(), "{{ value_json.chg_grounding | default('Unknown') }}");
-    publishDiscoveryEntity(*_client, "sensor", "wifi_rssi", "WiFi Signal",
-        "mdi:wifi", gTopic.c_str(), "{{ value_json.wifi_rssi | default(0) }}", "dBm", "signal_strength", nullptr, "measurement");
+    // ---- Observability diagnostics (gTopic) ----
+    // All entity_category="diagnostic" so HA collapses them into the
+    // device page's diagnostic section instead of mixing with the main
+    // sensors. peter-mcc 2.6.0 follow-up: these are useful for power
+    // users / forensics but noise for normal operation.
+    case 46: publishDiscoveryEntity(*_client, "sensor", "gateway_fw", "Gateway Firmware",
+        "mdi:package-variant", gTopic_c, "{{ value_json.fw | default('') }}",
+        nullptr, nullptr, nullptr, nullptr, "diagnostic"); break;
+    case 47: publishDiscoveryEntity(*_client, "sensor", "boot_reason", "Last Boot Reason",
+        "mdi:restart", gTopic_c, "{{ value_json.boot_reason | default('unknown') }}",
+        nullptr, nullptr, nullptr, nullptr, "diagnostic"); break;
+    case 48: publishDiscoveryEntity(*_client, "sensor", "max_reentry", "Reentry Tripwire",
+        "mdi:shield-bug-outline", gTopic_c, "{{ value_json.max_reentry | default(1) }}",
+        nullptr, nullptr, nullptr, nullptr, "diagnostic"); break;
+    case 49: publishDiscoveryEntity(*_client, "sensor", "tokens", "Rate-Limit Tokens",
+        "mdi:gauge", gTopic_c, "{{ value_json.tokens | default(0) }}",
+        nullptr, nullptr, nullptr, "measurement", "diagnostic"); break;
+    case 50: publishDiscoveryEntity(*_client, "sensor", "loop_max_ms", "Loop Max ms",
+        "mdi:timer-alert-outline", gTopic_c,
+        "{{ value_json.loop_max_ms | default(0) }}", "ms", "duration", nullptr, "measurement", "diagnostic"); break;
+    case 51: publishDiscoveryEntity(*_client, "sensor", "heap_min_ever", "Heap Min Watermark",
+        "mdi:memory", gTopic_c, "{{ value_json.heap_min_ever | default(0) }}", "B", nullptr, nullptr, "measurement", "diagnostic"); break;
+    case 52: publishDiscoveryEntity(*_client, "sensor", "heap_free", "Heap Free",
+        "mdi:memory", gTopic_c, "{{ value_json.heap | default(0) }}", "B", nullptr, nullptr, "measurement", "diagnostic"); break;
+    case 53: publishDiscoveryEntity(*_client, "sensor", "gw_uptime", "Gateway Uptime",
+        "mdi:clock-outline", gTopic_c, "{{ value_json.uptime | default(0) }}", "s", "duration", nullptr, "measurement", "diagnostic"); break;
+    case 54: publishDiscoveryEntity(*_client, "sensor", "ble_paused", "BLE Paused",
+        "mdi:bluetooth-off", gTopic_c,
+        "{% if value_json.ble_paused %}Yes ({{ value_json.ble_pause_remaining_s }}s remaining){% else %}No{% endif %}",
+        nullptr, nullptr, nullptr, nullptr, "diagnostic"); break;
+    case 55: publishDiscoveryEntity(*_client, "sensor", "chg_grounding", "Charger Grounding",
+        "mdi:earth", gTopic_c, "{{ value_json.chg_grounding | default('Unknown') }}",
+        nullptr, nullptr, nullptr, nullptr, "diagnostic"); break;
+    case 56: publishDiscoveryEntity(*_client, "sensor", "wifi_rssi", "WiFi Signal",
+        "mdi:wifi", gTopic_c, "{{ value_json.wifi_rssi | default(0) }}", "dBm", "signal_strength", nullptr, "measurement", "diagnostic"); break;
 
-    Log.println("[MQTT] HA discovery published (sensors + settings + diagnostics)");
+    default:
+        // Should be unreachable — kDiscoveryCount guards. Defensive
+        // bail-out so a bogus index doesn't loop forever.
+        _discoveryIndex = SIZE_MAX;
+        return;
+    }
+
+    _discoveryIndex++;
 }

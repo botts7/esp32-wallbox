@@ -518,6 +518,14 @@ void loop() {
             wallboxBLE.clearDiscoveryStale();
             wallboxMQTT.sendDiscovery();
         }
+        // Drain at most one MQTT discovery entity per loop iteration.
+        // sendDiscovery() above arms the state machine; tickDiscovery()
+        // publishes one entity per call until the burst is done. This
+        // bounds the per-loop cost to ONE publish during a wedged-broker
+        // event instead of compounding ~60 timeouts in series (peter-mcc
+        // 2.5.1 observed 80,000 ms loop_max_ms overnight from a single
+        // sendDiscovery against an MQTT broker that briefly stalled).
+        wallboxMQTT.tickDiscovery();
         publishCachedStatusIfNew();
         publishCachedRealtimeIfNew();
         publishCachedMeterIfNew();
