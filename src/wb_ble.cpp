@@ -10,6 +10,18 @@ WallboxBLE* WallboxBLE::_instance = nullptr;
 static const char* DEF_SVC = "2456e1b9-26e2-8f83-e744-f34f01e9d701";
 static const char* DEF_CHR = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
 
+// Known service UUIDs for the two BLE protocol families. Used by the
+// auto-detect path below to recover gracefully when the user's
+// configured charger model doesn't match what the charger actually
+// speaks — typical case: Pulsar MAX on firmware ≥ 6.11.26, which
+// Wallbox migrated to the dual-char protocol that previously only
+// shipped on Plus / Copper / Quasar. mvanlijden issue #11.
+static const char* MAX_SVC_UUID  = "2456e1b9-26e2-8f83-e744-f34f01e9d701";
+static const char* MAX_CHR_UUID  = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
+static const char* PLUS_SVC_UUID = "331a36f5-2459-45ea-9d95-6142f0c4b307";
+static const char* PLUS_CHR_UUID = "a9da6040-0823-4995-94ec-9ce41ca28833";
+static const char* PLUS_TXC_UUID = "a73e9a10-628f-4494-a099-12efaf72258f";
+
 class WBClientCallbacks : public NimBLEClientCallbacks {
     uint32_t onPassKeyRequest() override {
         uint32_t pk = wallboxBLE.blePasskey();
@@ -317,11 +329,61 @@ void WallboxBLE::_connect() {
     // Discover services
     NimBLERemoteService* svc = _client->getService(_svcUUID.c_str());
     if (!svc) {
-        Log.printf("[BLE] Service %s not found\n", _svcUUID.c_str());
-        _client->disconnect();
-        _state = State::ERROR;
-        esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
-        return;
+        // Auto-detect protocol-family mismatch. Typical trigger:
+        // user configured Pulsar MAX, but their charger is on FW
+        // ≥ 6.11.26 where Wallbox migrated MAX to the dual-char
+        // protocol that previously only shipped on Plus/Copper/Quasar
+        // (mvanlijden #11). Detect by probing for the *other*
+        // family's service UUID — if present, switch in memory AND
+        // persist to NVS so subsequent boots come up clean without
+        // the user having to manually fix /config.
+        bool weAreMax = _svcUUID.equalsIgnoreCase(MAX_SVC_UUID);
+        bool weArePlus = _svcUUID.equalsIgnoreCase(PLUS_SVC_UUID);
+        const char* otherSvcUUID = weAreMax ? PLUS_SVC_UUID
+                                  : weArePlus ? MAX_SVC_UUID
+                                  : nullptr;
+        NimBLERemoteService* otherSvc = otherSvcUUID
+            ? _client->getService(otherSvcUUID) : nullptr;
+        if (otherSvc) {
+            Log.println("[BLE] ===========================================================");
+            Log.printf( "[BLE] Auto-switching protocol family: configured %s,\n",
+                weAreMax ? "MAX (single-char)" : "Plus (dual-char)");
+            Log.printf( "[BLE] but charger speaks %s — adopting it and saving config.\n",
+                weAreMax ? "Plus (dual-char)" : "MAX (single-char)");
+            Log.println("[BLE] (Wallbox migrated MAX to the dual-char protocol at FW 6.11.26.)");
+            Log.println("[BLE] ===========================================================");
+            WBConfig& cfg = configMgr.mut();
+            if (weAreMax) {
+                cfg.chargerModel = "plus";
+                cfg.bleService   = PLUS_SVC_UUID;
+                cfg.bleChar      = PLUS_CHR_UUID;
+                cfg.bleTxChar    = PLUS_TXC_UUID;
+                _svcUUID  = PLUS_SVC_UUID;
+                _chrUUID  = PLUS_CHR_UUID;
+                _txChrUUID = PLUS_TXC_UUID;
+                _chargerModel = "plus";
+            } else {
+                cfg.chargerModel = "max";
+                cfg.bleService   = MAX_SVC_UUID;
+                cfg.bleChar      = MAX_CHR_UUID;
+                cfg.bleTxChar    = "";
+                _svcUUID  = MAX_SVC_UUID;
+                _chrUUID  = MAX_CHR_UUID;
+                _txChrUUID = "";
+                _chargerModel = "max";
+            }
+            configMgr.save();
+            // Resolve the now-correct service and fall through to the
+            // characteristic lookup. The connection is still up, no
+            // disconnect needed.
+            svc = otherSvc;
+        } else {
+            Log.printf("[BLE] Service %s not found\n", _svcUUID.c_str());
+            _client->disconnect();
+            _state = State::ERROR;
+            esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+            return;
+        }
     }
 
     _chr = svc->getCharacteristic(_chrUUID.c_str());
