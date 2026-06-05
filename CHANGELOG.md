@@ -4,6 +4,31 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.6.1] - 2026-06-06
+
+Quick fix for @mvanlijden's [#11](https://github.com/botts7/esp32-wallbox/issues/11):
+a Pulsar MAX on FW 6.11.26 looped forever on "Service not found"
+because at that firmware Wallbox migrated MAX to the dual-char
+protocol that previously only shipped on Plus/Copper/Quasar.
+Hardware-correct chargerModel="max" no longer implies the older
+single-char BLE protocol on newer firmware.
+
+### Fixed
+
+- **Auto-detect protocol-family mismatch on BLE connect.** When the
+  configured-model service UUID isn't found in the GATT topology
+  but the OTHER family's service IS present, the gateway now
+  adopts the correct protocol in memory, persists the new model
+  + UUIDs to NVS, and continues the connect inline. A loud log
+  block tells the user what happened. Handles both directions
+  (MAX→Plus for FW ≥ 6.11.26, Plus→MAX if someone mis-set the
+  dropdown the other way). No disconnect/reconnect cycle — the
+  fall-through path picks up the corrected UUIDs immediately.
+
+  Live-verified on the maintainer's MAX by deliberately
+  misconfiguring chargerModel to "plus" and watching the gateway
+  auto-switch back on the next boot's connect attempt.
+
 ## [2.6.0] - 2026-06-03
 
 Architectural fix for the main-loop wedge @peter-mcc reported on 2.5.1:
