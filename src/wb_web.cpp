@@ -1938,8 +1938,18 @@ function loadDiag(){
         h+=row('Max reentry depth',"<span style='color:"+rcol+"'>"+h2.max_reentry+(h2.max_reentry>1?' &#x26A0;':'')+"</span>");
       }
       if(typeof h2.loop_max_ms==='number'){
-        var lcol = h2.loop_max_ms > 500 ? '#f59e0b' : (h2.loop_max_ms > 2000 ? '#ef4444' : 'var(--text)');
-        h+=row('Longest loop iteration',"<span style='color:"+lcol+"'>"+h2.loop_max_ms+' ms'+(h2.loop_max_ms>2000?' &#x26A0;':'')+"</span>");
+        // Step 9h: thresholds reflect post-2.7.0 reality. The ?wait
+        // default is 5000 ms, the upper clamp is 8000 ms, and the
+        // chunked-wait pump keeps MQTT/WS alive throughout. So a
+        // 5 s latched value is *expected* under normal load, not a
+        // warning sign. Red + ⚠ only fire above 8 s (the clamp),
+        // which would indicate something genuinely abnormal.
+        // (Pre-9h had a broken ternary: `>500 ? amber : (>2000 ? red ...)`
+        // — left-to-right eval meant the red branch was unreachable.)
+        var v = h2.loop_max_ms;
+        var lcol = v > 8000 ? '#ef4444' : (v > 2000 ? '#f59e0b' : 'var(--text)');
+        var warn = v > 8000 ? ' &#x26A0;' : '';
+        h+=row('Longest loop iteration',"<span style='color:"+lcol+"'>"+v+' ms'+warn+"</span>");
       }
       if(typeof h2.tokens==='number')h+=row('Rate-limit tokens',h2.tokens+' / 4');
       if(typeof h2.heap_free==='number')h+=row('Heap free',(h2.heap_free/1024).toFixed(1)+' KB');
