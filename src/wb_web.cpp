@@ -771,33 +771,104 @@ static void handleApiCommand() {
         http.send(429, "application/json", "{\"error\":\"rate_limited\",\"retry\":true}");
         return;
     }
-    if (_apiCmdInflight >= MAX_API_CMD_INFLIGHT) {
+
+    // 2.7.0 step 6: parse async knobs.
+    //   ?sync=1     — old blocking behavior (escape hatch)
+    //   ?wait=N     — async short-wait deadline in ms (0..2500, default 800)
+    //   ?wait=0     — pure async: enqueue + 202 immediately
+    bool useSync = http.arg("sync") == "1";
+    int waitMs = 800;
+    if (http.hasArg("wait")) {
+        waitMs = http.arg("wait").toInt();
+        if (waitMs < 0) waitMs = 0;
+        if (waitMs > 2500) waitMs = 2500;
+    }
+
+    // Resolve action → met + par (shared by both paths).
+    String action = http.arg("action");
+    String value  = http.arg("value");
+    const char* met = nullptr;
+    String par;
+    if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
+    else if (action == "stop")    { met = bapi::MET_START_STOP;  par = "2"; }
+    else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
+    else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
+    else if (action == "current") { met = bapi::MET_SET_CURRENT; par = value; }
+    else if (action == "reboot")  { met = bapi::MET_REBOOT;      par = "null"; }
+    else if (action == "bapi") {
+        static String s_met;  // outlives this scope via c_str() below
+        s_met = http.arg("met");
+        met = s_met.c_str();
+        par = http.arg("par");
+        if (par.isEmpty()) par = "null";
+    } else {
+        http.send(400, "application/json", "{\"error\":\"unknown action\"}");
+        return;
+    }
+
+    // Sync escape hatch: preserves the pre-2.7.0 byte-for-byte
+    // response shape AND the inflight cap for callers that rely on
+    // either. Documented as deprecated, kept for two releases.
+    if (useSync) {
+        if (_apiCmdInflight >= 1) {
+            // Stricter inflight cap on sync (1 not 2) so a stuck
+            // legacy caller can't double up. Async path doesn't gate
+            // here — it gates via the enqueueRequest queue-full path.
+            http.sendHeader("Retry-After", "1");
+            http.send(503, "application/json", "{\"error\":\"busy\",\"retry\":true}");
+            return;
+        }
+        _apiCmdInflight++;
+        String resp = wallboxBLE.sendCommand(met, par.c_str());
+        _apiCmdInflight--;
+        http.send(200, "application/json",
+                  resp.isEmpty() ? "{\"error\":\"timeout\"}" : resp);
+        return;
+    }
+
+    // Async path. Enqueue with WAKE_AND_MQTT so that:
+    //   - If we wake within `waitMs`, we serve 200 + body inline.
+    //   - If we time out, the BLE task still publishes the eventual
+    //     response to wallbox/response/<met>, so the caller can pick
+    //     it up out-of-band (or via /api/command_status, step 7).
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    xTaskNotifyStateClear(self);
+    uint32_t reqId = wallboxBLE.enqueueRequest(
+        met, par.c_str(),
+        WallboxBLE::ReplyMode::WAKE_AND_MQTT, self);
+    if (reqId == 0) {
+        // Queue full — exactly the "busy" condition the inflight cap
+        // used to signal, just enforced via the actual BLE backlog.
         http.sendHeader("Retry-After", "1");
         http.send(503, "application/json", "{\"error\":\"busy\",\"retry\":true}");
         return;
     }
-    _apiCmdInflight++;
-    String action = http.arg("action");
-    String value = http.arg("value");
-    String resp;
-    if (action == "start") resp = wallboxBLE.sendCommand(bapi::MET_START_STOP, "1");
-    else if (action == "stop") resp = wallboxBLE.sendCommand(bapi::MET_START_STOP, "2");
-    else if (action == "lock") resp = wallboxBLE.sendCommand(bapi::MET_LOCK, "1");
-    else if (action == "unlock") resp = wallboxBLE.sendCommand(bapi::MET_LOCK, "0");
-    else if (action == "current") resp = wallboxBLE.sendCommand(bapi::MET_SET_CURRENT, value.c_str());
-    else if (action == "reboot") resp = wallboxBLE.sendCommand(bapi::MET_REBOOT, "null");
-    else if (action == "bapi") {
-        String met = http.arg("met");
-        String par = http.arg("par");
-        if (par.isEmpty()) par = "null";
-        resp = wallboxBLE.sendCommand(met.c_str(), par.c_str());
-    } else {
-        _apiCmdInflight--;
-        http.send(400, "application/json", "{\"error\":\"unknown action\"}");
+
+    if (waitMs == 0) {
+        // Pure async — return 202 immediately.
+        String body = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
+        http.send(202, "application/json", body);
         return;
     }
-    _apiCmdInflight--;
-    http.send(200, "application/json", resp.isEmpty() ? "{\"error\":\"timeout\"}" : resp);
+
+    // Short-wait: block up to waitMs on the per-request notify.
+    uint32_t notified = 0;
+    BaseType_t got = xTaskNotifyWait(0, ULONG_MAX, &notified, pdMS_TO_TICKS(waitMs));
+    if (got == pdTRUE) {
+        // Drain the response from the RAM map. If reqId matches,
+        // good; if it doesn't, something went sideways — try anyway.
+        String resp;
+        if (wallboxBLE.tryFetchResponse(reqId, resp) && resp.length()) {
+            http.send(200, "application/json", resp);
+            return;
+        }
+        // Notified but no body — fall through to 202.
+    }
+    // Deadline elapsed. The BLE task will still complete the request
+    // and publish to wallbox/response/<met>; the caller can poll
+    // /api/command_status?id=N (step 7) or subscribe MQTT.
+    String body = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
+    http.send(202, "application/json", body);
 }
 
 static String normalizeMAC(const String& raw) {

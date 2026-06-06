@@ -38,6 +38,11 @@ public:
         FIRE_AND_FORGET = 0,   // discard response
         WAKE_WAITER     = 1,   // xTaskNotify the originating task
         MQTT_PUBLISH    = 2,   // queue response for main task to publish
+        WAKE_AND_MQTT   = 3,   // both — used by /api/command short-wait
+                               // so a handler that times out (202) still
+                               // has its response delivered to the
+                               // wallbox/response/<met> topic for the
+                               // client to pick up out-of-band
     };
     // Enqueues a BAPI request on the BLE task's internal queue and
     // returns immediately with the assigned request id (0 = queue

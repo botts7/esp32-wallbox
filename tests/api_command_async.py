@@ -204,7 +204,6 @@ class TestStep2Plumbing(unittest.TestCase):
         )
 
 
-@unittest.skip("Async ?wait=0 path lands in plan step 6")
 class TestAsyncPath(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -218,6 +217,7 @@ class TestAsyncPath(unittest.TestCase):
         self.assertIn("id", data)
         self.assertEqual(data.get("status"), "pending")
 
+    @unittest.skip("/api/command_status lands in plan step 7")
     def test_command_status_polls_to_completion(self) -> None:
         r, _ = _send_cmd("g_tzn", wait=0)
         req_id = r.json()["id"]
@@ -238,7 +238,6 @@ class TestAsyncPath(unittest.TestCase):
         self.assertIn(r.status_code, (200, 202))
 
 
-@unittest.skip("?sync=1 escape hatch lands in plan step 6")
 class TestSyncEscapeHatch(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

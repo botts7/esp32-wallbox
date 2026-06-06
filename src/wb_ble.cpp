@@ -184,18 +184,14 @@ void WallboxBLE::loop() {
             if (xQueueReceive(_reqQueue, &req, 0) == pdTRUE) {
                 String resp = _sendCommandDirect(req.met, req.par);
                 _storeResponse(req.reqId, resp);
-                // Step 4: wake the originating task. WAKE_WAITER is
-                // the path used by the new public sendCommand wrapper.
-                if (req.replyMode == ReplyMode::WAKE_WAITER && req.waiter) {
+                bool doWake = (req.replyMode == ReplyMode::WAKE_WAITER
+                            || req.replyMode == ReplyMode::WAKE_AND_MQTT);
+                bool doMqtt = (req.replyMode == ReplyMode::MQTT_PUBLISH
+                            || req.replyMode == ReplyMode::WAKE_AND_MQTT);
+                if (doWake && req.waiter) {
                     xTaskNotify(req.waiter, req.reqId, eSetValueWithOverwrite);
                 }
-                // Step 5: stage an MQTT publish for the main task.
-                // Used by the raw `/bapi` MQTT topic (step 8) and the
-                // async ?wait=0 response path (step 6) — the main
-                // task drains via drainPendingResponsePub() and
-                // publishes through wallboxMQTT (PubSubClient is not
-                // thread-safe so we can't publish from here).
-                if (req.replyMode == ReplyMode::MQTT_PUBLISH && resp.length()) {
+                if (doMqtt && resp.length()) {
                     _enqueueMqttPub(String(req.met), resp);
                 }
             }
