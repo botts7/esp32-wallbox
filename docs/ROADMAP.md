@@ -109,10 +109,16 @@ core architecture. Don't need to do — but they're on the radar.
   (build flag, group-wise transcription with HA verification per
   group, flip default, remove legacy switch).
 
-- [ ] **ESPHome AsyncWebServer backport** (task #78)
-  Replace sync Arduino WebServer with AsyncWebServer (me-no-dev).
-  Would eliminate per-request main-loop blocking entirely. Big change.
-  Research before committing.
+- [ ] **ESPHome AsyncWebServer backport** (task #78 — research
+  done: [docs/plans/3.x-async-webserver.md](plans/3.x-async-webserver.md))
+  Replace sync Arduino WebServer with AsyncWebServer
+  (mathieucarbou fork — me-no-dev archived). Would eliminate
+  per-request main-loop blocking entirely. Doc covers route
+  audit (40 routes, 18 method calls), risks (library churn,
+  PubSubClient+AsyncTCP coexistence, +30-50 KB RAM, OTA brick
+  risk), three migration strategies, ~40 hr effort estimate,
+  and 5 decision points the maintainer needs to answer before
+  implementation starts.
 
 - [ ] **HA Add-on packaging** (task #79)
   Package as a Home Assistant Add-on so users on HAOS / supervised
