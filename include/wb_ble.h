@@ -52,7 +52,8 @@ public:
     uint32_t enqueueRequest(const char* met,
                             const char* par = "null",
                             ReplyMode replyMode = ReplyMode::FIRE_AND_FORGET,
-                            TaskHandle_t waiter = nullptr);
+                            TaskHandle_t waiter = nullptr,
+                            uint32_t bapiTimeoutMs = 0);
 
     // 2.7.0 step 3 — fetch a previously-enqueued request's response
     // by its assigned id. Returns true and fills `out` if the
@@ -340,6 +341,13 @@ private:
         ReplyMode replyMode;
         TaskHandle_t waiter;    // xTaskNotify target, NULL if fire-and-forget
         uint32_t  enqueuedAt;   // millis() for timeout / drop-old logic
+        uint32_t  bapiTimeoutMs;// step 9d: per-request BAPI timeout. 0 =
+                                // use _sendCommandDirect default (5000 ms).
+                                // Web handler sets this to match the caller's
+                                // ?wait so the BAPI roundtrip doesn't give up
+                                // earlier than the HTTP wait — that mismatch
+                                // was causing 202s on slow methods like gupdc
+                                // even though the caller would have waited.
     };
     // FreeRTOS queue handle, depth kBleReqQueueDepth.
     QueueHandle_t _reqQueue = nullptr;

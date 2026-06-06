@@ -143,7 +143,16 @@ PROBES: List[Probe] = [
     Probe("info_card_notifications","r_not",    validator=_accept_any_body,            timeout=10),
     Probe("info_card_wifi_status", "gwsta",     validator=_accept_any_body,            timeout=10),
     Probe("info_card_network",     "gnsta",     validator=_accept_any_body,            timeout=10),
-    Probe("info_card_fwupdate",    "gupdc",     validator=_accept_any_body,            timeout=10),
+    # gupdc is a cloud-roundtrip method — takes 8-12 s on the wire.
+    # The /info "Raw BAPI" Send button (wb_web.cpp B() helper) passes
+    # &wait=12000 to match its 13 s AbortSignal. Mirror that here so
+    # the probe tests the same call path the GUI actually makes. On
+    # this Pulsar MAX firmware (6.11.16) gupdc returns "No dispatch
+    # method found" in the body, which is the charger's response, not
+    # a refactor issue. The probe just verifies the call completes
+    # synchronously (200, not 202).
+    Probe("info_card_fwupdate",    "gupdc",     extra={"wait": "12000"},
+          validator=_accept_any_body, timeout=14),
     Probe("info_card_ocpp",        "g_ocpp",    validator=_expect_r_object,            timeout=12),
     Probe("sessions_recent_list",  "r_ses",     validator=_accept_any_body,            timeout=15),
     Probe("schedules_list",        "r_schs",    validator=_accept_any_body,            timeout=15),

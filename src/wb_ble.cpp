@@ -182,7 +182,14 @@ void WallboxBLE::loop() {
         if (_reqQueue) {
             BleReq req;
             if (xQueueReceive(_reqQueue, &req, 0) == pdTRUE) {
-                String resp = _sendCommandDirect(req.met, req.par);
+                // Step 9d: honour per-request BAPI timeout if set.
+                // Web handler passes ?wait through so the BAPI roundtrip
+                // matches the HTTP wait — otherwise slow methods like
+                // gupdc (10 s cloud check) gave up at the 5 s default
+                // and the waiter saw a 202 even though the user asked
+                // to wait 12 s. 0 = use the function's own default.
+                uint32_t to = req.bapiTimeoutMs ? req.bapiTimeoutMs : 5000;
+                String resp = _sendCommandDirect(req.met, req.par, to);
                 _storeResponse(req.reqId, resp);
                 bool doWake = (req.replyMode == ReplyMode::WAKE_WAITER
                             || req.replyMode == ReplyMode::WAKE_AND_MQTT);
@@ -965,7 +972,8 @@ bool WallboxBLE::tryFetchResponse(uint32_t reqId, String& out) {
 // via sendCommand internally; response goes to the RAM map (step 3)
 // keyed by request id; waiter wake-up lands in step 4.
 uint32_t WallboxBLE::enqueueRequest(const char* met, const char* par,
-                                    ReplyMode replyMode, TaskHandle_t waiter) {
+                                    ReplyMode replyMode, TaskHandle_t waiter,
+                                    uint32_t bapiTimeoutMs) {
     if (!_reqQueue || !met) return 0;
     BleReq req = {};
     // Step 9 hardening: __atomic_fetch_add is lock-free and safe under
@@ -984,9 +992,10 @@ uint32_t WallboxBLE::enqueueRequest(const char* met, const char* par,
         strncpy(req.par, par, sizeof(req.par) - 1);
         req.par[sizeof(req.par) - 1] = '\0';
     }
-    req.replyMode  = replyMode;
-    req.waiter     = waiter;
-    req.enqueuedAt = millis();
+    req.replyMode      = replyMode;
+    req.waiter         = waiter;
+    req.enqueuedAt     = millis();
+    req.bapiTimeoutMs  = bapiTimeoutMs;
     if (xQueueSend(_reqQueue, &req, 0) != pdTRUE) {
         Log.printf("[BLE] enqueueRequest %s — queue full, dropped\n", met);
         return 0;
