@@ -9,6 +9,7 @@
 #include "wb_watchdog.h"
 #include "wb_ws.h"
 #include "wb_mqtt.h"
+#include "_gen_settings_body_gz.h"  // build-time gzipped /settings body (task #75)
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -1021,20 +1022,69 @@ updateBleHealth();setInterval(updateBleHealth,15000);
 
 // ========== PAGE 2: Settings (/settings) ==========
 static void handleSettings() {
-    // /settings is the largest page (~67 KB after rc21 additions).
-    // Build-then-send with one accumulating String was truncating
-    // mid-body around 65 KB on fragmented heap: subsequent += calls
-    // dropped silently, the response was missing its htmlFoot, and
-    // the body.classList.add('ready') script never ran. User saw a
-    // black screen because body{visibility:hidden} was never lifted.
-    //
-    // Fix: stream each section via sendContent() with chunked
-    // encoding. Each temporary String holds only one section, gets
-    // freed as soon as the chunk is on the wire, and never has to
-    // be reallocated past 65 KB.
+    // 2.8.0 task #75: the big static body (~56 KB) is now pre-gzipped
+    // by scripts/precompress_settings.py at build time and served via
+    // /settings/body.gz with Content-Encoding: gzip. This handler
+    // sends a tiny stub that fetches the gzipped body and injects it
+    // — the browser decompresses, we re-execute inline <script> tags
+    // (innerHTML doesn't fire them), and the page is functionally
+    // identical. Net transmitted bytes for a fresh page load:
+    //   pre-2.8.0:  ~68 KB (head + body + foot, uncompressed)
+    //   post-2.8.0: head (~3 KB) + stub (~1 KB) + gzipped body
+    //               (~15 KB) + foot (~1 KB) = ~20 KB → ~3.4× win
+    // Flash cost: the gzipped blob lives in PROGMEM (+15 KB), the
+    // legacy literal below sits under #if 0 so it's source-only —
+    // the C++ compiler never sees it, the precompress script's
+    // text-level regex does. Single source of truth: this file.
     http.setContentLength(CONTENT_LENGTH_UNKNOWN);
     http.send(200, "text/html", "");
     http.sendContent(htmlHead("Settings"));
+    http.sendContent(R"HTML(
+<div id='ld-stub' class='loading'><div class='ld-spin'></div>Loading Settings...</div>
+<div id='settings-body'></div>
+<script>
+(function(){
+  // The body content has its own id='ld' loading state and id='pg'
+  // content container, plus a bootstrap script at the end that
+  // toggles them. We use distinct id='ld-stub' / id='settings-body'
+  // here so they don't collide; we remove ld-stub after injection
+  // and let the body's own ld/pg toggle take over.
+  fetch('/settings/body.gz',{cache:'no-store'}).then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.text();
+  }).then(function(html){
+    var t=document.getElementById('settings-body');
+    t.innerHTML=html;
+    // innerHTML doesn't execute injected <script> tags. Re-create
+    // each one so the browser fires it. Preserves order, handles
+    // both inline and src= scripts.
+    t.querySelectorAll('script').forEach(function(orig){
+      var s=document.createElement('script');
+      if(orig.src)s.src=orig.src;else s.textContent=orig.textContent;
+      orig.parentNode.replaceChild(s,orig);
+    });
+    var stub=document.getElementById('ld-stub');
+    if(stub)stub.remove();
+  }).catch(function(e){
+    var stub=document.getElementById('ld-stub');
+    if(stub)stub.innerHTML='<span style="color:#ef4444">Failed to load settings: '+(e.message||e)+'</span>';
+  });
+})();
+</script>
+)HTML");
+    http.sendContent(htmlFoot("/settings"));
+    http.sendContent("");  // final empty chunk terminates chunked encoding
+    return;
+
+#if 0
+    // PRECOMPRESS_SETTINGS_BODY_BEGIN
+    // ---- source-of-truth for the page body ----
+    // The literal below NEVER executes — the early `return` above
+    // skips it and the `#if 0` excludes it from compilation. It
+    // exists so scripts/precompress_settings.py can read it as
+    // text and gzip the contents into _gen_settings_body_gz.h.
+    // Edit this literal to change the page; rebuild regenerates
+    // the gzipped header.
     http.sendContent(R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Settings...</div>
 <div id='pg' style='display:none'>
@@ -1628,17 +1678,25 @@ function pauseBle(){
 // dipping into the malloc-failure / panic zone (~30–60 KB free).
 // Deferring trades ~200 ms of perceived load time for reliable
 // no-panic page loads.
-window.addEventListener('load',function(){
-  fetch('/api/status').then(function(x){return x.json()}).then(function(d){
-    if(d.ble_paused&&d.ble_pause_remaining>0)startPauseUI(d.ble_pause_remaining);
-  }).catch(function(){});
-  loadSchedules();
-});
+// 2.8.0 task #75: when /settings/body.gz is injected via innerHTML
+// after page load, window.load has already fired and a listener
+// registered now would never run. Use readyState to decide whether
+// to run immediately or wait. Same effect either way.
+(function(){
+  var init=function(){
+    fetch('/api/status').then(function(x){return x.json()}).then(function(d){
+      if(d.ble_paused&&d.ble_pause_remaining>0)startPauseUI(d.ble_pause_remaining);
+    }).catch(function(){});
+    loadSchedules();
+  };
+  if(document.readyState==='complete')init();
+  else window.addEventListener('load',init);
+})();
 </script>
 </div>
 )HTML");
-    http.sendContent(htmlFoot("/settings"));
-    http.sendContent("");  // final empty chunk terminates chunked encoding
+    // PRECOMPRESS_SETTINGS_BODY_END
+#endif  // legacy source-of-truth literal
 }
 
 // ========== PAGE 3: Config (/config) ==========
@@ -3205,6 +3263,21 @@ static void registerRoutes() {
     http.on("/ota", handleOtaPage);
     http.on("/api/ota", HTTP_POST, []() {}, handleOtaUpload);
     http.on("/sessions", handleSessionsPage);
+
+    // Pre-gzipped /settings body (task #75). The bytes are stored in
+    // PROGMEM by scripts/precompress_settings.py; we send them raw
+    // with Content-Encoding: gzip so the browser decompresses on its
+    // side. Cache-Control is short — page version is tied to the
+    // firmware build, so any OTA invalidates the gzipped content.
+    http.on("/settings/body.gz", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Content-Encoding", "gzip");
+        http.sendHeader("Cache-Control", "public, max-age=300");
+        http.sendHeader("X-Uncompressed-Bytes",
+            String((unsigned long)SETTINGS_BODY_RAW_LEN));
+        http.send_P(200, "text/html",
+            (const char*)SETTINGS_BODY_GZ, SETTINGS_BODY_GZ_LEN);
+    });
     http.on("/manifest.json", handleManifest);
     http.on("/sw.js", handleServiceWorker);
     http.on("/favicon.ico", []() { http.send(204); });
