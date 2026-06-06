@@ -7,6 +7,9 @@
 #include "wb_ota_history.h"
 #include "wb_diag.h"
 #include "wb_watchdog.h"
+#include "wb_ws.h"
+#include "wb_mqtt.h"
+#include "_gen_settings_body_gz.h"  // build-time gzipped /settings body (task #75)
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -693,16 +696,16 @@ static void handleApiCharger() {
     http.send(200, "application/json", json);
 }
 
-// Server-side limit on how many BAPI command requests can be queued.
-// Each /api/command call goes through sendCommand which waits on
-// _cmdMutex with a multi-second timeout. Under load (e.g. /sessions
-// firing 20+ parallel r_log fetches), the queue piles up, LWIP/heap
-// gets stressed, and the gateway panics. Capping in-flight at 2 and
-// fast-failing the rest with 503 keeps the gateway alive — the
-// browser retry on 503 (or the JS-level fetch limiter) keeps the
-// experience usable.
+// Inflight counter for the `?sync=1` escape hatch only. Async
+// /api/command is bounded by the BLE request queue (depth 6 in
+// wb_ble.h); when full, enqueueRequest returns 0 and we 503. Sync
+// callers still run BAPI on the web handler's call stack, so a
+// stuck legacy caller could double up if we didn't gate — cap at 1
+// to keep sync strictly serial. The 2.6.x-era `MAX_API_CMD_INFLIGHT
+// = 2` constant retired in step 9: the async queue supersedes it
+// for the default path, and the sync gate is intentionally tighter
+// (1) than the old shared limit.
 static volatile int _apiCmdInflight = 0;
-static const int MAX_API_CMD_INFLIGHT = 2;
 
 // Re-entrancy tripwire for WBWebServer::loop(). Normally 0→1→0 per request;
 // if g_webMaxReentry ever latches >1, something pumped http.handleClient()
@@ -728,7 +731,9 @@ volatile uint32_t g_loopMaxMs  = 0;
 // 429 + Retry-After instead of piling up. Sizing: BAPI completes ~1 op / 500 ms,
 // so refill 2 tokens/sec; capacity 4 absorbs a legitimate burst (cold page
 // load, a couple of Saves). millis()-based lazy refill — no timer, ~0 heap.
-// This is rate; MAX_API_CMD_INFLIGHT is concurrency — orthogonal guards.
+// This is rate; the BLE request queue (kBleReqQueueDepth) handles
+// concurrency for the async path, and _apiCmdInflight gates the
+// `?sync=1` escape hatch — three orthogonal admission guards.
 static const float TB_CAP    = 4.0f;   // burst capacity (tokens)
 static const float TB_REFILL = 2.0f;   // tokens per second
 static float       _tbTokens = TB_CAP;
@@ -771,33 +776,150 @@ static void handleApiCommand() {
         http.send(429, "application/json", "{\"error\":\"rate_limited\",\"retry\":true}");
         return;
     }
-    if (_apiCmdInflight >= MAX_API_CMD_INFLIGHT) {
+
+    // 2.7.0 step 9b — UI-contract preservation: bumped default
+    // wait from 800 → 5000 ms after live UI testing showed every
+    // existing GUI fetch (30+ sites) expects `d.r` populated
+    // synchronously. The pre-refactor `sendCommand` internal
+    // timeout was 5000 ms, so matching it here restores byte-for-
+    // byte JS compatibility. The async escape valve (202 on
+    // timeout) still kicks in for the genuinely slow ones, and
+    // upper clamp bumped to 15000 to cover settings/schedule reads
+    // that legitimately need 8-12 s on busy MAX firmware.
+    //
+    //   ?sync=1     — old blocking behavior + sync inflight cap
+    //   ?wait=N     — short-wait deadline in ms (0..8000, default 5000)
+    //   ?wait=0     — pure async: enqueue + 202 immediately
+    //
+    // Upper clamp tightened to 8000 ms (was 15000) so a single
+    // misbehaving caller can't latch loop_max_ms to a worrying
+    // 15-second value in /info → Connection Diagnostics. 8 s
+    // still covers the slowest real BAPI call we've measured
+    // (gupdc cloud roundtrip ~5-10 s). Callers asking for the
+    // pre-step-9 12-second wait — Q() and B() in the GUI — fall
+    // through this clamp gracefully: they get 8 s instead of 12 s,
+    // and on the rare gupdc that overshoots 8 s they get a 202
+    // (rendered as "loading" rather than a hard error).
+    bool useSync = http.arg("sync") == "1";
+    int waitMs = 5000;
+    if (http.hasArg("wait")) {
+        waitMs = http.arg("wait").toInt();
+        if (waitMs < 0) waitMs = 0;
+        if (waitMs > 8000) waitMs = 8000;
+    }
+
+    // Resolve action → met + par (shared by both paths).
+    String action = http.arg("action");
+    String value  = http.arg("value");
+    const char* met = nullptr;
+    String par;
+    if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
+    else if (action == "stop")    { met = bapi::MET_START_STOP;  par = "2"; }
+    else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
+    else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
+    else if (action == "current") { met = bapi::MET_SET_CURRENT; par = value; }
+    else if (action == "reboot")  { met = bapi::MET_REBOOT;      par = "null"; }
+    else if (action == "bapi") {
+        static String s_met;  // outlives this scope via c_str() below
+        s_met = http.arg("met");
+        met = s_met.c_str();
+        par = http.arg("par");
+        if (par.isEmpty()) par = "null";
+    } else {
+        http.send(400, "application/json", "{\"error\":\"unknown action\"}");
+        return;
+    }
+
+    // Sync escape hatch: preserves the pre-2.7.0 byte-for-byte
+    // response shape AND the inflight cap for callers that rely on
+    // either. Documented as deprecated, kept for two releases.
+    if (useSync) {
+        if (_apiCmdInflight >= 1) {
+            // Stricter inflight cap on sync (1 not 2) so a stuck
+            // legacy caller can't double up. Async path doesn't gate
+            // here — it gates via the enqueueRequest queue-full path.
+            http.sendHeader("Retry-After", "1");
+            http.send(503, "application/json", "{\"error\":\"busy\",\"retry\":true}");
+            return;
+        }
+        _apiCmdInflight++;
+        String resp = wallboxBLE.sendCommand(met, par.c_str());
+        _apiCmdInflight--;
+        http.send(200, "application/json",
+                  resp.isEmpty() ? "{\"error\":\"timeout\"}" : resp);
+        return;
+    }
+
+    // Async path. Enqueue with WAKE_AND_MQTT so that:
+    //   - If we wake within `waitMs`, we serve 200 + body inline.
+    //   - If we time out, the BLE task still publishes the eventual
+    //     response to wallbox/response/<met>, so the caller can pick
+    //     it up out-of-band (or via /api/command_status, step 7).
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    xTaskNotifyStateClear(self);
+    // Step 9d: thread the BAPI timeout through. Without this, the
+    // BLE task gives up at its own 5 s default even if the caller
+    // asked for ?wait=12000. We add a small headroom (250 ms) so the
+    // BAPI completion has time to land before the HTTP wait deadline.
+    //
+    // Step 9e fix: pure async (?wait=0) callers DON'T want a 250 ms
+    // BAPI timeout — that would kill the BAPI before it had a chance
+    // to complete, the response would be empty, and _storeResponse
+    // would skip it (it filters empty JSON), so /api/command_status
+    // would poll forever. Use 0 to mean "BLE task default" (5 s).
+    uint32_t bapiTimeout = (waitMs > 0) ? ((uint32_t)waitMs + 250) : 0;
+    uint32_t reqId = wallboxBLE.enqueueRequest(
+        met, par.c_str(),
+        WallboxBLE::ReplyMode::WAKE_AND_MQTT, self, bapiTimeout);
+    if (reqId == 0) {
+        // Queue full — exactly the "busy" condition the inflight cap
+        // used to signal, just enforced via the actual BLE backlog.
         http.sendHeader("Retry-After", "1");
         http.send(503, "application/json", "{\"error\":\"busy\",\"retry\":true}");
         return;
     }
-    _apiCmdInflight++;
-    String action = http.arg("action");
-    String value = http.arg("value");
-    String resp;
-    if (action == "start") resp = wallboxBLE.sendCommand(bapi::MET_START_STOP, "1");
-    else if (action == "stop") resp = wallboxBLE.sendCommand(bapi::MET_START_STOP, "2");
-    else if (action == "lock") resp = wallboxBLE.sendCommand(bapi::MET_LOCK, "1");
-    else if (action == "unlock") resp = wallboxBLE.sendCommand(bapi::MET_LOCK, "0");
-    else if (action == "current") resp = wallboxBLE.sendCommand(bapi::MET_SET_CURRENT, value.c_str());
-    else if (action == "reboot") resp = wallboxBLE.sendCommand(bapi::MET_REBOOT, "null");
-    else if (action == "bapi") {
-        String met = http.arg("met");
-        String par = http.arg("par");
-        if (par.isEmpty()) par = "null";
-        resp = wallboxBLE.sendCommand(met.c_str(), par.c_str());
-    } else {
-        _apiCmdInflight--;
-        http.send(400, "application/json", "{\"error\":\"unknown action\"}");
+
+    if (waitMs == 0) {
+        // Pure async — return 202 immediately.
+        String body = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
+        http.send(202, "application/json", body);
         return;
     }
-    _apiCmdInflight--;
-    http.send(200, "application/json", resp.isEmpty() ? "{\"error\":\"timeout\"}" : resp);
+
+    // Step 9c chunked-wait: pump MQTT + WS every 50 ms instead of a
+    // single long xTaskNotifyWait. Without this, a 5 s ?wait freezes
+    // PubSubClient and WebSocketsServer on the main task — observed
+    // symptoms were ERR_CONNECTION_RESET on WS handshake when the
+    // page raced our long BAPI wait, and HA seeing stale state for
+    // a multi-second blip after a heavy /sessions burst.
+    //
+    // The BLE task is unblocked the whole time (it's the one
+    // processing our request), so pumping main-task-only subsystems
+    // here is free: they're idle waiting for their main-loop slot.
+    // PubSubClient handlers post-Step-8 only call enqueueRequest, so
+    // no re-entrancy into sendCommand. WebSocketsServer is purely
+    // I/O-driven, no app-code re-entry. Safe.
+    const uint32_t TICK_MS = 50;
+    bool got = false;
+    String resp;
+    for (uint32_t elapsed = 0; elapsed < (uint32_t)waitMs && !got; elapsed += TICK_MS) {
+        uint32_t notified = 0;
+        if (xTaskNotifyWait(0, ULONG_MAX, &notified, pdMS_TO_TICKS(TICK_MS)) == pdTRUE) {
+            got = wallboxBLE.tryFetchResponse(reqId, resp) && resp.length();
+            break;
+        }
+        wallboxMQTT.loop();
+        wbws::loop();
+    }
+    if (got) {
+        http.send(200, "application/json", resp);
+        return;
+    }
+    // Deadline elapsed. The BLE task will still complete the request
+    // and publish to wallbox/response/<met>; the caller can poll
+    // /api/command_status?id=N (step 7) or subscribe MQTT.
+    String body = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
+    http.send(202, "application/json", body);
 }
 
 static String normalizeMAC(const String& raw) {
@@ -900,20 +1022,69 @@ updateBleHealth();setInterval(updateBleHealth,15000);
 
 // ========== PAGE 2: Settings (/settings) ==========
 static void handleSettings() {
-    // /settings is the largest page (~67 KB after rc21 additions).
-    // Build-then-send with one accumulating String was truncating
-    // mid-body around 65 KB on fragmented heap: subsequent += calls
-    // dropped silently, the response was missing its htmlFoot, and
-    // the body.classList.add('ready') script never ran. User saw a
-    // black screen because body{visibility:hidden} was never lifted.
-    //
-    // Fix: stream each section via sendContent() with chunked
-    // encoding. Each temporary String holds only one section, gets
-    // freed as soon as the chunk is on the wire, and never has to
-    // be reallocated past 65 KB.
+    // 2.8.0 task #75: the big static body (~56 KB) is now pre-gzipped
+    // by scripts/precompress_settings.py at build time and served via
+    // /settings/body.gz with Content-Encoding: gzip. This handler
+    // sends a tiny stub that fetches the gzipped body and injects it
+    // — the browser decompresses, we re-execute inline <script> tags
+    // (innerHTML doesn't fire them), and the page is functionally
+    // identical. Net transmitted bytes for a fresh page load:
+    //   pre-2.8.0:  ~68 KB (head + body + foot, uncompressed)
+    //   post-2.8.0: head (~3 KB) + stub (~1 KB) + gzipped body
+    //               (~15 KB) + foot (~1 KB) = ~20 KB → ~3.4× win
+    // Flash cost: the gzipped blob lives in PROGMEM (+15 KB), the
+    // legacy literal below sits under #if 0 so it's source-only —
+    // the C++ compiler never sees it, the precompress script's
+    // text-level regex does. Single source of truth: this file.
     http.setContentLength(CONTENT_LENGTH_UNKNOWN);
     http.send(200, "text/html", "");
     http.sendContent(htmlHead("Settings"));
+    http.sendContent(R"HTML(
+<div id='ld-stub' class='loading'><div class='ld-spin'></div>Loading Settings...</div>
+<div id='settings-body'></div>
+<script>
+(function(){
+  // The body content has its own id='ld' loading state and id='pg'
+  // content container, plus a bootstrap script at the end that
+  // toggles them. We use distinct id='ld-stub' / id='settings-body'
+  // here so they don't collide; we remove ld-stub after injection
+  // and let the body's own ld/pg toggle take over.
+  fetch('/settings/body.gz',{cache:'no-store'}).then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.text();
+  }).then(function(html){
+    var t=document.getElementById('settings-body');
+    t.innerHTML=html;
+    // innerHTML doesn't execute injected <script> tags. Re-create
+    // each one so the browser fires it. Preserves order, handles
+    // both inline and src= scripts.
+    t.querySelectorAll('script').forEach(function(orig){
+      var s=document.createElement('script');
+      if(orig.src)s.src=orig.src;else s.textContent=orig.textContent;
+      orig.parentNode.replaceChild(s,orig);
+    });
+    var stub=document.getElementById('ld-stub');
+    if(stub)stub.remove();
+  }).catch(function(e){
+    var stub=document.getElementById('ld-stub');
+    if(stub)stub.innerHTML='<span style="color:#ef4444">Failed to load settings: '+(e.message||e)+'</span>';
+  });
+})();
+</script>
+)HTML");
+    http.sendContent(htmlFoot("/settings"));
+    http.sendContent("");  // final empty chunk terminates chunked encoding
+    return;
+
+#if 0
+    // PRECOMPRESS_SETTINGS_BODY_BEGIN
+    // ---- source-of-truth for the page body ----
+    // The literal below NEVER executes — the early `return` above
+    // skips it and the `#if 0` excludes it from compilation. It
+    // exists so scripts/precompress_settings.py can read it as
+    // text and gzip the contents into _gen_settings_body_gz.h.
+    // Edit this literal to change the page; rebuild regenerates
+    // the gzipped header.
     http.sendContent(R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Settings...</div>
 <div id='pg' style='display:none'>
@@ -1507,17 +1678,25 @@ function pauseBle(){
 // dipping into the malloc-failure / panic zone (~30–60 KB free).
 // Deferring trades ~200 ms of perceived load time for reliable
 // no-panic page loads.
-window.addEventListener('load',function(){
-  fetch('/api/status').then(function(x){return x.json()}).then(function(d){
-    if(d.ble_paused&&d.ble_pause_remaining>0)startPauseUI(d.ble_pause_remaining);
-  }).catch(function(){});
-  loadSchedules();
-});
+// 2.8.0 task #75: when /settings/body.gz is injected via innerHTML
+// after page load, window.load has already fired and a listener
+// registered now would never run. Use readyState to decide whether
+// to run immediately or wait. Same effect either way.
+(function(){
+  var init=function(){
+    fetch('/api/status').then(function(x){return x.json()}).then(function(d){
+      if(d.ble_paused&&d.ble_pause_remaining>0)startPauseUI(d.ble_pause_remaining);
+    }).catch(function(){});
+    loadSchedules();
+  };
+  if(document.readyState==='complete')init();
+  else window.addEventListener('load',init);
+})();
 </script>
 </div>
 )HTML");
-    http.sendContent(htmlFoot("/settings"));
-    http.sendContent("");  // final empty chunk terminates chunked encoding
+    // PRECOMPRESS_SETTINGS_BODY_END
+#endif  // legacy source-of-truth literal
 }
 
 // ========== PAGE 3: Config (/config) ==========
@@ -1817,8 +1996,18 @@ function loadDiag(){
         h+=row('Max reentry depth',"<span style='color:"+rcol+"'>"+h2.max_reentry+(h2.max_reentry>1?' &#x26A0;':'')+"</span>");
       }
       if(typeof h2.loop_max_ms==='number'){
-        var lcol = h2.loop_max_ms > 500 ? '#f59e0b' : (h2.loop_max_ms > 2000 ? '#ef4444' : 'var(--text)');
-        h+=row('Longest loop iteration',"<span style='color:"+lcol+"'>"+h2.loop_max_ms+' ms'+(h2.loop_max_ms>2000?' &#x26A0;':'')+"</span>");
+        // Step 9h: thresholds reflect post-2.7.0 reality. The ?wait
+        // default is 5000 ms, the upper clamp is 8000 ms, and the
+        // chunked-wait pump keeps MQTT/WS alive throughout. So a
+        // 5 s latched value is *expected* under normal load, not a
+        // warning sign. Red + ⚠ only fire above 8 s (the clamp),
+        // which would indicate something genuinely abnormal.
+        // (Pre-9h had a broken ternary: `>500 ? amber : (>2000 ? red ...)`
+        // — left-to-right eval meant the red branch was unreachable.)
+        var v = h2.loop_max_ms;
+        var lcol = v > 8000 ? '#ef4444' : (v > 2000 ? '#f59e0b' : 'var(--text)');
+        var warn = v > 8000 ? ' &#x26A0;' : '';
+        h+=row('Longest loop iteration',"<span style='color:"+lcol+"'>"+v+' ms'+warn+"</span>");
       }
       if(typeof h2.tokens==='number')h+=row('Rate-limit tokens',h2.tokens+' / 4');
       if(typeof h2.heap_free==='number')h+=row('Heap free',(h2.heap_free/1024).toFixed(1)+' KB');
@@ -1827,19 +2016,28 @@ function loadDiag(){
     h+=_sect('Reconnect counters');
     h+=row('BLE reconnects (this boot)',d.ble_reconnects+(d.ble_longest_s?' (longest '+fmtDur(d.ble_longest_s)+')':''));
     h+=row('MQTT reconnects (this boot)',d.mqtt_reconnects+(d.mqtt_longest_s?' (longest '+fmtDur(d.mqtt_longest_s)+')':''));
+    if(typeof d.wifi_reconnects==='number')h+=row('WiFi reconnects (this boot)',d.wifi_reconnects+(d.wifi_longest_s?' (longest '+fmtDur(d.wifi_longest_s)+')':''));
     if(d.ble_last_at_s)h+=row('Last BLE reconnect',fmtUptime(d.ble_last_at_s)+' after boot');
     if(d.mqtt_last_at_s)h+=row('Last MQTT reconnect',fmtUptime(d.mqtt_last_at_s)+' after boot');
+    if(d.wifi_last_at_s)h+=row('Last WiFi reconnect',fmtUptime(d.wifi_last_at_s)+' after boot');
     if(d.events&&d.events.length){
       var thisBoot=d.events.filter(function(e){return e.start<=curUp});
       var prior=d.events.filter(function(e){return e.start>curUp});
       if(thisBoot.length){
         h+='<div style="margin-top:8px;font-size:.82em;color:var(--text2)">Events this boot:</div>';
-        thisBoot.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+', down '+fmtDur(e.dur)+'</div>'});
+        thisBoot.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':(e.kind==='wifi'?'#34d399':'#22d3ee');h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+', down '+fmtDur(e.dur)+'</div>'});
       }
       if(prior.length){
         h+='<div style="margin-top:8px;font-size:.82em;color:var(--text3)">From prior boots (NVS-persisted):</div>';
-        prior.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0;opacity:.55"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+' of that boot, down '+fmtDur(e.dur)+'</div>'});
+        prior.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':(e.kind==='wifi'?'#34d399':'#22d3ee');h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0;opacity:.55"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+' of that boot, down '+fmtDur(e.dur)+'</div>'});
       }
+    }
+    // Smart tripwire: recent loop_max spikes with timestamps.
+    // Lets users distinguish "one outlier overnight" from a
+    // recurring pattern without trusting the latched scalar alone.
+    if(d.loop_events&&d.loop_events.length){
+      h+='<div style="margin-top:8px;font-size:.82em;color:var(--text2)">Recent long loop iterations (≥1 s):</div>';
+      d.loop_events.slice(0,8).forEach(function(e){var ms=e.dur_ms;var col=ms>8000?'#ef4444':(ms>2000?'#f59e0b':'#a3a3a3');h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0"><span style="color:'+col+'">LOOP</span> at +'+fmtUptime(e.start)+' for '+ms+' ms</div>'});
     }
     rows.innerHTML=h||'<div style="color:var(--text3)">No diagnostics logged yet.</div>';
   }).catch(function(){})
@@ -1851,8 +2049,8 @@ function renderGW(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi S
 if(window.wbws){window.wbws.subscribe('ble',function(d){if(!window._lastStatus)return;window._lastStatus.ble=d.state;window._lastStatus.rssi=d.rssi;renderGW(window._lastStatus)});}
 var OCPP_LABELS={chid:'Charger ID',e:'Enabled',pw:'Password',u:'Server URL',ws:'WebSocket',id:'Identity',status:'Status',connected:'Connected',protocol:'Protocol',interval:'Heartbeat (s)',auth:'Auth Type'};
 var NET_LABELS={channel:'WiFi Channel',dns1:'DNS Primary',dns2:'DNS Secondary',gateway:'Gateway',ip:'IP Address',netmask:'Subnet Mask',mac:'MAC Address',ssid:'Network Name',rssi:'Signal (dBm)',signal:'Signal',status:'Status',type:'Connection Type'};
-function Q(m,l){var r=document.getElementById('qr');r.style.display='block';r.innerHTML="<span class='spinner'></span>"+l+"...";fetch('/api/command?action=bapi&met='+m+'&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(d.error){r.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}var v=d.r||d;var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var ws={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi Status',typeof v==='number'?(ws[v]||'Code '+v):''+v)}else if(m==='r_not'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');else v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('#'+(i+1),n.message||n.msg||JSON.stringify(n));h+="</div>"})}else{h+=row('Notifications',typeof v==='number'?(v===0?'None':''+v):''+v)}}else if(m==='g_ocpp'){var lb=OCPP_LABELS;if(typeof v==='object'){for(var k in v){var lbl=lb[k]||k;var val=v[k];if(val===null||val===undefined||val==='')val='<span style="color:var(--text3)">Not set</span>';else if(typeof val==='number'&&(k==='e'||k==='connected'))val=val?'Yes':'No';h+=row(lbl,val)}}else{h+=row('OCPP',v===1?'Connected':v===0?'Not configured':'Code '+v)}}else if(m==='gnsta'){if(Array.isArray(v)&&v.length>0){var n=v[0];var lb=NET_LABELS;for(var k in n){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=n[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else if(typeof v==='object'&&!Array.isArray(v)){var lb=NET_LABELS;for(var k in v){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else{h+=row('Network',''+v)}}else if(m==='gupdc'){if(typeof v==='object'){if(v.update)h+=row('Update Available','<span style="color:var(--success)">Yes</span>');else h+=row('Update Available','No');if(v.version||v.current)h+=row('Current Version',v.version||v.current||'Unknown');if(v.latest||v.new_version)h+=row('Latest Version',v.latest||v.new_version||'Unknown')}else{h+=row('Firmware',typeof v==='number'?(v===0?'Up to date':'Update available ('+v+')'):''+v)}}else if(m==='r_not'){if(typeof v==='object'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('Notification '+(i+1),n.message||n.msg||n.text||JSON.stringify(n));if(n.timestamp||n.ts)h+=row('Time',new Date((n.timestamp||n.ts)*1000).toLocaleString());h+="</div>"})}else{for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});h+=row(lbl,typeof v[k]==='object'?JSON.stringify(v[k]):v[k])}}}else{h+=row('Notifications',v===0?'None':''+v)}}else if(typeof v==='object'){for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(typeof val==='boolean')val=val?'Yes':'No';else if(typeof val==='object')val=JSON.stringify(val);h+=row(lbl,val)}}else{h+=row(l,v)}r.innerHTML=h}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'})}
-function B(){var m=document.getElementById('bm').value,r=document.getElementById('br');r.style.display='block';r.textContent='Sending '+m+'...';fetch('/api/command?action=bapi&met='+encodeURIComponent(m)+'&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){r.textContent=JSON.stringify(d,null,2)}).catch(function(e){r.textContent='Error: '+e.message})}
+function Q(m,l){var r=document.getElementById('qr');r.style.display='block';r.innerHTML="<span class='spinner'></span>"+l+"...";fetch('/api/command?action=bapi&met='+m+'&par=null&wait=12000',{signal:AbortSignal.timeout(13000)}).then(function(x){return x.json()}).then(function(d){if(d.error){r.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}var v=d.r||d;var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var ws={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi Status',typeof v==='number'?(ws[v]||'Code '+v):''+v)}else if(m==='r_not'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');else v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('#'+(i+1),n.message||n.msg||JSON.stringify(n));h+="</div>"})}else{h+=row('Notifications',typeof v==='number'?(v===0?'None':''+v):''+v)}}else if(m==='g_ocpp'){var lb=OCPP_LABELS;if(typeof v==='object'){for(var k in v){var lbl=lb[k]||k;var val=v[k];if(val===null||val===undefined||val==='')val='<span style="color:var(--text3)">Not set</span>';else if(typeof val==='number'&&(k==='e'||k==='connected'))val=val?'Yes':'No';h+=row(lbl,val)}}else{h+=row('OCPP',v===1?'Connected':v===0?'Not configured':'Code '+v)}}else if(m==='gnsta'){if(Array.isArray(v)&&v.length>0){var n=v[0];var lb=NET_LABELS;for(var k in n){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=n[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else if(typeof v==='object'&&!Array.isArray(v)){var lb=NET_LABELS;for(var k in v){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else{h+=row('Network',''+v)}}else if(m==='gupdc'){if(typeof v==='object'){if(v.update)h+=row('Update Available','<span style="color:var(--success)">Yes</span>');else h+=row('Update Available','No');if(v.version||v.current)h+=row('Current Version',v.version||v.current||'Unknown');if(v.latest||v.new_version)h+=row('Latest Version',v.latest||v.new_version||'Unknown')}else{h+=row('Firmware',typeof v==='number'?(v===0?'Up to date':'Update available ('+v+')'):''+v)}}else if(m==='r_not'){if(typeof v==='object'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('Notification '+(i+1),n.message||n.msg||n.text||JSON.stringify(n));if(n.timestamp||n.ts)h+=row('Time',new Date((n.timestamp||n.ts)*1000).toLocaleString());h+="</div>"})}else{for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});h+=row(lbl,typeof v[k]==='object'?JSON.stringify(v[k]):v[k])}}}else{h+=row('Notifications',v===0?'None':''+v)}}else if(typeof v==='object'){for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(typeof val==='boolean')val=val?'Yes':'No';else if(typeof val==='object')val=JSON.stringify(val);h+=row(lbl,val)}}else{h+=row(l,v)}r.innerHTML=h}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'})}
+function B(){var m=document.getElementById('bm').value,r=document.getElementById('br');r.style.display='block';r.textContent='Sending '+m+'...';fetch('/api/command?action=bapi&met='+encodeURIComponent(m)+'&par=null&wait=12000',{signal:AbortSignal.timeout(13000)}).then(function(x){return x.json()}).then(function(d){r.textContent=JSON.stringify(d,null,2)}).catch(function(e){r.textContent='Error: '+e.message})}
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
 </script>
 </div>
@@ -2804,6 +3002,47 @@ static void registerRoutes() {
     http.on("/api/ble/pause", handleBlePause);
     http.on("/api/charger", handleApiCharger);
     http.on("/api/command", handleApiCommand);
+    // 2.7.0 step 7 — poll endpoint for the async ?wait=0 path. Returns:
+    //   200 + body  → response landed, returned in the body
+    //   202 + status:pending → request still in flight, or evicted
+    //                          from the small RAM map but might still
+    //                          be tracked by the BLE task
+    //   410 Gone    → reqId is from the future (was never issued by
+    //                 this gateway boot — caller likely typo'd, fuzzed,
+    //                 or is talking to a different gateway after a
+    //                 reboot)
+    //   400         → no ?id= param, or non-numeric / zero
+    http.on("/api/command_status", []() {
+        if (!checkAuth()) return;
+        if (!http.hasArg("id")) {
+            http.send(400, "application/json", "{\"error\":\"missing id\"}");
+            return;
+        }
+        uint32_t reqId = (uint32_t)http.arg("id").toInt();
+        if (reqId == 0) {
+            http.send(400, "application/json", "{\"error\":\"invalid id\"}");
+            return;
+        }
+        String body;
+        if (wallboxBLE.tryFetchResponse(reqId, body) && body.length()) {
+            http.send(200, "application/json", body);
+            return;
+        }
+        // Step 9 audit fix: distinguish "future id never issued" (410)
+        // from "could still be in flight" (202). Without this, /api/
+        // command_status returns 202 forever for an invalid id, which
+        // lets a bad client (or a probe after gateway reboot) poll
+        // indefinitely. 410 is correctly retry-discouraged in HTTP
+        // semantics — callers know to stop.
+        uint32_t nextId = wallboxBLE.peekNextReqId();
+        if (reqId >= nextId) {
+            http.send(410, "application/json",
+                "{\"error\":\"unknown id — never issued\"}");
+            return;
+        }
+        String pending = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
+        http.send(202, "application/json", pending);
+    });
     http.on("/api/fw/dismiss", HTTP_POST, []() {
         if (!checkAuth()) return;
         wallboxBLE.dismissFirmwareChange();
@@ -3024,6 +3263,21 @@ static void registerRoutes() {
     http.on("/ota", handleOtaPage);
     http.on("/api/ota", HTTP_POST, []() {}, handleOtaUpload);
     http.on("/sessions", handleSessionsPage);
+
+    // Pre-gzipped /settings body (task #75). The bytes are stored in
+    // PROGMEM by scripts/precompress_settings.py; we send them raw
+    // with Content-Encoding: gzip so the browser decompresses on its
+    // side. Cache-Control is short — page version is tied to the
+    // firmware build, so any OTA invalidates the gzipped content.
+    http.on("/settings/body.gz", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Content-Encoding", "gzip");
+        http.sendHeader("Cache-Control", "public, max-age=300");
+        http.sendHeader("X-Uncompressed-Bytes",
+            String((unsigned long)SETTINGS_BODY_RAW_LEN));
+        http.send_P(200, "text/html",
+            (const char*)SETTINGS_BODY_GZ, SETTINGS_BODY_GZ_LEN);
+    });
     http.on("/manifest.json", handleManifest);
     http.on("/sw.js", handleServiceWorker);
     http.on("/favicon.ico", []() { http.send(204); });

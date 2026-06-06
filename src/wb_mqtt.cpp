@@ -370,10 +370,17 @@ void WallboxMQTT::_mqttCallback(char* topic, byte* payload, unsigned int len) {
                 if (doc.containsKey("par") && !doc["par"].isNull()) {
                     serializeJson(doc["par"], par);
                 }
-                String resp = wallboxBLE.sendCommand(met, par.c_str());
-                if (!resp.isEmpty()) {
-                    wallboxMQTT.publishResponse(met, resp);
-                }
+                // 2.7.0 step 8: raw /bapi topic now uses the async
+                // queue with MQTT_PUBLISH replyMode. The BLE task
+                // drains, executes, and stages the response on the
+                // pending-pub ring; the main loop picks it up and
+                // publishes to wallbox/response/<met> via the
+                // existing publishResponse path. Net: HA sees the
+                // same retained payload it always did, but the
+                // _mqttCallback no longer blocks main loop for the
+                // full BAPI roundtrip.
+                wallboxBLE.enqueueRequest(met, par.c_str(),
+                    WallboxBLE::ReplyMode::MQTT_PUBLISH);
             }
         }
     }
@@ -401,7 +408,7 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
             return;
         }
         par = String(val);
-        wallboxBLE.sendCommand(bapi::MET_START_STOP, par.c_str());
+        wallboxBLE.enqueueRequest(bapi::MET_START_STOP, par.c_str());
 
     } else if (sub == "current") {
         // payload: integer 6-32
@@ -411,7 +418,7 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
             return;
         }
         par = String(amps);
-        wallboxBLE.sendCommand(bapi::MET_SET_CURRENT, par.c_str());
+        wallboxBLE.enqueueRequest(bapi::MET_SET_CURRENT, par.c_str());
 
     } else if (sub == "lock") {
         // payload: "1"/"lock"/"true" or "0"/"unlock"/"false"
@@ -419,26 +426,26 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         action.toLowerCase();
         int val = (action == "1" || action == "lock" || action == "true") ? 1 : 0;
         par = String(val);
-        wallboxBLE.sendCommand(bapi::MET_LOCK, par.c_str());
+        wallboxBLE.enqueueRequest(bapi::MET_LOCK, par.c_str());
 
     } else if (sub == "reboot") {
-        wallboxBLE.sendCommand(bapi::MET_REBOOT, "null");
+        wallboxBLE.enqueueRequest(bapi::MET_REBOOT, "null");
 
     } else if (sub == "autolock") {
         // payload: JSON {"enabled":1,"time":60}
-        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, payload);
+        wallboxBLE.enqueueRequest(bapi::MET_SET_AUTOLOCK, payload);
 
     } else if (sub == "eco_smart") {
-        wallboxBLE.sendCommand(bapi::MET_SET_ECO_SMART, payload);
+        wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, payload);
 
     } else if (sub == "schedule") {
-        wallboxBLE.sendCommand(bapi::MET_SET_SCHEDULE, payload);
+        wallboxBLE.enqueueRequest(bapi::MET_SET_SCHEDULE, payload);
 
     } else if (sub == "power_boost") {
-        wallboxBLE.sendCommand(bapi::MET_SET_POWER_BOOST, payload);
+        wallboxBLE.enqueueRequest(bapi::MET_SET_POWER_BOOST, payload);
 
     } else if (sub == "halo") {
-        wallboxBLE.sendCommand(bapi::MET_SET_HALO, payload);
+        wallboxBLE.enqueueRequest(bapi::MET_SET_HALO, payload);
 
     // ---- Native HA entity handlers (Batch 1) ----
     } else if (sub == "autolock_enable") {
@@ -452,7 +459,7 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         int mins = wallboxBLE.lastAutolockMin();
         if (mins < 1) mins = 1;
         int secs = on ? mins * 60 : 0;
-        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, String(secs).c_str());
+        wallboxBLE.enqueueRequest(bapi::MET_SET_AUTOLOCK, String(secs).c_str());
 
     } else if (sub == "autolock_time") {
         // HA sends minutes (matching the Wallbox app); charger wants
@@ -461,7 +468,7 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         if (mins < 1) mins = 1;
         if (mins > 60) mins = 60;
         wallboxBLE._lastAutolockMin = mins;  // remember for the next switch ON
-        wallboxBLE.sendCommand(bapi::MET_SET_AUTOLOCK, String(mins * 60).c_str());
+        wallboxBLE.enqueueRequest(bapi::MET_SET_AUTOLOCK, String(mins * 60).c_str());
 
     } else if (sub == "eco_mode") {
         // HA sends: "Off", "Full Green (Solar Only)", "Solar + Grid"
@@ -471,30 +478,30 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         if (s.startsWith("Full Green")) mode = 1;
         else if (s == "Solar + Grid") mode = 2;
         String p = "{\"esm\":" + String(mode) + ",\"ese\":" + String(mode > 0 ? 1 : 0) + ",\"esp\":100}";
-        wallboxBLE.sendCommand(bapi::MET_SET_ECO_SMART, p.c_str());
+        wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, p.c_str());
 
     } else if (sub == "eco_power") {
         int pct = atoi(payload);
         if (pct < 0) pct = 0; if (pct > 100) pct = 100;
         String p = "{\"esp\":" + String(pct) + "}";
-        wallboxBLE.sendCommand(bapi::MET_SET_ECO_SMART, p.c_str());
+        wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, p.c_str());
 
     } else if (sub == "power_sharing") {
         String s = payload; s.toLowerCase();
         int en = (s == "1" || s == "on" || s == "true") ? 1 : 0;
         String p = "{\"dyps\":" + String(en) + "}";
-        wallboxBLE.sendCommand(bapi::MET_SET_POWER_SHARE, p.c_str());
+        wallboxBLE.enqueueRequest(bapi::MET_SET_POWER_SHARE, p.c_str());
 
     } else if (sub == "phase_switch") {
         String s = payload; s.toLowerCase();
         int en = (s == "1" || s == "on" || s == "true") ? 1 : 0;
         String p = "{\"enabled\":" + String(en) + "}";
-        wallboxBLE.sendCommand(bapi::MET_SET_PHASE, p.c_str());
+        wallboxBLE.enqueueRequest(bapi::MET_SET_PHASE, p.c_str());
 
     } else if (sub == "timezone") {
         // HA sends the timezone string directly
         String p = "{\"timezone\":\"" + String(payload) + "\"}";
-        wallboxBLE.sendCommand(bapi::MET_SET_TIMEZONE, p.c_str());
+        wallboxBLE.enqueueRequest(bapi::MET_SET_TIMEZONE, p.c_str());
 
     } else {
         Log.printf("[CMD] Unknown command: %s\n", subtopic);

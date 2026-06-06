@@ -5,6 +5,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <freertos/queue.h>
 #include "bapi.h"
 
 // Wallbox BLE connection manager.
@@ -29,6 +30,59 @@ public:
 
     // Non-blocking: queue a command
     void queueCommand(const char* met, const char* par = "null");
+
+    // 2.7.0 async request queue (in-progress, see docs/plans/
+    // 2.7.0-api-command-async.md). Public-section ReplyMode + BleReq
+    // because `enqueueRequest` references them in default args.
+    enum class ReplyMode : uint8_t {
+        FIRE_AND_FORGET = 0,   // discard response
+        WAKE_WAITER     = 1,   // xTaskNotify the originating task
+        MQTT_PUBLISH    = 2,   // queue response for main task to publish
+        WAKE_AND_MQTT   = 3,   // both — used by /api/command short-wait
+                               // so a handler that times out (202) still
+                               // has its response delivered to the
+                               // wallbox/response/<met> topic for the
+                               // client to pick up out-of-band
+    };
+    // Enqueues a BAPI request on the BLE task's internal queue and
+    // returns immediately with the assigned request id (0 = queue
+    // full or not yet initialised). The BLE task drains at ~50 Hz
+    // and runs each request through sendCommand internally; the
+    // response is stored in the RAM map (see tryFetchResponse).
+    uint32_t enqueueRequest(const char* met,
+                            const char* par = "null",
+                            ReplyMode replyMode = ReplyMode::FIRE_AND_FORGET,
+                            TaskHandle_t waiter = nullptr,
+                            uint32_t bapiTimeoutMs = 0);
+
+    // 2.7.0 step 3 — fetch a previously-enqueued request's response
+    // by its assigned id. Returns true and fills `out` if the
+    // response is available; false if the request hasn't completed
+    // yet, or its entry has been FIFO-evicted from the small map
+    // (cap kResponseMapSize). Callers race the map: poll, sleep,
+    // poll again — or use xTaskNotifyWait (step 4) for the active
+    // wake path.
+    bool tryFetchResponse(uint32_t reqId, String& out);
+    static const uint8_t kResponseMapSize = 4;
+
+    // 2.7.0 step 5 — drain pending MQTT-publish responses queued by
+    // the BLE-task drain when a request's replyMode was MQTT_PUBLISH.
+    // Returns true and fills out_met + out_json if a publish is
+    // pending; false if the queue is empty. Main task calls this in
+    // its existing publishCached*IfNew block and publishes via
+    // PubSubClient (which is not thread-safe — must stay on main
+    // task). Same defer-via-queue pattern as _storeCache.
+    bool drainPendingResponsePub(String& out_met, String& out_json);
+    static const uint8_t kPendingPubSize = 4;
+
+    // Step 9 hardening: snapshot of the next-to-be-issued request id.
+    // /api/command_status uses this to distinguish "future id, never
+    // issued" (410 Gone) from "could plausibly still be in flight" (202
+    // pending) for an id that's already left the small response map.
+    // Atomic load to match the atomic_fetch_add in enqueueRequest.
+    uint32_t peekNextReqId() const {
+        return __atomic_load_n(&_nextReqId, __ATOMIC_RELAXED);
+    }
 
     // State
     State state() const { return _state; }
@@ -274,6 +328,79 @@ private:
     void _pollSettings();
     void _pollNotifications();
     void _storeCache(String& dst, uint32_t& seq, const String& value);
+
+    // ---- Phase 3 BLE request queue (2.7.0 in progress) ----
+    // Single-slot _pendingCmd is being replaced by a real FreeRTOS queue
+    // so /api/command and MQTT _handleCommand can enqueue commands
+    // without blocking on _cmdMutex. See docs/plans/2.7.0-api-command-async.md.
+    // ReplyMode is in the public section above.
+    struct BleReq {
+        uint32_t  reqId;
+        char      met[16];
+        char      par[192];     // BAPI payloads are small; truncate-and-warn
+        ReplyMode replyMode;
+        TaskHandle_t waiter;    // xTaskNotify target, NULL if fire-and-forget
+        uint32_t  enqueuedAt;   // millis() for timeout / drop-old logic
+        uint32_t  bapiTimeoutMs;// step 9d: per-request BAPI timeout. 0 =
+                                // use _sendCommandDirect default (5000 ms).
+                                // Web handler sets this to match the caller's
+                                // ?wait so the BAPI roundtrip doesn't give up
+                                // earlier than the HTTP wait — that mismatch
+                                // was causing 202s on slow methods like gupdc
+                                // even though the caller would have waited.
+    };
+    // FreeRTOS queue handle, depth kBleReqQueueDepth.
+    QueueHandle_t _reqQueue = nullptr;
+    static const uint8_t kBleReqQueueDepth = 6;
+    // Monotonic request ID counter. Bumped via __atomic_fetch_add
+    // because enqueueRequest runs on both the main task (web handler)
+    // and the BLE task (MQTT callback invoked from inside yield during
+    // a sendCommand wait). Plain ++ would race and produce duplicate
+    // ids; using _cmdMutex would serialise long BAPI roundtrips behind
+    // a counter increment. Atomic RELAXED is lock-free, microsecond,
+    // and correct under both visit orders.
+    uint32_t _nextReqId = 1;
+
+    // Step 3: response RAM map. Capped FIFO ring of {reqId, json}
+    // pairs populated by the drain loop after sendCommand returns
+    // and drained by tryFetchResponse(). Cap is intentionally small
+    // — if a caller hasn't polled within ~4 subsequent requests
+    // they probably aren't coming back, and the response would have
+    // been delivered via MQTT/WS by step 5 anyway. Mutex-protected.
+    struct ResponseSlot {
+        uint32_t reqId;          // 0 = empty slot
+        uint32_t completedAt;    // millis() when stored, for diag
+        String   json;
+    };
+    ResponseSlot _responseMap[kResponseMapSize] = {};
+    uint8_t      _responseMapHead = 0;  // next eviction index (FIFO)
+    SemaphoreHandle_t _responseMapMutex = nullptr;
+    // Internal: store a response in the map under _responseMapMutex.
+    // No-op if reqId == 0 (fire-and-forget) or json is empty.
+    void _storeResponse(uint32_t reqId, const String& json);
+
+    // Step 5: pending-MQTT-publish ring. BLE-task drain enqueues
+    // when replyMode == MQTT_PUBLISH; main task drains via
+    // drainPendingResponsePub() and publishes through wallboxMQTT.
+    // Capped so a wedged MQTT can't grow unbounded — drops oldest
+    // with a log line.
+    struct PendingPub {
+        String met;
+        String json;
+    };
+    PendingPub _pendingPub[kPendingPubSize] = {};
+    uint8_t    _pendingPubHead = 0;   // next eviction (write) index
+    uint8_t    _pendingPubTail = 0;   // next read index
+    SemaphoreHandle_t _pendingPubMutex = nullptr;
+    void _enqueueMqttPub(const String& met, const String& json);
+
+    // 2.7.0 step 4: the "direct" BAPI write+wait path. Same body as
+    // the pre-step-4 sendCommand: takes _cmdMutex, writes the framed
+    // BAPI bytes to _chr, polls _responseReady. Used by the BLE-task-
+    // internal callers (periodic polls, keepalive, post-connect
+    // identity reads, PIN auth, drain loop). External callers go
+    // through the public sendCommand() wrapper which queues + waits.
+    String _sendCommandDirect(const char* met, const char* par = "null", uint32_t timeoutMs = 5000);
 
     // RSSI smoothing — NimBLE's getRssi() returns per-packet instantaneous
     // values that swing wildly (issue #6). Sample on a fixed cadence and

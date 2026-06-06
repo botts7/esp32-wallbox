@@ -15,32 +15,29 @@ and have deferred. Each one can wedge `loop_max_ms` for multi-second
 periods under the right conditions. Same architectural class as the
 MQTT discovery burst we fixed in 2.6.0.
 
-- [ ] **WiFi.reconnect off main loop** (task #70 —
+- [x] **WiFi.reconnect off main loop** (task #70 — shipped in 2.7.0;
   [full plan](plans/2.7.0-wifi-reconnect.md))
 
-  Event-driven (`WiFi.onEvent`) primary + exponential backoff defer
-  policy. Event handler sets flags only; `wb_net::tick()` on main
-  drives the explicit `WiFi.reconnect()` only when driver's own
-  auto-reconnect has clearly given up (≥60 s since `GOT_IP`), with
-  1/2/5/15/60 s backoff. Most of the time the driver auto-reconnects
-  on its own and we never explicitly call it. New `wb_net` module
-  (~150 LOC); `wb_diag` extended for WIFI Kind (auto-gives WiFi the
-  same 30 s loop-gate as BLE/MQTT). ~+200 net LOC across 7 files,
-  9-step impl order with small/medium/large tags.
+  Shipped as the `wb_net` module + `wb_diag` WIFI Kind. Event
+  handlers on the WiFi driver's event task set flags only; main
+  loop's `wb_net::tick()` drains pending work and only calls
+  explicit `WiFi.reconnect()` after the driver has clearly given
+  up (≥ 60 s gate + 1/2/5/15/60 s backoff). Measured
+  loop_max_ms baseline post-OTA: 17 ms. See CHANGELOG.md → 2.7.0
+  for the full entry.
 
-- [ ] **`/api/command` BLE-passthrough async** (task #71 —
+- [x] **`/api/command` BLE-passthrough async** (task #71 — shipped
+  in 2.7.0;
   [full plan](plans/2.7.0-api-command-async.md))
 
-  Hybrid queue + short-wait + 202-fallback design. HTTP handler
-  enqueues to BLE task and waits ~800 ms; if BAPI completes
-  (~98 % case on healthy MAX), returns 200 + body byte-for-byte
-  same as today. Otherwise returns 202 + `{id, status:"pending"}`;
-  response lands on MQTT + WS; `GET /api/command_status?id=N`
-  polls. **Bigger win: same treatment applies to MQTT
-  `_handleCommand`** (every HA toggle goes through it). New
-  `BleReq` queue (depth 6), reqId correlation via existing BAPI
-  `id` field. Backward-compat via `?wait=ms` knob + `?sync=1`
-  escape hatch. ~+460 LOC across 5 files, 11-step impl order.
+  Shipped as 11 steps + 4 audit/regression follow-ups (9, 9b-9h).
+  Final shape: default `?wait` is 5000 ms (not the planned 800 ms)
+  to preserve the byte-for-byte sync JS contract; upper clamp
+  is 8000 ms. The async path is preserved for `?wait=0` and
+  short-wait callers. MQTT `_handleCommand` is fully fire-and-
+  forget — every HA toggle is now zero main-loop time. The web
+  handler pumps MQTT + WS in 50 ms ticks during waits so neither
+  starves. See CHANGELOG.md → 2.7.0 for the full story.
 
 ---
 
@@ -62,11 +59,14 @@ fix proactively but we should be ready when the report lands.
   negative values and converts RSSI → quality %, but the path is
   untested on real Plus hardware.
 
-- [ ] **README refresh for 2.4.x → 2.6.x feature surface** (task #76)
-  Project root `README.md` is stale on community PRs (status enum,
-  switch toggles, autolock), persistent CSRF, one-publish-per-tick
-  discovery, protocol auto-detect, Diagnostic-category entities,
-  dynamic `sw_version`. Separate commit — not bundled with code work.
+- [x] **README refresh for 2.4.x → 2.8.0 feature surface** (task #76
+  — shipped)
+  Added "Recent releases" block, refreshed HA integration section
+  (diagnostic-category entities, non-blocking commands, dynamic
+  sw_version), Admin section (mDNS rebind, persistent CSRF, smart
+  tripwire), Compatible Chargers (corrected the 6.11.26 line),
+  Project structure (now matches src/ + tests/ + scripts/), and
+  added @peter-mcc + @mvanlijden to Contributors.
 
 ---
 
@@ -76,15 +76,20 @@ Nice-to-have improvements that don't fix observed bugs but raise the
 quality bar. Lower priority than the 2.7.0 blockers, but each is small
 and self-contained.
 
-- [ ] **Smart tripwire — recent-events ring** (task #74)
-  `loop_max_ms` is currently "max ever since clear" — one outlier sticks
-  for hours. Track last N events with timestamps so users distinguish
-  "one transient overnight" from "recurring spikes." ~50 LOC in wb_diag.
+- [x] **Smart tripwire — recent-events ring** (task #74 — shipped)
+  Ring of last 8 long iterations (≥ 1 s) with timestamps. Lives in
+  `wb_diag::recordLoopEvent` + ring exposed in
+  `/api/diag/disconnects → loop_events`. Renders on /info → Connection
+  Diagnostics under "Recent long loop iterations" with the same color
+  scale as the latched scalar (neutral / amber / red).
 
-- [ ] **Compress or paginate `/api/settings` response** (task #75)
-  Audit flagged 67 KB per response. Strip whitespace + GZIP could
-  drop ~75%, paginating by section could drop more. Helps slow WiFi
-  clients and reduces HTTP-handler wall-clock time.
+- [x] **Compress /settings page body** (task #75 — shipped)
+  Build-time gzip via `scripts/precompress_settings.py` PIO
+  pre-script. The big static body (~56 KB raw) becomes a
+  PROGMEM byte array; new `/settings/body.gz` endpoint serves
+  it with `Content-Encoding: gzip`. `handleSettings` sends a
+  small stub that fetches + injects + re-runs scripts.
+  Measured: total first-load 68 KB → 28 KB (2.4× wire win).
 
 ---
 

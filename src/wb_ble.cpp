@@ -51,10 +51,16 @@ void WallboxBLE::begin(const char* addr) {
     // Phase 1 refactor: spin up a dedicated FreeRTOS task that owns the
     // BLE state machine. The Arduino main loop no longer calls loop()
     // directly — so BLE scans / connects / waits never freeze the web UI.
-    // The mutex serialises sendCommand() callers (notably: the BLE task's
+    // The mutex serialises _sendCommandDirect() callers (notably: the BLE task's
     // own keepalive, and the main task's poll cycles).
     if (!_cmdMutex) _cmdMutex = xSemaphoreCreateMutex();
     if (!_cacheMutex) _cacheMutex = xSemaphoreCreateMutex();
+    // 2.7.0 step 1: BLE request queue infrastructure. Allocated here
+    // alongside the existing mutexes; no callers yet — this is the
+    // null-op scaffolding step. See docs/plans/2.7.0-api-command-async.md.
+    if (!_reqQueue) _reqQueue = xQueueCreate(kBleReqQueueDepth, sizeof(BleReq));
+    if (!_responseMapMutex) _responseMapMutex = xSemaphoreCreateMutex();
+    if (!_pendingPubMutex)  _pendingPubMutex  = xSemaphoreCreateMutex();
     if (!_taskHandle) {
         xTaskCreatePinnedToCore(
             _taskFn, "wb_ble",
@@ -143,7 +149,7 @@ void WallboxBLE::loop() {
         // Plus doesn't implement `ping` — use r_dat (status) which is universal
         if (millis() - _lastActivityTime >= PING_INTERVAL_MS) {
             const char* keepalive = isPlus() ? bapi::MET_GET_STATUS : bapi::MET_PING;
-            String resp = sendCommand(keepalive, "null", 2000);
+            String resp = _sendCommandDirect(keepalive, "null", 2000);
             if (resp.isEmpty()) {
                 Log.printf("[BLE] Keepalive %s timeout — reconnecting\n", keepalive);
                 _disconnect();
@@ -161,6 +167,40 @@ void WallboxBLE::loop() {
                 _chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), false);
                 _txCount++;
                 _lastActivityTime = millis();
+            }
+        }
+
+        // ---- Phase 3 (2.7.0 steps 2+3): drain async request queue ----
+        // Each enqueued BleReq is dispatched through sendCommand here
+        // (safe — the BLE task already calls sendCommand for its own
+        // keepalive, so re-entering doesn't deadlock _cmdMutex). At
+        // most ONE request per loop iteration so periodic polling
+        // doesn't get starved. Step 3: response stored in RAM map
+        // keyed by req.reqId for tryFetchResponse() to pick up.
+        // xTaskNotify wake-waiter path lands in step 4; MQTT-publish
+        // back-channel in step 5.
+        if (_reqQueue) {
+            BleReq req;
+            if (xQueueReceive(_reqQueue, &req, 0) == pdTRUE) {
+                // Step 9d: honour per-request BAPI timeout if set.
+                // Web handler passes ?wait through so the BAPI roundtrip
+                // matches the HTTP wait — otherwise slow methods like
+                // gupdc (10 s cloud check) gave up at the 5 s default
+                // and the waiter saw a 202 even though the user asked
+                // to wait 12 s. 0 = use the function's own default.
+                uint32_t to = req.bapiTimeoutMs ? req.bapiTimeoutMs : 5000;
+                String resp = _sendCommandDirect(req.met, req.par, to);
+                _storeResponse(req.reqId, resp);
+                bool doWake = (req.replyMode == ReplyMode::WAKE_WAITER
+                            || req.replyMode == ReplyMode::WAKE_AND_MQTT);
+                bool doMqtt = (req.replyMode == ReplyMode::MQTT_PUBLISH
+                            || req.replyMode == ReplyMode::WAKE_AND_MQTT);
+                if (doWake && req.waiter) {
+                    xTaskNotify(req.waiter, req.reqId, eSetValueWithOverwrite);
+                }
+                if (doMqtt && resp.length()) {
+                    _enqueueMqttPub(String(req.met), resp);
+                }
             }
         }
 
@@ -516,7 +556,7 @@ void WallboxBLE::_connect() {
         // Read charger identity once per connect — works on MAX + Plus.
         // r_sn_ returns the serial; g_mac returns the charger's MAC addresses.
         // Best-effort: failures just leave the fields empty.
-        String snResp = sendCommand(bapi::MET_GET_SERIAL, "null", 2000);
+        String snResp = _sendCommandDirect(bapi::MET_GET_SERIAL, "null", 2000);
         if (!snResp.isEmpty()) {
             JsonDocument d;
             if (deserializeJson(d, snResp) == DeserializationError::Ok) {
@@ -524,7 +564,7 @@ void WallboxBLE::_connect() {
                 else if (d["r"]["sn"].is<const char*>()) _chgSerial = d["r"]["sn"].as<const char*>();
             }
         }
-        String macResp = sendCommand(bapi::MET_GET_MAC, "null", 2000);
+        String macResp = _sendCommandDirect(bapi::MET_GET_MAC, "null", 2000);
         if (!macResp.isEmpty()) {
             JsonDocument d;
             if (deserializeJson(d, macResp) == DeserializationError::Ok) {
@@ -554,7 +594,7 @@ void WallboxBLE::_connect() {
         // response format varies (some firmware returns plain "ok"/"fault",
         // others return a JSON object {"r":{...}}) — store whatever we get
         // so the UI can do best-effort display.
-        String welResp = sendCommand(bapi::MET_GET_GROUNDING, "null", 2000);
+        String welResp = _sendCommandDirect(bapi::MET_GET_GROUNDING, "null", 2000);
         if (!welResp.isEmpty()) {
             JsonDocument d;
             if (deserializeJson(d, welResp) == DeserializationError::Ok) {
@@ -599,7 +639,7 @@ void WallboxBLE::_connect() {
         // Response shape (confirmed on MAX, expected to match on Plus):
         //   { id, c, db, fw, p, r, s }
         // where s = human-readable version, p = project ("prj15-pulsar-max").
-        String fwvResp = sendCommand(bapi::MET_GET_CHARGER_VER, "null", 2000);
+        String fwvResp = _sendCommandDirect(bapi::MET_GET_CHARGER_VER, "null", 2000);
         if (!fwvResp.isEmpty()) {
             JsonDocument d;
             if (deserializeJson(d, fwvResp) == DeserializationError::Ok) {
@@ -632,7 +672,7 @@ void WallboxBLE::_connect() {
         // neither yields a real number, leave _chgSessionCount at -1
         // and the publish path emits null so HA marks the sensor
         // unavailable instead of showing -1.
-        String sesResp = sendCommand(bapi::MET_GET_SESSIONS, "null", 2000);
+        String sesResp = _sendCommandDirect(bapi::MET_GET_SESSIONS, "null", 2000);
         if (!sesResp.isEmpty()) {
             JsonDocument d;
             if (deserializeJson(d, sesResp) == DeserializationError::Ok) {
@@ -654,7 +694,7 @@ void WallboxBLE::_connect() {
         // Per jagheterfredrik/wallbox-ble: GET_POWER_BOOST = "r_hsh".
         // Observed return on MAX: plain integer (e.g. 63). Refreshed
         // each (re)connect — config changes are rare.
-        String hshResp = sendCommand(bapi::MET_GET_POWER_BOOST, "null", 2000);
+        String hshResp = _sendCommandDirect(bapi::MET_GET_POWER_BOOST, "null", 2000);
         if (!hshResp.isEmpty()) {
             JsonDocument d;
             if (deserializeJson(d, hshResp) == DeserializationError::Ok && d["r"].is<int>()) {
@@ -666,7 +706,7 @@ void WallboxBLE::_connect() {
         // Discrete lock state (r_lck). Same fact as r_sta.lock_status
         // but as its own field, which lets HA wire a dedicated lock
         // entity rather than parsing the realtime blob.
-        String lckResp = sendCommand(bapi::MET_GET_LOCK_STATE, "null", 2000);
+        String lckResp = _sendCommandDirect(bapi::MET_GET_LOCK_STATE, "null", 2000);
         if (!lckResp.isEmpty()) {
             JsonDocument d;
             if (deserializeJson(d, lckResp) == DeserializationError::Ok && d["r"].is<int>()) {
@@ -680,7 +720,7 @@ void WallboxBLE::_connect() {
         // SSID/IP/RSSI. The charger has its OWN WiFi link (separate
         // from our gateway's link to the user's WiFi), so this is
         // distinct diagnostic information.
-        String nstaResp = sendCommand(bapi::MET_GET_NETWORKS, "null", 2000);
+        String nstaResp = _sendCommandDirect(bapi::MET_GET_NETWORKS, "null", 2000);
         if (!nstaResp.isEmpty()) {
             JsonDocument d;
             if (deserializeJson(d, nstaResp) == DeserializationError::Ok) {
@@ -739,14 +779,14 @@ bool WallboxBLE::_authenticate() {
     // older firmware just silently drops the request.
     Log.println("[BLE] Checking PIN status...");
     uint32_t pinTimeout = isPlus() ? 2000 : 5000;
-    String pinResp = sendCommand(bapi::MET_READ_PIN, "null", pinTimeout);
+    String pinResp = _sendCommandDirect(bapi::MET_READ_PIN, "null", pinTimeout);
 
     if (pinResp.isEmpty()) {
         // No read_pin support on this firmware. Confirm the BAPI channel
         // actually works (via r_dat) before declaring "no PIN needed" —
         // otherwise a dead link looks identical to an unauthed-but-open one.
         Log.println("[BLE] No read_pin response — probing r_dat to confirm channel...");
-        String probe = sendCommand(bapi::MET_GET_STATUS, "null", 5000);
+        String probe = _sendCommandDirect(bapi::MET_GET_STATUS, "null", 5000);
         if (probe.isEmpty()) {
             Log.println("[BLE] r_dat also silent — channel may be broken or auth-gated");
         } else {
@@ -782,7 +822,7 @@ bool WallboxBLE::_authenticate() {
     Log.println("[BLE] Authenticating with PIN...");
     String par = "{\"pin\":\"" + _pin + "\",\"version\":" + String(version) + "}";
 
-    String authResp = sendCommand(bapi::MET_SET_PIN, par.c_str(), 5000);
+    String authResp = _sendCommandDirect(bapi::MET_SET_PIN, par.c_str(), 5000);
     if (!authResp.isEmpty()) {
         JsonDocument authDoc;
         if (deserializeJson(authDoc, authResp) == DeserializationError::Ok) {
@@ -836,7 +876,134 @@ void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_
     }
 }
 
-String WallboxBLE::sendCommand(const char* met, const char* par, uint32_t timeoutMs) {
+// 2.7.0 step 5 — defer an MQTT publish to the main task. Called
+// from the BLE-task drain when a request's replyMode is MQTT_PUBLISH.
+// Cap at kPendingPubSize entries; drops oldest with a log line if the
+// ring fills (which only happens if main task drain is wedged —
+// shouldn't happen in normal flow).
+void WallboxBLE::_enqueueMqttPub(const String& met, const String& json) {
+    if (met.length() == 0 || json.length() == 0) return;
+    if (!_pendingPubMutex) return;
+    if (xSemaphoreTake(_pendingPubMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    uint8_t next = (_pendingPubHead + 1) % kPendingPubSize;
+    if (next == _pendingPubTail) {
+        // Ring full — drop oldest. Tail advance frees a slot.
+        Log.printf("[BLE] pending MQTT pub ring full, dropping met=%s\n",
+                   _pendingPub[_pendingPubTail].met.c_str());
+        _pendingPubTail = (_pendingPubTail + 1) % kPendingPubSize;
+    }
+    _pendingPub[_pendingPubHead].met  = met;
+    _pendingPub[_pendingPubHead].json = json;
+    _pendingPubHead = next;
+    xSemaphoreGive(_pendingPubMutex);
+}
+
+// 2.7.0 step 5 — drain one pending MQTT publish. Called from main
+// task loop. Returns false when the ring is empty so the caller can
+// break out of the drain loop. The main task should call this in a
+// loop until false to flush all pending pubs each iteration.
+bool WallboxBLE::drainPendingResponsePub(String& out_met, String& out_json) {
+    if (!_pendingPubMutex) return false;
+    if (xSemaphoreTake(_pendingPubMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+    bool got = false;
+    if (_pendingPubTail != _pendingPubHead) {
+        out_met  = _pendingPub[_pendingPubTail].met;
+        out_json = _pendingPub[_pendingPubTail].json;
+        // Free the heap-backed Strings before advancing the tail.
+        _pendingPub[_pendingPubTail].met  = String();
+        _pendingPub[_pendingPubTail].json = String();
+        _pendingPubTail = (_pendingPubTail + 1) % kPendingPubSize;
+        got = true;
+    }
+    xSemaphoreGive(_pendingPubMutex);
+    return got;
+}
+
+// 2.7.0 step 3 — store a completed response in the RAM map. Called
+// from the BLE task's drain loop after sendCommand returns. Mutex-
+// protected; safe to read from any task via tryFetchResponse.
+void WallboxBLE::_storeResponse(uint32_t reqId, const String& json) {
+    if (reqId == 0 || json.length() == 0) return;
+    if (!_responseMapMutex) return;
+    if (xSemaphoreTake(_responseMapMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        Log.printf("[BLE] _storeResponse %u — mutex timeout\n", (unsigned)reqId);
+        return;
+    }
+    ResponseSlot& slot = _responseMap[_responseMapHead];
+    if (slot.reqId != 0) {
+        // Evicting an unread response. Log once so a chronic poll-
+        // never-called bug shows up in /api/logs.
+        Log.printf("[BLE] response map evicting reqId=%u (unread)\n",
+                   (unsigned)slot.reqId);
+    }
+    slot.reqId       = reqId;
+    slot.completedAt = millis();
+    slot.json        = json;
+    _responseMapHead = (_responseMapHead + 1) % kResponseMapSize;
+    xSemaphoreGive(_responseMapMutex);
+}
+
+// 2.7.0 step 3 — fetch a completed response by request id. Returns
+// true and fills `out` if found; false if not yet completed or
+// already evicted.
+bool WallboxBLE::tryFetchResponse(uint32_t reqId, String& out) {
+    if (reqId == 0 || !_responseMapMutex) return false;
+    if (xSemaphoreTake(_responseMapMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return false;
+    }
+    bool found = false;
+    for (uint8_t i = 0; i < kResponseMapSize; i++) {
+        if (_responseMap[i].reqId == reqId) {
+            out = _responseMap[i].json;
+            // Consume — slot becomes available for next eviction.
+            _responseMap[i].reqId = 0;
+            _responseMap[i].json = String();  // free heap
+            found = true;
+            break;
+        }
+    }
+    xSemaphoreGive(_responseMapMutex);
+    return found;
+}
+
+// 2.7.0 step 2 — non-blocking enqueue of a BAPI request onto the BLE
+// task's internal queue. Returns the assigned request id; 0 on failure
+// (queue full or not initialised). The BLE task drains and dispatches
+// via sendCommand internally; response goes to the RAM map (step 3)
+// keyed by request id; waiter wake-up lands in step 4.
+uint32_t WallboxBLE::enqueueRequest(const char* met, const char* par,
+                                    ReplyMode replyMode, TaskHandle_t waiter,
+                                    uint32_t bapiTimeoutMs) {
+    if (!_reqQueue || !met) return 0;
+    BleReq req = {};
+    // Step 9 hardening: __atomic_fetch_add is lock-free and safe under
+    // the documented concurrent callers (main task via web handler,
+    // BLE task via MQTT callback during sendCommand yield). Loop to
+    // skip the 0 sentinel — under wrap, two racing increments could
+    // both land on 0, so we retry until we get nonzero.
+    uint32_t id;
+    do {
+        id = __atomic_fetch_add(&_nextReqId, 1, __ATOMIC_RELAXED);
+    } while (id == 0);
+    req.reqId      = id;
+    strncpy(req.met, met, sizeof(req.met) - 1);
+    req.met[sizeof(req.met) - 1] = '\0';
+    if (par) {
+        strncpy(req.par, par, sizeof(req.par) - 1);
+        req.par[sizeof(req.par) - 1] = '\0';
+    }
+    req.replyMode      = replyMode;
+    req.waiter         = waiter;
+    req.enqueuedAt     = millis();
+    req.bapiTimeoutMs  = bapiTimeoutMs;
+    if (xQueueSend(_reqQueue, &req, 0) != pdTRUE) {
+        Log.printf("[BLE] enqueueRequest %s — queue full, dropped\n", met);
+        return 0;
+    }
+    return req.reqId;
+}
+
+String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t timeoutMs) {
     // Serialise BAPI commands across tasks. The BLE task's own keepalive
     // and the Arduino main task's polls can both end up here — without
     // this mutex, two writeValue() calls on _chr could race and corrupt
@@ -906,6 +1073,66 @@ String WallboxBLE::sendCommand(const char* met, const char* par, uint32_t timeou
     return resp;
 }
 
+// 2.7.0 step 4 — public sendCommand is now a thin wrapper around
+// enqueueRequest + xTaskNotifyWait. External callers (web handlers,
+// MQTT subscribe callbacks, anything off the BLE task) end up here
+// — they enqueue and wait on a per-task notification. The BLE task
+// itself never calls this (would deadlock its own queue); it uses
+// _sendCommandDirect.
+//
+// Behavior matches the old sync sendCommand from the caller's POV:
+// blocking, returns the response JSON or empty string on timeout.
+// What's different under the hood: the actual BAPI roundtrip happens
+// on the BLE task's drain loop (which calls _sendCommandDirect for
+// the wire work). This means concurrent /api/command requests get
+// serialised via the queue + drain rather than the older
+// "_cmdMutex contention with the periodic poll".
+String WallboxBLE::sendCommand(const char* met, const char* par, uint32_t timeoutMs) {
+    if (!_reqQueue) {
+        // Queue not initialised yet (called from setup before begin?).
+        // Fall back to direct so we don't lose the call.
+        return _sendCommandDirect(met, par, timeoutMs);
+    }
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    // Defensive: if somehow we're called from the BLE task itself,
+    // skip the queue and call direct. Same self-deadlock guard the
+    // existing keepalive relied on by calling _sendCommandDirect
+    // explicitly; this guard handles future callers that miss the
+    // convention.
+    if (self == _taskHandle) {
+        return _sendCommandDirect(met, par, timeoutMs);
+    }
+    // Clear any stale notification value before enqueueing.
+    xTaskNotifyStateClear(self);
+    uint32_t reqId = enqueueRequest(met, par, ReplyMode::WAKE_WAITER, self);
+    if (reqId == 0) {
+        Log.printf("[BLE] sendCommand %s — queue full, returning empty\n", met);
+        return "";
+    }
+    // Wait for the drain loop to notify us. Add ~250 ms headroom so
+    // the notification window covers BLE write + response + storeResponse
+    // overhead beyond the bare timeoutMs the request itself uses.
+    uint32_t waitTicks = pdMS_TO_TICKS(timeoutMs + 250);
+    uint32_t notified = 0;
+    if (xTaskNotifyWait(0, ULONG_MAX, &notified, waitTicks) != pdTRUE) {
+        Log.printf("[BLE] sendCommand %s — wait timeout (reqId=%u)\n",
+                   met, (unsigned)reqId);
+        return "";
+    }
+    if (notified != reqId) {
+        // Stale notification from a previous request. Try the map
+        // anyway in case our response is sitting there.
+        Log.printf("[BLE] sendCommand %s — stale notify=%u, expected=%u\n",
+                   met, (unsigned)notified, (unsigned)reqId);
+    }
+    String out;
+    if (!tryFetchResponse(reqId, out)) {
+        Log.printf("[BLE] sendCommand %s — notify received but map empty (evicted?)\n", met);
+        return "";
+    }
+    return out;
+}
+
 void WallboxBLE::queueCommand(const char* met, const char* par) {
     int id = _nextId++;
     _pendingCmd = bapi::buildCmd(met, par, id);
@@ -944,17 +1171,17 @@ void WallboxBLE::_storeCache(String& dst, uint32_t& seq, const String& value) {
 
 void WallboxBLE::_pollStatus() {
     if (_state != State::CONNECTED) return;
-    String resp = sendCommand(bapi::MET_GET_STATUS);
+    String resp = _sendCommandDirect(bapi::MET_GET_STATUS);
     if (!resp.isEmpty()) _storeCache(_cachedStatusJson, _seqStatus, resp);
     // Energy meter on same cycle — lightweight & useful
     if (_state != State::CONNECTED) return;
-    String meter = sendCommand(bapi::MET_GET_METER);
+    String meter = _sendCommandDirect(bapi::MET_GET_METER);
     if (!meter.isEmpty()) _storeCache(_cachedMeterJson, _seqMeter, meter);
 }
 
 void WallboxBLE::_pollRealtime() {
     if (_state != State::CONNECTED) return;
-    String resp = sendCommand(bapi::MET_GET_REALTIME);
+    String resp = _sendCommandDirect(bapi::MET_GET_REALTIME);
     if (!resp.isEmpty()) _storeCache(_cachedRealtimeJson, _seqRealtime, resp);
 }
 
@@ -969,7 +1196,7 @@ void WallboxBLE::_pollSettings() {
     if (_state != State::CONNECTED) return;
     JsonDocument merged;
 
-    String r1 = sendCommand(bapi::MET_GET_AUTOLOCK, "null", SETTINGS_TIMEOUT_MS);
+    String r1 = _sendCommandDirect(bapi::MET_GET_AUTOLOCK, "null", SETTINGS_TIMEOUT_MS);
     if (!r1.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r1) == DeserializationError::Ok) {
             // g_alo returns the lock timeout in seconds as a bare scalar:
@@ -999,7 +1226,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r2 = sendCommand("g_ecos", "null", SETTINGS_TIMEOUT_MS);
+    String r2 = _sendCommandDirect("g_ecos", "null", SETTINGS_TIMEOUT_MS);
     if (!r2.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r2) == DeserializationError::Ok) {
             merged["eco_mode"] = d["r"]["esm"] | 0;
@@ -1008,7 +1235,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r3 = sendCommand("g_psh", "null", SETTINGS_TIMEOUT_MS);
+    String r3 = _sendCommandDirect("g_psh", "null", SETTINGS_TIMEOUT_MS);
     if (!r3.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r3) == DeserializationError::Ok) {
             // dyps may arrive as bool true/false instead of 1/0 on some
@@ -1020,7 +1247,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r4 = sendCommand("g_phsw", "null", SETTINGS_TIMEOUT_MS);
+    String r4 = _sendCommandDirect("g_phsw", "null", SETTINGS_TIMEOUT_MS);
     if (!r4.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r4) == DeserializationError::Ok) {
             merged["phase_switch"] = d["r"]["enabled"].as<bool>() ? 1 : 0;
@@ -1028,7 +1255,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r5 = sendCommand(bapi::MET_GET_TIMEZONE, "null", SETTINGS_TIMEOUT_MS);
+    String r5 = _sendCommandDirect(bapi::MET_GET_TIMEZONE, "null", SETTINGS_TIMEOUT_MS);
     if (!r5.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r5) == DeserializationError::Ok) {
             const char* tz = d["r"]["timezone"] | "UTC";
@@ -1044,7 +1271,7 @@ void WallboxBLE::_pollSettings() {
 
 void WallboxBLE::_pollNotifications() {
     if (_state != State::CONNECTED) return;
-    String resp = sendCommand(bapi::MET_GET_NOTIFS, "null", 3000);
+    String resp = _sendCommandDirect(bapi::MET_GET_NOTIFS, "null", 3000);
     if (resp.isEmpty()) return;
     JsonDocument d;
     if (deserializeJson(d, resp) != DeserializationError::Ok) return;
