@@ -164,6 +164,46 @@ class TestLatencyBounds(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestStep2Plumbing(unittest.TestCase):
+    """Step 2 verification — the BleReq queue exists and the BLE task
+    drains it. We can't enqueue from outside the gateway yet (no
+    public HTTP wrapper until step 6), so the test only confirms the
+    baseline sync path still works. This is the "scaffolding hasn't
+    broken anything" check."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        _require_env()
+
+    def test_sync_path_unaffected_by_queue_addition(self) -> None:
+        """Step 2 adds a drain block to the BLE task loop. With no
+        enqueue callers yet, the drain is a no-op (xQueueReceive
+        returns immediately) and the existing sync sendCommand path
+        is unchanged. g_tzn should complete in roughly the same
+        time it did pre-refactor.
+
+        Bound is generous (2.5 s avg) because individual BAPI calls
+        vary 100-2000 ms depending on charger response time, WiFi
+        signal, and concurrent BLE traffic. The test catches a real
+        regression (orders-of-magnitude slowdown), not a fine-grained
+        perf shift.
+        """
+        durations = []
+        for _ in range(5):
+            r, dur = _send_cmd("g_tzn")
+            self.assertEqual(r.status_code, 200)
+            durations.append(dur)
+        avg = sum(durations) / len(durations)
+        print(
+            f"\n[step2] g_tzn 5-call avg={avg:.3f}s "
+            f"(min={min(durations):.3f} max={max(durations):.3f})"
+        )
+        self.assertLess(
+            avg, 2.5,
+            f"avg sync latency {avg:.3f}s — queue drain may be regressing"
+        )
+
+
 @unittest.skip("Async ?wait=0 path lands in plan step 6")
 class TestAsyncPath(unittest.TestCase):
     @classmethod

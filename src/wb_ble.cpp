@@ -168,6 +168,27 @@ void WallboxBLE::loop() {
             }
         }
 
+        // ---- Phase 3 (2.7.0 step 2): drain async request queue ----
+        // Each enqueued BleReq is dispatched through sendCommand here
+        // (safe — the BLE task already calls sendCommand for its own
+        // keepalive at line ~150, so calling it from the drain loop
+        // doesn't deadlock _cmdMutex against ourselves). We drain at
+        // most ONE request per loop iteration so periodic polling
+        // doesn't get starved. Response handling lands in step 3 —
+        // for now the reply is discarded. See docs/plans/
+        // 2.7.0-api-command-async.md.
+        if (_reqQueue) {
+            BleReq req;
+            if (xQueueReceive(_reqQueue, &req, 0) == pdTRUE) {
+                String resp = sendCommand(req.met, req.par);
+                // TODO step 3: store resp in RAM map keyed by req.reqId,
+                // xTaskNotify(req.waiter, req.reqId) when replyMode ==
+                // WAKE_WAITER, queue for MQTT publish when ==
+                // MQTT_PUBLISH. For now we just drop it.
+                (void)resp;
+            }
+        }
+
         // ---- Phase 2 (rc16): periodic polling, driven from this task ----
         // These were on the Arduino main loop before — moving them here
         // means the main loop never blocks waiting for BAPI responses.
@@ -838,6 +859,36 @@ void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_
             _instance->_responseCb(_instance->_lastResponse);
         }
     }
+}
+
+// 2.7.0 step 2 — non-blocking enqueue of a BAPI request onto the BLE
+// task's internal queue. Returns the assigned request id; 0 on failure
+// (queue full or not initialised). The BLE task drains and dispatches
+// via sendCommand internally; for now the reply is discarded — step 3
+// will add the RAM map and waiter notification.
+uint32_t WallboxBLE::enqueueRequest(const char* met, const char* par,
+                                    ReplyMode replyMode, TaskHandle_t waiter) {
+    if (!_reqQueue || !met) return 0;
+    BleReq req = {};
+    // _nextReqId currently has no synchronisation. Single-writer in
+    // step 2 (the only caller is the test from main task). Step 4
+    // will wrap this in _cmdMutex when sendCommand starts using it.
+    req.reqId      = _nextReqId++;
+    if (req.reqId == 0) req.reqId = _nextReqId++;  // skip the sentinel
+    strncpy(req.met, met, sizeof(req.met) - 1);
+    req.met[sizeof(req.met) - 1] = '\0';
+    if (par) {
+        strncpy(req.par, par, sizeof(req.par) - 1);
+        req.par[sizeof(req.par) - 1] = '\0';
+    }
+    req.replyMode  = replyMode;
+    req.waiter     = waiter;
+    req.enqueuedAt = millis();
+    if (xQueueSend(_reqQueue, &req, 0) != pdTRUE) {
+        Log.printf("[BLE] enqueueRequest %s — queue full, dropped\n", met);
+        return 0;
+    }
+    return req.reqId;
 }
 
 String WallboxBLE::sendCommand(const char* met, const char* par, uint32_t timeoutMs) {

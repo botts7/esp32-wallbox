@@ -31,6 +31,24 @@ public:
     // Non-blocking: queue a command
     void queueCommand(const char* met, const char* par = "null");
 
+    // 2.7.0 async request queue (in-progress, see docs/plans/
+    // 2.7.0-api-command-async.md). Public-section ReplyMode + BleReq
+    // because `enqueueRequest` references them in default args.
+    enum class ReplyMode : uint8_t {
+        FIRE_AND_FORGET = 0,   // discard response
+        WAKE_WAITER     = 1,   // xTaskNotify the originating task
+        MQTT_PUBLISH    = 2,   // queue response for main task to publish
+    };
+    // Enqueues a BAPI request on the BLE task's internal queue and
+    // returns immediately with the assigned request id (0 = queue
+    // full or not yet initialised). The BLE task drains at ~50 Hz and
+    // runs each request through sendCommand internally. Response
+    // handling (RAM map + xTaskNotify) lands in step 3.
+    uint32_t enqueueRequest(const char* met,
+                            const char* par = "null",
+                            ReplyMode replyMode = ReplyMode::FIRE_AND_FORGET,
+                            TaskHandle_t waiter = nullptr);
+
     // State
     State state() const { return _state; }
     bool isConnected() const { return _state == State::CONNECTED; }
@@ -280,12 +298,7 @@ private:
     // Single-slot _pendingCmd is being replaced by a real FreeRTOS queue
     // so /api/command and MQTT _handleCommand can enqueue commands
     // without blocking on _cmdMutex. See docs/plans/2.7.0-api-command-async.md.
-    // Step 1: infrastructure only — fields allocated, no callers yet.
-    enum class ReplyMode : uint8_t {
-        FIRE_AND_FORGET = 0,   // discard response
-        WAKE_WAITER     = 1,   // xTaskNotify the originating task
-        MQTT_PUBLISH    = 2,   // queue response for main task to publish
-    };
+    // ReplyMode is in the public section above.
     struct BleReq {
         uint32_t  reqId;
         char      met[16];
