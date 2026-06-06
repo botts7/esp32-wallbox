@@ -774,16 +774,25 @@ static void handleApiCommand() {
         return;
     }
 
-    // 2.7.0 step 6: parse async knobs.
-    //   ?sync=1     — old blocking behavior (escape hatch)
-    //   ?wait=N     — async short-wait deadline in ms (0..2500, default 800)
+    // 2.7.0 step 9b — UI-contract preservation: bumped default
+    // wait from 800 → 5000 ms after live UI testing showed every
+    // existing GUI fetch (30+ sites) expects `d.r` populated
+    // synchronously. The pre-refactor `sendCommand` internal
+    // timeout was 5000 ms, so matching it here restores byte-for-
+    // byte JS compatibility. The async escape valve (202 on
+    // timeout) still kicks in for the genuinely slow ones, and
+    // upper clamp bumped to 15000 to cover settings/schedule reads
+    // that legitimately need 8-12 s on busy MAX firmware.
+    //
+    //   ?sync=1     — old blocking behavior + sync inflight cap
+    //   ?wait=N     — short-wait deadline in ms (0..15000, default 5000)
     //   ?wait=0     — pure async: enqueue + 202 immediately
     bool useSync = http.arg("sync") == "1";
-    int waitMs = 800;
+    int waitMs = 5000;
     if (http.hasArg("wait")) {
         waitMs = http.arg("wait").toInt();
         if (waitMs < 0) waitMs = 0;
-        if (waitMs > 2500) waitMs = 2500;
+        if (waitMs > 15000) waitMs = 15000;
     }
 
     // Resolve action → met + par (shared by both paths).
