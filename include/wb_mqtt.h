@@ -44,6 +44,15 @@ private:
     void _subscribe();
     static void _mqttCallback(char* topic, byte* payload, unsigned int len);
 
+    // 3.0 task #77 — table-driven discovery dispatcher. Built when
+    // WB_DISCOVERY_TABLE_DRIVEN is non-zero; called from tickDiscovery()
+    // in place of the legacy 57-case switch. The table itself + the
+    // enums + the resolver live as file-static state in wb_mqtt.cpp
+    // since they're closely tied to its internals and exposing them
+    // outside the translation unit would force the entity catalogue
+    // into the header. See docs/plans/3.0-discovery-table.md.
+    void _tickDiscoveryFromTable(size_t index);
+
     // Handle incoming command
     void _handleCommand(const char* subtopic, const char* payload);
 

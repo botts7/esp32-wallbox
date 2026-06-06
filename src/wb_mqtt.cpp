@@ -36,6 +36,107 @@ static const char* kTzOptions[]   = {
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
 static const size_t kDiscoveryCount = 57;
 
+// ---------------------------------------------------------------------
+// 3.0 task #77: table-driven discovery scaffolding.
+//
+// Default OFF. Flip WB_DISCOVERY_TABLE_DRIVEN to 1 in build_flags
+// (or in platformio.ini) to swap the 57-case switch in tickDiscovery()
+// for the table-driven dispatcher below. Both paths produce IDENTICAL
+// HA discovery payloads — same `unique_id`, same templates, same
+// `device` block — so HA installations don't see a re-registration
+// event when the flag flips.
+//
+// Migration strategy is documented in docs/plans/3.0-discovery-table.md
+// — group-wise transcription with HA verification per group, build
+// flag for the cutover, legacy switch removed in the release after
+// the flag default flips to 1.
+//
+// The TopicSlot enum lets entries reference the runtime topic strings
+// (which live in WallboxMQTT::_discTopics and are populated by
+// sendDiscovery()) without storing raw c_str() pointers in a
+// constexpr table. The resolver in _tickDiscoveryFromTable() maps
+// slot → live String each tick.
+// ---------------------------------------------------------------------
+#ifndef WB_DISCOVERY_TABLE_DRIVEN
+#define WB_DISCOVERY_TABLE_DRIVEN 0
+#endif
+
+namespace wb_disc {
+
+enum class EntityKind : uint8_t {
+    SENSOR,         // publishDiscoveryEntity, component="sensor"
+    BINARY_SENSOR,  // publishDiscoveryEntity, component="binary_sensor"
+    NUMBER,         // publishDiscoveryNumber
+    SWITCH,         // publishDiscoverySwitch
+    SELECT,         // publishDiscoverySelect
+    BUTTON,         // publishDiscoveryButton
+    CUSTOM,         // inline build (currently only case 13 — car_connected)
+    NOOP,           // reserved-slot placeholder (currently only case 9)
+};
+
+enum class TopicSlot : uint8_t {
+    NONE,
+    STATUS,             // r_dat -> _discTopics.sTopic
+    REALTIME,           // r_sta -> _discTopics.rTopic
+    GATEWAY,            // response/gateway -> _discTopics.gTopic
+    METER,              // response/meter -> _discTopics.mTopic
+    NOTIFS,             // response/notifications -> _discTopics.nTopic
+    SETTINGS,           // wallbox/settings -> _discTopics.setTopic
+    CMD_CURRENT,
+    CMD_CHARGING,
+    CMD_LOCK,
+    CMD_REBOOT,
+    CMD_AUTOLOCK_EN,
+    CMD_AUTOLOCK_TIME,
+    CMD_ECO_MODE,
+    CMD_ECO_POWER,
+    CMD_POWER_SHARE,
+    CMD_PHASE_SWITCH,
+    CMD_HALO,
+    CMD_TIMEZONE,
+};
+
+struct DiscoveryEntry {
+    EntityKind   kind;
+    const char*  objectId;
+    const char*  name;
+    const char*  icon;
+    TopicSlot    stateTopic;
+    const char*  valueTemplate;
+    // Common optional sensor fields. nullptr means "skip in payload."
+    const char*  unit;
+    const char*  deviceClass;
+    const char*  stateClass;
+    const char*  category;
+    // Control fields. Used per-kind:
+    //   NUMBER:  commandTopic + numMin/numMax/numStep + (unit) + numMode
+    //   SWITCH:  commandTopic + switchOn/switchOff
+    //   SELECT:  commandTopic + selectOptions + selectCount
+    //   BUTTON:  commandTopic
+    TopicSlot    commandTopic;
+    int          numMin;
+    int          numMax;
+    int          numStep;
+    const char*  numMode;
+    const char*  switchOn;
+    const char*  switchOff;
+    // publishDiscoverySelect takes a `const char**` (the outer pointer
+    // is not const). Match its signature here so we can pass the
+    // field through without a cast. The pointed-to array of strings
+    // is logically const at runtime; the helper never mutates it.
+    const char** selectOptions;
+    uint8_t      selectCount;
+};
+
+// The table itself. Filled out below with one entry per case slot in
+// the legacy tickDiscovery() switch. When kEntryCount == kDiscoveryCount
+// AND every entry has been verified against its legacy case body, the
+// switch can be retired (3.0 plan step E).
+extern const DiscoveryEntry kEntries[];
+extern const size_t kEntryCount;
+
+}  // namespace wb_disc
+
 // ---- HA Discovery helpers ----
 
 // Single source of truth for the `device` block embedded in every HA
@@ -652,6 +753,16 @@ void WallboxMQTT::tickDiscovery() {
         return;
     }
 
+#if WB_DISCOVERY_TABLE_DRIVEN
+    // 3.0 task #77 path. Dispatches via the static kEntries[] table
+    // (file-static in this TU). Same wire format as the legacy switch
+    // below — see docs/plans/3.0-discovery-table.md for the migration
+    // story and the per-entry verification protocol.
+    _tickDiscoveryFromTable(_discoveryIndex);
+    _discoveryIndex++;
+    return;
+#endif
+
     // Short aliases mirroring the original locals so the switch cases
     // below stay one-for-one with the previous inline body.
     const char* st = _discTopics.sTopic.c_str();
@@ -931,4 +1042,482 @@ void WallboxMQTT::tickDiscovery() {
     }
 
     _discoveryIndex++;
+}
+
+// =====================================================================
+// 3.0 task #77 — table-driven dispatcher + entry table.
+//
+// All 57 slots from the legacy switch are transcribed below into a
+// constexpr DiscoveryEntry array. Slot N here MUST produce the same
+// HA discovery payload as `case N:` in tickDiscovery() above. The
+// migration plan (docs/plans/3.0-discovery-table.md) calls for
+// group-by-group HA verification before retiring the legacy switch;
+// until WB_DISCOVERY_TABLE_DRIVEN flips to 1, this path is dormant.
+// =====================================================================
+
+namespace wb_disc {
+
+const DiscoveryEntry kEntries[] = {
+    // ----- Group 1: r_dat / r_sta sensors (cases 0-12) -----
+
+    /*  0 */ { EntityKind::SENSOR, "charging_power", "Charging Power", "mdi:flash",
+               TopicSlot::STATUS, "{{ value_json.r.cp | round(2) }}",
+               "kW", "power", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /*  1 */ { EntityKind::SENSOR, "current_l1", "Charging Current L1", "mdi:current-ac",
+               TopicSlot::STATUS, "{{ (value_json.r.L1 / 10) | round(1) }}",
+               "A", "current", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /*  2 */ { EntityKind::SENSOR, "current_l2", "Charging Current L2", "mdi:current-ac",
+               TopicSlot::STATUS, "{{ (value_json.r.L2 / 10) | round(1) }}",
+               "A", "current", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /*  3 */ { EntityKind::SENSOR, "current_l3", "Charging Current L3", "mdi:current-ac",
+               TopicSlot::STATUS, "{{ (value_json.r.L3 / 10) | round(1) }}",
+               "A", "current", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /*  4 */ { EntityKind::SENSOR, "energy_session", "Session Energy", "mdi:lightning-bolt",
+               TopicSlot::STATUS, "{{ (value_json.r.en / 100) | round(2) }}",
+               "kWh", "energy", "total_increasing", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /*  5 */ { EntityKind::SENSOR, "grid_energy", "Grid Energy", "mdi:transmission-tower",
+               TopicSlot::STATUS, "{{ (value_json.r.grid / 100) | round(2) }}",
+               "kWh", "energy", "total_increasing", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /*  6 */ { EntityKind::SENSOR, "green_energy", "Green Energy", "mdi:leaf",
+               TopicSlot::STATUS, "{{ (value_json.r.gen / 100) | round(2) }}",
+               "kWh", "energy", "total_increasing", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /*  7 */ { EntityKind::SENSOR, "discharge_energy", "Discharge Energy (V2H)", "mdi:battery-arrow-up",
+               TopicSlot::STATUS, "{{ (value_json.r.den / 1000) | round(3) }}",
+               "kWh", "energy", "total_increasing", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /*  8 */ { EntityKind::SENSOR, "status", "Charger Status", "mdi:ev-station",
+               TopicSlot::STATUS,
+               "{% set s = value_json.r.st %}"
+               "{% set m = {0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',"
+               "4:'Paused',5:'Charge Complete',6:'Locked',7:'Error',"
+               "8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',"
+               "10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',"
+               "13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',"
+               "16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)'} %}"
+               "{{ m.get(s, 'Code ' ~ s) }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /*  9 */ { EntityKind::NOOP, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, nullptr,
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 10 */ { EntityKind::SENSOR, "lock_status", "Lock Status", "mdi:lock",
+               TopicSlot::REALTIME,
+               "{% if value_json.r.lock_status == 0 %}Unlocked{% else %}Locked{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 11 */ { EntityKind::SENSOR, "max_available_current", "Max Available Current", "mdi:current-ac",
+               TopicSlot::REALTIME, "{{ value_json.r.max_available_current }}",
+               "A", nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 12 */ { EntityKind::SENSOR, "ocpp_status", "OCPP Status", "mdi:lan-connect",
+               TopicSlot::REALTIME,
+               "{% set s = value_json.r.ocpp_status %}"
+               "{% if s == 0 %}Not Available{% elif s == 1 %}Not Configured{% elif s == 2 %}Connected{% elif s == 3 %}Charging{% else %}Code {{ s }}{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // ----- Special: case 13 — car_connected (CUSTOM inline JSON) -----
+
+    /* 13 */ { EntityKind::CUSTOM, "car_connected", nullptr, nullptr,
+               TopicSlot::NONE, nullptr,
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // ----- Group 2: main controls (cases 14-17) -----
+
+    /* 14 */ { EntityKind::NUMBER, "max_charging_current", "Max Charging Current", "mdi:current-ac",
+               TopicSlot::STATUS, "{{ value_json.r.cur }}",
+               "A", nullptr, nullptr, nullptr,
+               TopicSlot::CMD_CURRENT, 6,32,1, nullptr,
+               nullptr, nullptr, nullptr, 0 },
+
+    /* 15 */ { EntityKind::SWITCH, "charging", "Charging", "mdi:ev-station",
+               TopicSlot::STATUS,
+               "{% if value_json.r.st == 1 %}1{% else %}0{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::CMD_CHARGING, 0,0,0, nullptr,
+               "start", "stop", nullptr, 0 },
+
+    /* 16 */ { EntityKind::SWITCH, "lock", "Charger Lock", "mdi:lock",
+               TopicSlot::REALTIME,
+               "{% if value_json.r.lock_status == 1 %}1{% else %}0{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::CMD_LOCK, 0,0,0, nullptr,
+               "lock", "unlock", nullptr, 0 },
+
+    /* 17 */ { EntityKind::BUTTON, "reboot", "Reboot Charger", "mdi:restart",
+               TopicSlot::NONE, nullptr,
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::CMD_REBOOT, 0,0,0, nullptr,
+               nullptr, nullptr, nullptr, 0 },
+
+    // ----- Group 3: meter + BLE rssi (cases 18-22) -----
+
+    /* 18 */ { EntityKind::SENSOR, "ble_rssi", "BLE Signal", "mdi:bluetooth-connect",
+               TopicSlot::GATEWAY, "{{ value_json.rssi }}",
+               "dBm", "signal_strength", "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 19 */ { EntityKind::SENSOR, "mains_voltage", "Mains Voltage", "mdi:flash-triangle",
+               TopicSlot::METER, "{{ value_json.r.v1 }}",
+               "V", "voltage", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 20 */ { EntityKind::SENSOR, "grid_power", "House Power", "mdi:home-lightning-bolt",
+               TopicSlot::METER, "{{ value_json.r.p1 }}",
+               "W", "power", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 21 */ { EntityKind::SENSOR, "meter_current", "House Current", "mdi:current-ac",
+               TopicSlot::METER, "{{ (value_json.r.c1 / 10) | round(1) }}",
+               "A", "current", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 22 */ { EntityKind::SENSOR, "meter_total_energy", "Lifetime Energy", "mdi:counter",
+               TopicSlot::METER, "{{ (value_json.r.e / 1000) | round(1) }}",
+               "kWh", "energy", "total_increasing", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // ----- Group 4: notifications + settings entities (cases 23-32) -----
+
+    /* 23 */ { EntityKind::SENSOR, "notification_count", "Active Notifications", "mdi:bell-alert-outline",
+               TopicSlot::NOTIFS, "{{ value_json.count }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 24 */ { EntityKind::SENSOR, "notification_latest", "Latest Notification", "mdi:bell-outline",
+               TopicSlot::NOTIFS, "{{ value_json.latest or 'None' }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 25 */ { EntityKind::SWITCH, "autolock", "Auto Lock", "mdi:lock-clock",
+               TopicSlot::SETTINGS,
+               "{% if value_json.autolock == 1 %}1{% else %}0{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::CMD_AUTOLOCK_EN, 0,0,0, nullptr,
+               "1", "0", nullptr, 0 },
+
+    /* 26 */ { EntityKind::NUMBER, "autolock_time", "Auto Lock Timeout", "mdi:timer-lock",
+               TopicSlot::SETTINGS,
+               "{{ value_json.autolock_time | default(1) }}",
+               "min", nullptr, nullptr, nullptr,
+               TopicSlot::CMD_AUTOLOCK_TIME, 1,60,1, "box",
+               nullptr, nullptr, nullptr, 0 },
+
+    /* 27 */ { EntityKind::SELECT, "eco_mode", "Eco Smart Mode", "mdi:solar-power",
+               TopicSlot::SETTINGS,
+               "{% set m = value_json.eco_mode | default(0) %}"
+               "{% if m == 0 %}Off{% elif m == 1 %}Full Green (Solar Only){% elif m == 2 %}Solar + Grid{% else %}Off{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::CMD_ECO_MODE, 0,0,0, nullptr,
+               nullptr, nullptr, kEcoOptions, 3 },
+
+    /* 28 */ { EntityKind::NUMBER, "eco_power", "Eco Smart Solar %", "mdi:percent",
+               TopicSlot::SETTINGS, "{{ value_json.eco_power | default(100) }}",
+               "%", nullptr, nullptr, nullptr,
+               TopicSlot::CMD_ECO_POWER, 0,100,5, nullptr,
+               nullptr, nullptr, nullptr, 0 },
+
+    /* 29 */ { EntityKind::SWITCH, "power_sharing", "Dynamic Power Sharing", "mdi:transit-connection-variant",
+               TopicSlot::SETTINGS,
+               "{% if value_json.power_sharing == 1 %}1{% else %}0{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::CMD_POWER_SHARE, 0,0,0, nullptr,
+               "1", "0", nullptr, 0 },
+
+    /* 30 */ { EntityKind::SWITCH, "phase_switch", "Phase Switch", "mdi:numeric-3-circle",
+               TopicSlot::SETTINGS,
+               "{% if value_json.phase_switch == 1 %}1{% else %}0{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::CMD_PHASE_SWITCH, 0,0,0, nullptr,
+               "1", "0", nullptr, 0 },
+
+    /* 31 */ { EntityKind::SELECT, "halo", "Halo LED", "mdi:led-on",
+               TopicSlot::SETTINGS,
+               "{% set h = value_json.halo | default(2) %}"
+               "{% if h == 0 %}Off{% elif h == 1 %}Low{% elif h == 2 %}Medium{% else %}High{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::CMD_HALO, 0,0,0, nullptr,
+               nullptr, nullptr, kHaloOptions, 4 },
+
+    /* 32 */ { EntityKind::SELECT, "timezone", "Timezone", "mdi:earth",
+               TopicSlot::SETTINGS, "{{ value_json.timezone | default('UTC') }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::CMD_TIMEZONE, 0,0,0, nullptr,
+               nullptr, nullptr, kTzOptions, 16 },
+
+    // ----- Group 5: charger details from gTopic (cases 33-45) -----
+
+    /* 33 */ { EntityKind::SENSOR, "gateway_ip", "Gateway IP", "mdi:ip-network",
+               TopicSlot::GATEWAY, "{{ value_json.ip | default('') }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 34 */ { EntityKind::SENSOR, "dev_name", "Charger Name", "mdi:tag",
+               TopicSlot::GATEWAY, "{{ value_json.dev_name | default('') }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 35 */ { EntityKind::SENSOR, "dev_mfg", "Charger Manufacturer", "mdi:factory",
+               TopicSlot::GATEWAY, "{{ value_json.dev_mfg | default('') }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 36 */ { EntityKind::SENSOR, "dev_model", "BLE Radio Model", "mdi:chip",
+               TopicSlot::GATEWAY, "{{ value_json.dev_model | default('') }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 37 */ { EntityKind::SENSOR, "dev_fw", "BLE Module FW", "mdi:cog",
+               TopicSlot::GATEWAY, "{{ value_json.dev_fw | default('') }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 38 */ { EntityKind::SENSOR, "chg_app_fw", "Charger Firmware", "mdi:package-variant-closed",
+               TopicSlot::GATEWAY, "{{ value_json.chg_app_fw | default('') }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 39 */ { EntityKind::SENSOR, "chg_project", "Charger Project", "mdi:tag-outline",
+               TopicSlot::GATEWAY, "{{ value_json.chg_project | default('') }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 40 */ { EntityKind::SENSOR, "chg_sessions", "Total Charging Sessions", "mdi:counter",
+               TopicSlot::GATEWAY,
+               "{% if value_json.chg_sessions is none %}None{% else %}{{ value_json.chg_sessions }}{% endif %}",
+               nullptr, nullptr, "total_increasing", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 41 */ { EntityKind::SENSOR, "chg_power_boost", "Power Boost Limit", "mdi:home-lightning-bolt-outline",
+               TopicSlot::GATEWAY, "{{ value_json.chg_power_boost | default(0) }}",
+               "A", "current", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 42 */ { EntityKind::BINARY_SENSOR, "chg_lock_state", "Lock State", "mdi:lock",
+               TopicSlot::GATEWAY,
+               "{% if value_json.chg_lock_state == 0 %}ON{% else %}OFF{% endif %}",
+               nullptr, "lock", nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 43 */ { EntityKind::SENSOR, "chg_net_ssid", "Charger WiFi SSID", "mdi:wifi",
+               TopicSlot::GATEWAY, "{{ value_json.chg_net_ssid | default('') }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 44 */ { EntityKind::SENSOR, "chg_net_ip", "Charger IP", "mdi:ip-network-outline",
+               TopicSlot::GATEWAY, "{{ value_json.chg_net_ip | default('') }}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 45 */ { EntityKind::SENSOR, "chg_net_signal", "Charger WiFi Signal", "mdi:wifi",
+               TopicSlot::GATEWAY, "{{ value_json.chg_net_signal | default(0) }}",
+               "%", nullptr, "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // ----- Group 6: diagnostic-category entities (cases 46-56) -----
+
+    /* 46 */ { EntityKind::SENSOR, "gateway_fw", "Gateway Firmware", "mdi:package-variant",
+               TopicSlot::GATEWAY, "{{ value_json.fw | default('') }}",
+               nullptr, nullptr, nullptr, "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 47 */ { EntityKind::SENSOR, "boot_reason", "Last Boot Reason", "mdi:restart",
+               TopicSlot::GATEWAY, "{{ value_json.boot_reason | default('unknown') }}",
+               nullptr, nullptr, nullptr, "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 48 */ { EntityKind::SENSOR, "max_reentry", "Reentry Tripwire", "mdi:shield-bug-outline",
+               TopicSlot::GATEWAY, "{{ value_json.max_reentry | default(1) }}",
+               nullptr, nullptr, nullptr, "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 49 */ { EntityKind::SENSOR, "tokens", "Rate-Limit Tokens", "mdi:gauge",
+               TopicSlot::GATEWAY, "{{ value_json.tokens | default(0) }}",
+               nullptr, nullptr, "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 50 */ { EntityKind::SENSOR, "loop_max_ms", "Loop Max ms", "mdi:timer-alert-outline",
+               TopicSlot::GATEWAY, "{{ value_json.loop_max_ms | default(0) }}",
+               "ms", "duration", "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 51 */ { EntityKind::SENSOR, "heap_min_ever", "Heap Min Watermark", "mdi:memory",
+               TopicSlot::GATEWAY, "{{ value_json.heap_min_ever | default(0) }}",
+               "B", nullptr, "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 52 */ { EntityKind::SENSOR, "heap_free", "Heap Free", "mdi:memory",
+               TopicSlot::GATEWAY, "{{ value_json.heap | default(0) }}",
+               "B", nullptr, "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 53 */ { EntityKind::SENSOR, "gw_uptime", "Gateway Uptime", "mdi:clock-outline",
+               TopicSlot::GATEWAY, "{{ value_json.uptime | default(0) }}",
+               "s", "duration", "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 54 */ { EntityKind::SENSOR, "ble_paused", "BLE Paused", "mdi:bluetooth-off",
+               TopicSlot::GATEWAY,
+               "{% if value_json.ble_paused %}Yes ({{ value_json.ble_pause_remaining_s }}s remaining){% else %}No{% endif %}",
+               nullptr, nullptr, nullptr, "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 55 */ { EntityKind::SENSOR, "chg_grounding", "Charger Grounding", "mdi:earth",
+               TopicSlot::GATEWAY, "{{ value_json.chg_grounding | default('Unknown') }}",
+               nullptr, nullptr, nullptr, "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 56 */ { EntityKind::SENSOR, "wifi_rssi", "WiFi Signal", "mdi:wifi",
+               TopicSlot::GATEWAY, "{{ value_json.wifi_rssi | default(0) }}",
+               "dBm", "signal_strength", "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+};
+
+const size_t kEntryCount = sizeof(kEntries) / sizeof(kEntries[0]);
+
+// Compile-time invariant: the table must have exactly the same number
+// of slots as the legacy switch. If you add/remove a row above without
+// updating kDiscoveryCount (or vice versa), this fails at build time.
+static_assert(kEntryCount == kDiscoveryCount,
+              "wb_disc::kEntries[] size diverged from kDiscoveryCount — "
+              "keep the table and the legacy switch in lock-step until "
+              "the migration is complete.");
+
+}  // namespace wb_disc
+
+// ---------------------------------------------------------------------
+// Topic resolver + table dispatcher.
+//
+// Only referenced when WB_DISCOVERY_TABLE_DRIVEN is non-zero, but
+// always compiled — keeps build correctness honest even with the
+// default-off flag, so we catch typos before the flag flips.
+// ---------------------------------------------------------------------
+
+static const char* _resolveTopic(wb_disc::TopicSlot slot,
+                                 const class WallboxMQTT*) {
+    // Lifted into a free function to keep the dispatcher readable; the
+    // WallboxMQTT* is reserved for the day the resolver needs anything
+    // beyond _discTopics — for now it's unused (the topics live in the
+    // instance, but the resolver below uses the friend-pattern via a
+    // dedicated accessor).
+    (void)slot;
+    return nullptr;
+}
+
+void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
+    if (index >= wb_disc::kEntryCount) return;
+    const auto& e = wb_disc::kEntries[index];
+
+    auto resolve = [&](wb_disc::TopicSlot s) -> const char* {
+        switch (s) {
+            case wb_disc::TopicSlot::NONE:             return nullptr;
+            case wb_disc::TopicSlot::STATUS:           return _discTopics.sTopic.c_str();
+            case wb_disc::TopicSlot::REALTIME:         return _discTopics.rTopic.c_str();
+            case wb_disc::TopicSlot::GATEWAY:          return _discTopics.gTopic.c_str();
+            case wb_disc::TopicSlot::METER:            return _discTopics.mTopic.c_str();
+            case wb_disc::TopicSlot::NOTIFS:           return _discTopics.nTopic.c_str();
+            case wb_disc::TopicSlot::SETTINGS:         return _discTopics.setTopic.c_str();
+            case wb_disc::TopicSlot::CMD_CURRENT:      return _discTopics.cmdCurrent.c_str();
+            case wb_disc::TopicSlot::CMD_CHARGING:     return _discTopics.cmdCharging.c_str();
+            case wb_disc::TopicSlot::CMD_LOCK:         return _discTopics.cmdLock.c_str();
+            case wb_disc::TopicSlot::CMD_REBOOT:       return _discTopics.cmdReboot.c_str();
+            case wb_disc::TopicSlot::CMD_AUTOLOCK_EN:  return _discTopics.cmdAutolockEnable.c_str();
+            case wb_disc::TopicSlot::CMD_AUTOLOCK_TIME:return _discTopics.cmdAutolockTime.c_str();
+            case wb_disc::TopicSlot::CMD_ECO_MODE:     return _discTopics.cmdEcoMode.c_str();
+            case wb_disc::TopicSlot::CMD_ECO_POWER:    return _discTopics.cmdEcoPower.c_str();
+            case wb_disc::TopicSlot::CMD_POWER_SHARE:  return _discTopics.cmdPowerShare.c_str();
+            case wb_disc::TopicSlot::CMD_PHASE_SWITCH: return _discTopics.cmdPhaseSwitch.c_str();
+            case wb_disc::TopicSlot::CMD_HALO:         return _discTopics.cmdHalo.c_str();
+            case wb_disc::TopicSlot::CMD_TIMEZONE:     return _discTopics.cmdTimezone.c_str();
+        }
+        return nullptr;
+    };
+
+    const char* st  = resolve(e.stateTopic);
+    const char* cmd = resolve(e.commandTopic);
+
+    switch (e.kind) {
+        case wb_disc::EntityKind::SENSOR:
+            publishDiscoveryEntity(*_client, "sensor", e.objectId, e.name,
+                e.icon, st, e.valueTemplate,
+                e.unit, e.deviceClass, cmd, e.stateClass, e.category);
+            break;
+        case wb_disc::EntityKind::BINARY_SENSOR:
+            publishDiscoveryEntity(*_client, "binary_sensor", e.objectId, e.name,
+                e.icon, st, e.valueTemplate,
+                e.unit, e.deviceClass, cmd, e.stateClass, e.category);
+            break;
+        case wb_disc::EntityKind::NUMBER:
+            publishDiscoveryNumber(*_client, e.objectId, e.name, e.icon,
+                cmd, st, e.valueTemplate,
+                (float)e.numMin, (float)e.numMax, (float)e.numStep,
+                e.unit, e.numMode);
+            break;
+        case wb_disc::EntityKind::SWITCH:
+            publishDiscoverySwitch(*_client, e.objectId, e.name, e.icon,
+                cmd, st, e.valueTemplate,
+                e.switchOn, e.switchOff);
+            break;
+        case wb_disc::EntityKind::SELECT:
+            publishDiscoverySelect(*_client, e.objectId, e.name, e.icon,
+                cmd, st, e.valueTemplate,
+                e.selectOptions, e.selectCount);
+            break;
+        case wb_disc::EntityKind::BUTTON:
+            publishDiscoveryButton(*_client, e.objectId, e.name, e.icon, cmd);
+            break;
+        case wb_disc::EntityKind::CUSTOM:
+            // Case 13 (car_connected): publishDiscoveryEntity doesn't
+            // handle binary_sensor with payload_on/off + custom
+            // availability_topic, so the legacy switch built the
+            // JsonDocument inline. Mirror that here.
+            if (strcmp(e.objectId, "car_connected") == 0) {
+                const WBConfig& bsCfg = configMgr.get();
+                String topic = bsCfg.haDiscoveryPrefix + "/binary_sensor/"
+                             + bsCfg.haDeviceId + "/car_connected/config";
+                JsonDocument doc;
+                doc["name"] = "Car Connected";
+                doc["unique_id"] = bsCfg.haDeviceId + "_car_connected";
+                doc["object_id"] = bsCfg.haDeviceId + "_car_connected";
+                doc["state_topic"] = baseTopic() + "/car_connected";
+                doc["payload_on"] = "ON";
+                doc["payload_off"] = "OFF";
+                doc["device_class"] = "plug";
+                doc["availability_topic"] = availTopic();
+                doc["icon"] = "mdi:ev-plug-type2";
+                populateDeviceBlock(doc["device"].to<JsonObject>());
+                String pl;
+                serializeJson(doc, pl);
+                _client->beginPublish(topic.c_str(), pl.length(), true);
+                _client->print(pl);
+                _client->endPublish();
+            }
+            break;
+        case wb_disc::EntityKind::NOOP:
+            // Reserved slot (case 9 — formerly raw status code,
+            // dropped in 2.6.0). Do nothing; the empty-retained-payload
+            // delete is published once in sendDiscovery().
+            break;
+    }
 }
