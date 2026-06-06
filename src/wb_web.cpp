@@ -7,6 +7,8 @@
 #include "wb_ota_history.h"
 #include "wb_diag.h"
 #include "wb_watchdog.h"
+#include "wb_ws.h"
+#include "wb_mqtt.h"
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -862,18 +864,34 @@ static void handleApiCommand() {
         return;
     }
 
-    // Short-wait: block up to waitMs on the per-request notify.
-    uint32_t notified = 0;
-    BaseType_t got = xTaskNotifyWait(0, ULONG_MAX, &notified, pdMS_TO_TICKS(waitMs));
-    if (got == pdTRUE) {
-        // Drain the response from the RAM map. If reqId matches,
-        // good; if it doesn't, something went sideways — try anyway.
-        String resp;
-        if (wallboxBLE.tryFetchResponse(reqId, resp) && resp.length()) {
-            http.send(200, "application/json", resp);
-            return;
+    // Step 9c chunked-wait: pump MQTT + WS every 50 ms instead of a
+    // single long xTaskNotifyWait. Without this, a 5 s ?wait freezes
+    // PubSubClient and WebSocketsServer on the main task — observed
+    // symptoms were ERR_CONNECTION_RESET on WS handshake when the
+    // page raced our long BAPI wait, and HA seeing stale state for
+    // a multi-second blip after a heavy /sessions burst.
+    //
+    // The BLE task is unblocked the whole time (it's the one
+    // processing our request), so pumping main-task-only subsystems
+    // here is free: they're idle waiting for their main-loop slot.
+    // PubSubClient handlers post-Step-8 only call enqueueRequest, so
+    // no re-entrancy into sendCommand. WebSocketsServer is purely
+    // I/O-driven, no app-code re-entry. Safe.
+    const uint32_t TICK_MS = 50;
+    bool got = false;
+    String resp;
+    for (uint32_t elapsed = 0; elapsed < (uint32_t)waitMs && !got; elapsed += TICK_MS) {
+        uint32_t notified = 0;
+        if (xTaskNotifyWait(0, ULONG_MAX, &notified, pdMS_TO_TICKS(TICK_MS)) == pdTRUE) {
+            got = wallboxBLE.tryFetchResponse(reqId, resp) && resp.length();
+            break;
         }
-        // Notified but no body — fall through to 202.
+        wallboxMQTT.loop();
+        wbws::loop();
+    }
+    if (got) {
+        http.send(200, "application/json", resp);
+        return;
     }
     // Deadline elapsed. The BLE task will still complete the request
     // and publish to wallbox/response/<met>; the caller can poll

@@ -274,7 +274,14 @@ def run(soak_seconds: int = 60, burst_count: int = 30) -> int:
             f"{after.mqtt_reconnects} during load"
         )
 
-    LOOP_BUDGET_MS = 3500
+    # Budget covers the sync escape hatch (?sync=1) which is allowed
+    # to block the main task for up to ~waitMs (5000 ms, see
+    # wb_web.cpp `handleApiCommand`). The async default path stays
+    # under ~750 ms thanks to the chunked-wait pump introduced in
+    # step 9c. The burst exercises 25% sync = at least one 5 s spike
+    # is expected; 6500 ms gives headroom for OS-scheduling jitter
+    # without masking real regressions.
+    LOOP_BUDGET_MS = 6500
     if after.loop_max_ms > LOOP_BUDGET_MS:
         fail.append(
             f"loop_max_ms={after.loop_max_ms} exceeded budget "
