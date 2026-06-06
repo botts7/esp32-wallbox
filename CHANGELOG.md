@@ -4,6 +4,118 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [2.7.0] - 2026-06-06
+
+The main-loop blocker pass. HA automations no longer freeze
+anything when they toggle the charger; web requests still preserve
+their byte-for-byte sync response shape but no longer starve MQTT
+or WebSockets while a BAPI roundtrip is in flight.
+
+Concretely: every HA-driven command (start/stop, current, lock,
+schedule, eco/halo/power-boost) used to occupy the main task for
+~400-800 ms during the BAPI write. Under HA's burst patterns
+(autodiscover, multiple automations firing in sequence) this
+compounded into multi-second windows where the UI lagged and the
+WebSocket push paused. The 2.7.0 work pushes all of that off the
+main task into a dedicated BLE request queue + response map, and
+the web handler's wait loop now pumps MQTT + WS in 50 ms ticks.
+
+### Added
+
+- **New `/api/command` query parameters** for callers that want
+  explicit control over the sync/async trade-off:
+  - `?wait=N` — short-wait deadline in milliseconds, 0..8000,
+    default 5000. The web handler waits up to N ms for the BAPI
+    response, then either returns 200 + body (synchronous shape)
+    or 202 + `{"id":N,"status":"pending"}` (poll via
+    `/api/command_status`).
+  - `?wait=0` — pure async. Returns 202 immediately with the
+    request id; the BLE task processes in the background.
+  - `?sync=1` — escape hatch preserving the pre-2.7.0 blocking
+    behavior (with a tighter inflight cap of 1 to keep legacy
+    callers from doubling up). For any caller that depends on
+    the exact byte-for-byte response shape.
+- **New `/api/command_status?id=N` endpoint** — poll for a
+  previously-enqueued async response:
+  - `200` + body — response landed
+  - `202` + `{"id":N,"status":"pending"}` — still in flight or
+    evicted from the small RAM map but might still be tracked
+  - `410 Gone` — `id` is from the future (never issued by this
+    gateway boot), retry-discouraged
+  - `400` — missing or zero `id`
+- **Test harnesses** (`tests/`):
+  - `api_command_async.py` — 13 unit tests covering the new
+    contract, baseline sync latency, queue plumbing, 410 path.
+  - `edge_cases.py` — 13 tests for parallel correlation, URL
+    edge cases (negative/huge/garbage `?wait`, oversize `par`),
+    token bucket + queue overflow recovery.
+  - `longevity.py` — 4 tests for memory stability over 90 s soak,
+    WebSocket resilience under HTTP burst, MQTT command storm.
+  - `hardening.py` — reusable soak/burst harness with a charger
+    monitor thread that polls `r_dat` and validates the EVSE
+    stays healthy throughout.
+  - `ui_surface.py` — 18 probes mirroring every BAPI fetch the
+    web UI's JS makes.
+
+### Changed
+
+- **MQTT command path is fully non-blocking.** `_handleCommand`
+  in `wb_mqtt.cpp` now enqueues every BAPI write
+  (start_stop, current, lock, autolock, eco/schedule/power_boost/
+  halo, native HA entity handlers) on a FreeRTOS queue and
+  returns immediately. The raw `wallbox/bapi` passthrough uses
+  `MQTT_PUBLISH` reply mode so its response still lands on
+  `wallbox/response/<met>` for any existing subscribers. No
+  observable behavior change to HA — just no main-loop occupancy.
+- **Web request handler pumps MQTT + WebSocket every 50 ms** while
+  waiting for a BAPI response. Pre-9c, a 5 s `?wait` would freeze
+  the WebSocketsServer's accept loop (browsers saw
+  `ERR_CONNECTION_RESET` on the first WS handshake every page
+  load) and pause PubSubClient. The chunked pump keeps both
+  responsive throughout the wait. Re-entrancy verified safe: MQTT
+  callbacks post-Step-8 only enqueue, never re-enter
+  `sendCommand`; the WebServer is never re-entered (we're already
+  inside `handleClient()`).
+- **`loop_max_ms` warning thresholds** in /info → Connection
+  Diagnostics now reflect 2.7.0 reality. ≤ 2000 ms is default
+  color (normal operation), 2000-8000 ms is amber (wait path
+  exercised), > 8000 ms is red + ⚠ (above clamp — genuinely
+  abnormal). Also fixes a left-to-right ternary bug that made the
+  red branch unreachable.
+
+### Fixed
+
+- **`_nextReqId` race condition** (HIGH, caught by pre-release
+  audit). `enqueueRequest` runs from both the main task (web
+  handler) AND the BLE task (MQTT callback fires inside
+  `sendCommand`'s `onYield`). Plain `_nextReqId++` would race
+  and issue duplicate ids, corrupting the response map. Replaced
+  with `__atomic_fetch_add(&_nextReqId, 1, __ATOMIC_RELAXED)`;
+  loops on the result to skip the 0 sentinel under wrap-around.
+- **`?wait=0` BAPI early-timeout regression** (caught by new
+  parallel-correlation tests). Step 9d computed
+  `bapiTimeout = waitMs + 250`, so pure-async callers gave BAPI
+  only 250 ms to respond — under any real charger roundtrip.
+  Empty responses were filtered out by `_storeResponse`, so
+  `/api/command_status` polled forever. Fixed: `bapiTimeout = 0`
+  (BLE-task default 5 s) for the `waitMs == 0` case.
+- **WS dropping under HTTP load** (visible symptom of the missing
+  chunked pump). Fixed by step 9c above.
+
+### Known constraints
+
+- The web `/api/command` path can still occupy the main task for
+  up to `?wait` (default 5 s) on a slow BAPI call. The chunked
+  pump keeps MQTT and WS responsive during that window, but the
+  main loop's own iteration time grows by the same amount.
+  Truly non-blocking web would require migrating to
+  ESPAsyncWebServer — already on the 3.x roadmap.
+- The 8 s `?wait` upper clamp means BAPI calls that legitimately
+  take > 8 s (rare; only `gupdc` cloud check observed in this
+  range) will return 202 even with `?wait=12000`. The JS clients
+  fall back to "Couldn't read X state" rendering, which is the
+  same path as a real BAPI error and matches pre-2.7.0 UX.
+
 ## [2.6.1] - 2026-06-06
 
 Quick fix for @mvanlijden's [#11](https://github.com/botts7/esp32-wallbox/issues/11):

@@ -28,19 +28,18 @@ MQTT discovery burst we fixed in 2.6.0.
   same 30 s loop-gate as BLE/MQTT). ~+200 net LOC across 7 files,
   9-step impl order with small/medium/large tags.
 
-- [ ] **`/api/command` BLE-passthrough async** (task #71 —
+- [x] **`/api/command` BLE-passthrough async** (task #71 — shipped
+  in 2.7.0;
   [full plan](plans/2.7.0-api-command-async.md))
 
-  Hybrid queue + short-wait + 202-fallback design. HTTP handler
-  enqueues to BLE task and waits ~800 ms; if BAPI completes
-  (~98 % case on healthy MAX), returns 200 + body byte-for-byte
-  same as today. Otherwise returns 202 + `{id, status:"pending"}`;
-  response lands on MQTT + WS; `GET /api/command_status?id=N`
-  polls. **Bigger win: same treatment applies to MQTT
-  `_handleCommand`** (every HA toggle goes through it). New
-  `BleReq` queue (depth 6), reqId correlation via existing BAPI
-  `id` field. Backward-compat via `?wait=ms` knob + `?sync=1`
-  escape hatch. ~+460 LOC across 5 files, 11-step impl order.
+  Shipped as 11 steps + 4 audit/regression follow-ups (9, 9b-9h).
+  Final shape: default `?wait` is 5000 ms (not the planned 800 ms)
+  to preserve the byte-for-byte sync JS contract; upper clamp
+  is 8000 ms. The async path is preserved for `?wait=0` and
+  short-wait callers. MQTT `_handleCommand` is fully fire-and-
+  forget — every HA toggle is now zero main-loop time. The web
+  handler pumps MQTT + WS in 50 ms ticks during waits so neither
+  starves. See CHANGELOG.md → 2.7.0 for the full story.
 
 ---
 

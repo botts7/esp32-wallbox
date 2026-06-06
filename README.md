@@ -289,6 +289,35 @@ Optional username/password authentication (Config → Web Security):
 | `wallbox/cmd/timezone` | `Australia/Sydney` (any IANA zone) | Set timezone |
 | `wallbox/bapi` | `{"met":"r_dat","par":null}` | Raw BAPI command |
 
+### HTTP `/api/command` query parameters (since 2.7.0)
+
+The gateway also exposes a direct BAPI passthrough at
+`GET /api/command?action=bapi&met=<method>&par=<value>` which the
+web UI uses internally and external scripts can drive directly.
+Two query knobs control sync vs async behavior:
+
+| Param | Range | Default | Effect |
+|-------|-------|---------|--------|
+| `wait` | `0`-`8000` ms | `5000` | How long the gateway waits for the BAPI response inline. On completion within the window: `200` + response body. On timeout: `202` + `{"id":N,"status":"pending"}`. |
+| `wait=0` | | | Pure async — return `202` immediately, response will be published to `wallbox/response/<met>`. |
+| `sync` | `0`/`1` | `0` | `sync=1` preserves the pre-2.7.0 byte-for-byte blocking shape (use only if your client can't handle 202). |
+
+Poll a pending async response:
+
+```
+GET /api/command_status?id=<reqId>
+```
+
+Returns:
+- `200` + body — response landed
+- `202` + `{"id":N,"status":"pending"}` — still in flight
+- `410 Gone` — `id` is from a different gateway boot or never issued
+- `400` — missing or zero `id`
+
+Backward compatibility: existing scripts that don't pass `?wait` or
+`?sync` continue to work unchanged; the `5000` ms default matches the
+pre-2.7.0 `sendCommand` internal timeout.
+
 ## Development
 
 ### Project structure
