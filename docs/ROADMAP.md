@@ -120,10 +120,16 @@ core architecture. Don't need to do — but they're on the radar.
   and 5 decision points the maintainer needs to answer before
   implementation starts.
 
-- [ ] **HA Add-on packaging** (task #79)
-  Package as a Home Assistant Add-on so users on HAOS / supervised
-  installs can manage the ESP32 firmware via HA's UI. Different
-  distribution channel from the current Releases page.
+- [ ] **HA Add-on packaging** (task #79 — research done:
+  [docs/plans/3.x-ha-addon.md](plans/3.x-ha-addon.md))
+  Package a HA Add-on (Python + FastAPI behind HA ingress) that
+  provides a HA-native dashboard for the ESP32 gateway plus
+  one-click OTA. Doc covers Add-on anatomy, three-phase scope
+  (read-only v0.1 → OTA v0.2 → polish v0.3), repo layout
+  trade-offs (separate repo recommended), multi-arch build,
+  ~30 hr effort, 5 decision points. Out-of-scope notes the
+  separate HACS-integration option as a complementary 4.x
+  conversation.
 
 ---
 
