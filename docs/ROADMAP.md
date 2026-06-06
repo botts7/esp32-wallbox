@@ -80,10 +80,13 @@ and self-contained.
   Diagnostics under "Recent long loop iterations" with the same color
   scale as the latched scalar (neutral / amber / red).
 
-- [ ] **Compress or paginate `/api/settings` response** (task #75)
-  Audit flagged 67 KB per response. Strip whitespace + GZIP could
-  drop ~75%, paginating by section could drop more. Helps slow WiFi
-  clients and reduces HTTP-handler wall-clock time.
+- [x] **Compress /settings page body** (task #75 — shipped)
+  Build-time gzip via `scripts/precompress_settings.py` PIO
+  pre-script. The big static body (~56 KB raw) becomes a
+  PROGMEM byte array; new `/settings/body.gz` endpoint serves
+  it with `Content-Encoding: gzip`. `handleSettings` sends a
+  small stub that fetches + injects + re-runs scripts.
+  Measured: total first-load 68 KB → 28 KB (2.4× wire win).
 
 ---
 
