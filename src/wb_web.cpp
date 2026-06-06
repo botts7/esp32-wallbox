@@ -787,14 +787,24 @@ static void handleApiCommand() {
     // that legitimately need 8-12 s on busy MAX firmware.
     //
     //   ?sync=1     — old blocking behavior + sync inflight cap
-    //   ?wait=N     — short-wait deadline in ms (0..15000, default 5000)
+    //   ?wait=N     — short-wait deadline in ms (0..8000, default 5000)
     //   ?wait=0     — pure async: enqueue + 202 immediately
+    //
+    // Upper clamp tightened to 8000 ms (was 15000) so a single
+    // misbehaving caller can't latch loop_max_ms to a worrying
+    // 15-second value in /info → Connection Diagnostics. 8 s
+    // still covers the slowest real BAPI call we've measured
+    // (gupdc cloud roundtrip ~5-10 s). Callers asking for the
+    // pre-step-9 12-second wait — Q() and B() in the GUI — fall
+    // through this clamp gracefully: they get 8 s instead of 12 s,
+    // and on the rare gupdc that overshoots 8 s they get a 202
+    // (rendered as "loading" rather than a hard error).
     bool useSync = http.arg("sync") == "1";
     int waitMs = 5000;
     if (http.hasArg("wait")) {
         waitMs = http.arg("wait").toInt();
         if (waitMs < 0) waitMs = 0;
-        if (waitMs > 15000) waitMs = 15000;
+        if (waitMs > 8000) waitMs = 8000;
     }
 
     // Resolve action → met + par (shared by both paths).

@@ -207,17 +207,20 @@ class TestUrlEdgeCases(unittest.TestCase):
             data = r.json()
             self.assertEqual(data.get("status"), "pending")
 
-    def test_wait_huge_clamps_to_15000(self) -> None:
-        """?wait=999999 must clamp to 15000 (server-side max)."""
+    def test_wait_huge_clamps_to_max(self) -> None:
+        """?wait=999999 must clamp to the server-side max (8000 ms
+        as of step 9g). g_tzn is fast — returns well within the
+        clamp regardless. The bound checks that the server doesn't
+        try to wait the full 999999 ms (would just block forever)."""
         t0 = time.perf_counter()
         r = _get("/api/command", params={
             "action": "bapi", "met": "g_tzn", "par": "null",
             "wait": "999999",
-        }, timeout=20)
+        }, timeout=12)
         dur = time.perf_counter() - t0
         self.assertIn(r.status_code, (200, 202))
-        # g_tzn is fast — should return well before 15 s
-        self.assertLess(dur, 16.0, f"took {dur:.1f} s — clamp may be broken")
+        self.assertLess(dur, 9.0,
+            f"took {dur:.1f} s — clamp at 8000 ms appears broken")
 
     def test_wait_garbage_falls_to_default(self) -> None:
         """?wait=notanumber: String::toInt() returns 0, so we get
