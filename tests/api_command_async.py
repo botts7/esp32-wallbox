@@ -260,6 +260,20 @@ class TestAsyncPath(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 400)
 
+    def test_command_status_410_on_future_id(self) -> None:
+        """Step 9 audit fix: an id that's never been issued (because
+        it's above the current _nextReqId) must return 410 Gone, not
+        202 pending. Otherwise a bad client can poll forever on a
+        typo'd or fuzzed id."""
+        # 4_000_000_000 is well past anything _nextReqId could reach
+        # in any reasonable boot lifetime (~4B fits in uint32_t but
+        # we'd need ~127 years of continuous 1/sec to get there).
+        r = requests.get(
+            f"{GATEWAY}/api/command_status?id=4000000000",
+            auth=AUTH, timeout=5,
+        )
+        self.assertEqual(r.status_code, 410)
+
     def test_short_wait_default_returns_200_or_202(self) -> None:
         """Default ~800ms wait: should be 200 on healthy MAX."""
         r, dur = _send_cmd("g_tzn")

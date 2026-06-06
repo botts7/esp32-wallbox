@@ -968,11 +968,16 @@ uint32_t WallboxBLE::enqueueRequest(const char* met, const char* par,
                                     ReplyMode replyMode, TaskHandle_t waiter) {
     if (!_reqQueue || !met) return 0;
     BleReq req = {};
-    // _nextReqId currently has no synchronisation. Single-writer in
-    // step 2 (the only caller is the test from main task). Step 4
-    // will wrap this in _cmdMutex when sendCommand starts using it.
-    req.reqId      = _nextReqId++;
-    if (req.reqId == 0) req.reqId = _nextReqId++;  // skip the sentinel
+    // Step 9 hardening: __atomic_fetch_add is lock-free and safe under
+    // the documented concurrent callers (main task via web handler,
+    // BLE task via MQTT callback during sendCommand yield). Loop to
+    // skip the 0 sentinel — under wrap, two racing increments could
+    // both land on 0, so we retry until we get nonzero.
+    uint32_t id;
+    do {
+        id = __atomic_fetch_add(&_nextReqId, 1, __ATOMIC_RELAXED);
+    } while (id == 0);
+    req.reqId      = id;
     strncpy(req.met, met, sizeof(req.met) - 1);
     req.met[sizeof(req.met) - 1] = '\0';
     if (par) {

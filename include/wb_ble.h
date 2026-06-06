@@ -74,6 +74,15 @@ public:
     bool drainPendingResponsePub(String& out_met, String& out_json);
     static const uint8_t kPendingPubSize = 4;
 
+    // Step 9 hardening: snapshot of the next-to-be-issued request id.
+    // /api/command_status uses this to distinguish "future id, never
+    // issued" (410 Gone) from "could plausibly still be in flight" (202
+    // pending) for an id that's already left the small response map.
+    // Atomic load to match the atomic_fetch_add in enqueueRequest.
+    uint32_t peekNextReqId() const {
+        return __atomic_load_n(&_nextReqId, __ATOMIC_RELAXED);
+    }
+
     // State
     State state() const { return _state; }
     bool isConnected() const { return _state == State::CONNECTED; }
@@ -335,7 +344,13 @@ private:
     // FreeRTOS queue handle, depth kBleReqQueueDepth.
     QueueHandle_t _reqQueue = nullptr;
     static const uint8_t kBleReqQueueDepth = 6;
-    // Monotonic request ID counter, bumped under _cmdMutex.
+    // Monotonic request ID counter. Bumped via __atomic_fetch_add
+    // because enqueueRequest runs on both the main task (web handler)
+    // and the BLE task (MQTT callback invoked from inside yield during
+    // a sendCommand wait). Plain ++ would race and produce duplicate
+    // ids; using _cmdMutex would serialise long BAPI roundtrips behind
+    // a counter increment. Atomic RELAXED is lock-free, microsecond,
+    // and correct under both visit orders.
     uint32_t _nextReqId = 1;
 
     // Step 3: response RAM map. Capped FIFO ring of {reqId, json}

@@ -693,16 +693,16 @@ static void handleApiCharger() {
     http.send(200, "application/json", json);
 }
 
-// Server-side limit on how many BAPI command requests can be queued.
-// Each /api/command call goes through sendCommand which waits on
-// _cmdMutex with a multi-second timeout. Under load (e.g. /sessions
-// firing 20+ parallel r_log fetches), the queue piles up, LWIP/heap
-// gets stressed, and the gateway panics. Capping in-flight at 2 and
-// fast-failing the rest with 503 keeps the gateway alive — the
-// browser retry on 503 (or the JS-level fetch limiter) keeps the
-// experience usable.
+// Inflight counter for the `?sync=1` escape hatch only. Async
+// /api/command is bounded by the BLE request queue (depth 6 in
+// wb_ble.h); when full, enqueueRequest returns 0 and we 503. Sync
+// callers still run BAPI on the web handler's call stack, so a
+// stuck legacy caller could double up if we didn't gate — cap at 1
+// to keep sync strictly serial. The 2.6.x-era `MAX_API_CMD_INFLIGHT
+// = 2` constant retired in step 9: the async queue supersedes it
+// for the default path, and the sync gate is intentionally tighter
+// (1) than the old shared limit.
 static volatile int _apiCmdInflight = 0;
-static const int MAX_API_CMD_INFLIGHT = 2;
 
 // Re-entrancy tripwire for WBWebServer::loop(). Normally 0→1→0 per request;
 // if g_webMaxReentry ever latches >1, something pumped http.handleClient()
@@ -728,7 +728,9 @@ volatile uint32_t g_loopMaxMs  = 0;
 // 429 + Retry-After instead of piling up. Sizing: BAPI completes ~1 op / 500 ms,
 // so refill 2 tokens/sec; capacity 4 absorbs a legitimate burst (cold page
 // load, a couple of Saves). millis()-based lazy refill — no timer, ~0 heap.
-// This is rate; MAX_API_CMD_INFLIGHT is concurrency — orthogonal guards.
+// This is rate; the BLE request queue (kBleReqQueueDepth) handles
+// concurrency for the async path, and _apiCmdInflight gates the
+// `?sync=1` escape hatch — three orthogonal admission guards.
 static const float TB_CAP    = 4.0f;   // burst capacity (tokens)
 static const float TB_REFILL = 2.0f;   // tokens per second
 static float       _tbTokens = TB_CAP;
@@ -2877,11 +2879,14 @@ static void registerRoutes() {
     http.on("/api/command", handleApiCommand);
     // 2.7.0 step 7 — poll endpoint for the async ?wait=0 path. Returns:
     //   200 + body  → response landed, returned in the body
-    //   202 + status:pending → request still in flight (or just
-    //                          enqueued)
-    //   410 Gone    → reqId not found (already consumed by an earlier
-    //                 poll, or evicted from the small RAM map)
-    //   400         → no ?id= param, or non-numeric
+    //   202 + status:pending → request still in flight, or evicted
+    //                          from the small RAM map but might still
+    //                          be tracked by the BLE task
+    //   410 Gone    → reqId is from the future (was never issued by
+    //                 this gateway boot — caller likely typo'd, fuzzed,
+    //                 or is talking to a different gateway after a
+    //                 reboot)
+    //   400         → no ?id= param, or non-numeric / zero
     http.on("/api/command_status", []() {
         if (!checkAuth()) return;
         if (!http.hasArg("id")) {
@@ -2898,13 +2903,18 @@ static void registerRoutes() {
             http.send(200, "application/json", body);
             return;
         }
-        // Distinguish "still in flight" from "evicted":
-        // we don't track per-request state separately, but the
-        // queue is FIFO and small, so callers who poll within ~1s
-        // of the 202 should always either hit 200 or 202. A 410
-        // means they waited too long.
-        // For step 7 simplicity, return 202 if reqId is plausibly
-        // recent (within last ~2 s of activity). Step 9+ may refine.
+        // Step 9 audit fix: distinguish "future id never issued" (410)
+        // from "could still be in flight" (202). Without this, /api/
+        // command_status returns 202 forever for an invalid id, which
+        // lets a bad client (or a probe after gateway reboot) poll
+        // indefinitely. 410 is correctly retry-discouraged in HTTP
+        // semantics — callers know to stop.
+        uint32_t nextId = wallboxBLE.peekNextReqId();
+        if (reqId >= nextId) {
+            http.send(410, "application/json",
+                "{\"error\":\"unknown id — never issued\"}");
+            return;
+        }
         String pending = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
         http.send(202, "application/json", pending);
     });
