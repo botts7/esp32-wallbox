@@ -98,13 +98,16 @@ and self-contained.
 These are bigger changes that affect the gateway's distribution or
 core architecture. Don't need to do — but they're on the radar.
 
-- [ ] **Table-driven HA discovery refactor** (task #77)
+- [ ] **Table-driven HA discovery refactor** (task #77 — plan
+  ready: [docs/plans/3.0-discovery-table.md](plans/3.0-discovery-table.md))
   Replace the 57-case switch in `tickDiscovery` with a `DiscoveryEntry`
   struct table (was an alternative considered for 2.6.0 — the switch
   approach was picked for transcription safety; a follow-up cleanup
   can swap it for the table now that the wire format is locked in).
   No functional change. Lower per-tick overhead and easier to add
-  entities. Pure code-cleanup.
+  entities. Pure code-cleanup. Plan captures the 5-step migration
+  (build flag, group-wise transcription with HA verification per
+  group, flip default, remove legacy switch).
 
 - [ ] **ESPHome AsyncWebServer backport** (task #78)
   Replace sync Arduino WebServer with AsyncWebServer (me-no-dev).
