@@ -526,6 +526,18 @@ void loop() {
         // 2.5.1 observed 80,000 ms loop_max_ms overnight from a single
         // sendDiscovery against an MQTT broker that briefly stalled).
         wallboxMQTT.tickDiscovery();
+        // 2.7.0 step 5: drain any pending MQTT-publish responses that
+        // the BLE task queued. We can publish from here because the
+        // main task owns PubSubClient. Drain to empty per iteration —
+        // each publish is bounded by the 2.6.0 1s wifiClient socket
+        // timeout, and the ring caps at kPendingPubSize entries, so
+        // the loop bound is ~4 × 1 s worst case (unlikely).
+        {
+            String pubMet, pubJson;
+            while (wallboxBLE.drainPendingResponsePub(pubMet, pubJson)) {
+                wallboxMQTT.publishResponse(pubMet.c_str(), pubJson);
+            }
+        }
         publishCachedStatusIfNew();
         publishCachedRealtimeIfNew();
         publishCachedMeterIfNew();

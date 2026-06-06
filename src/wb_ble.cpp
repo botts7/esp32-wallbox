@@ -60,6 +60,7 @@ void WallboxBLE::begin(const char* addr) {
     // null-op scaffolding step. See docs/plans/2.7.0-api-command-async.md.
     if (!_reqQueue) _reqQueue = xQueueCreate(kBleReqQueueDepth, sizeof(BleReq));
     if (!_responseMapMutex) _responseMapMutex = xSemaphoreCreateMutex();
+    if (!_pendingPubMutex)  _pendingPubMutex  = xSemaphoreCreateMutex();
     if (!_taskHandle) {
         xTaskCreatePinnedToCore(
             _taskFn, "wb_ble",
@@ -188,7 +189,15 @@ void WallboxBLE::loop() {
                 if (req.replyMode == ReplyMode::WAKE_WAITER && req.waiter) {
                     xTaskNotify(req.waiter, req.reqId, eSetValueWithOverwrite);
                 }
-                // (void)MQTT_PUBLISH — lands in step 5.
+                // Step 5: stage an MQTT publish for the main task.
+                // Used by the raw `/bapi` MQTT topic (step 8) and the
+                // async ?wait=0 response path (step 6) — the main
+                // task drains via drainPendingResponsePub() and
+                // publishes through wallboxMQTT (PubSubClient is not
+                // thread-safe so we can't publish from here).
+                if (req.replyMode == ReplyMode::MQTT_PUBLISH && resp.length()) {
+                    _enqueueMqttPub(String(req.met), resp);
+                }
             }
         }
 
@@ -862,6 +871,49 @@ void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_
             _instance->_responseCb(_instance->_lastResponse);
         }
     }
+}
+
+// 2.7.0 step 5 — defer an MQTT publish to the main task. Called
+// from the BLE-task drain when a request's replyMode is MQTT_PUBLISH.
+// Cap at kPendingPubSize entries; drops oldest with a log line if the
+// ring fills (which only happens if main task drain is wedged —
+// shouldn't happen in normal flow).
+void WallboxBLE::_enqueueMqttPub(const String& met, const String& json) {
+    if (met.length() == 0 || json.length() == 0) return;
+    if (!_pendingPubMutex) return;
+    if (xSemaphoreTake(_pendingPubMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+    uint8_t next = (_pendingPubHead + 1) % kPendingPubSize;
+    if (next == _pendingPubTail) {
+        // Ring full — drop oldest. Tail advance frees a slot.
+        Log.printf("[BLE] pending MQTT pub ring full, dropping met=%s\n",
+                   _pendingPub[_pendingPubTail].met.c_str());
+        _pendingPubTail = (_pendingPubTail + 1) % kPendingPubSize;
+    }
+    _pendingPub[_pendingPubHead].met  = met;
+    _pendingPub[_pendingPubHead].json = json;
+    _pendingPubHead = next;
+    xSemaphoreGive(_pendingPubMutex);
+}
+
+// 2.7.0 step 5 — drain one pending MQTT publish. Called from main
+// task loop. Returns false when the ring is empty so the caller can
+// break out of the drain loop. The main task should call this in a
+// loop until false to flush all pending pubs each iteration.
+bool WallboxBLE::drainPendingResponsePub(String& out_met, String& out_json) {
+    if (!_pendingPubMutex) return false;
+    if (xSemaphoreTake(_pendingPubMutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+    bool got = false;
+    if (_pendingPubTail != _pendingPubHead) {
+        out_met  = _pendingPub[_pendingPubTail].met;
+        out_json = _pendingPub[_pendingPubTail].json;
+        // Free the heap-backed Strings before advancing the tail.
+        _pendingPub[_pendingPubTail].met  = String();
+        _pendingPub[_pendingPubTail].json = String();
+        _pendingPubTail = (_pendingPubTail + 1) % kPendingPubSize;
+        got = true;
+    }
+    xSemaphoreGive(_pendingPubMutex);
+    return got;
 }
 
 // 2.7.0 step 3 — store a completed response in the RAM map. Called

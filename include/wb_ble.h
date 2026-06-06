@@ -59,6 +59,16 @@ public:
     bool tryFetchResponse(uint32_t reqId, String& out);
     static const uint8_t kResponseMapSize = 4;
 
+    // 2.7.0 step 5 — drain pending MQTT-publish responses queued by
+    // the BLE-task drain when a request's replyMode was MQTT_PUBLISH.
+    // Returns true and fills out_met + out_json if a publish is
+    // pending; false if the queue is empty. Main task calls this in
+    // its existing publishCached*IfNew block and publishes via
+    // PubSubClient (which is not thread-safe — must stay on main
+    // task). Same defer-via-queue pattern as _storeCache.
+    bool drainPendingResponsePub(String& out_met, String& out_json);
+    static const uint8_t kPendingPubSize = 4;
+
     // State
     State state() const { return _state; }
     bool isConnected() const { return _state == State::CONNECTED; }
@@ -340,6 +350,21 @@ private:
     // Internal: store a response in the map under _responseMapMutex.
     // No-op if reqId == 0 (fire-and-forget) or json is empty.
     void _storeResponse(uint32_t reqId, const String& json);
+
+    // Step 5: pending-MQTT-publish ring. BLE-task drain enqueues
+    // when replyMode == MQTT_PUBLISH; main task drains via
+    // drainPendingResponsePub() and publishes through wallboxMQTT.
+    // Capped so a wedged MQTT can't grow unbounded — drops oldest
+    // with a log line.
+    struct PendingPub {
+        String met;
+        String json;
+    };
+    PendingPub _pendingPub[kPendingPubSize] = {};
+    uint8_t    _pendingPubHead = 0;   // next eviction (write) index
+    uint8_t    _pendingPubTail = 0;   // next read index
+    SemaphoreHandle_t _pendingPubMutex = nullptr;
+    void _enqueueMqttPub(const String& met, const String& json);
 
     // 2.7.0 step 4: the "direct" BAPI write+wait path. Same body as
     // the pre-step-4 sendCommand: takes _cmdMutex, writes the framed
