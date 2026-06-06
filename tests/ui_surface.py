@@ -160,14 +160,25 @@ PROBES: List[Probe] = [
 
 
 def call(probe: Probe) -> ProbeResult:
+    """One probe with auto-retry on 429 (transient token-bucket
+    exhaustion). The bucket cap is 4 with 2/s refill — under burst
+    test load it can dip below 1 token, which would false-flag a
+    perfectly healthy endpoint. We honour Retry-After like a normal
+    well-behaved client. Up to 2 retries; total budget stays under
+    probe.timeout * 3."""
     params = {"action": "bapi", "met": probe.met, "par": probe.par}
     params.update(probe.extra)
     t0 = time.perf_counter()
     try:
-        r = requests.get(
-            f"{GATEWAY}/api/command",
-            params=params, auth=AUTH, timeout=probe.timeout,
-        )
+        for attempt in range(3):
+            r = requests.get(
+                f"{GATEWAY}/api/command",
+                params=params, auth=AUTH, timeout=probe.timeout,
+            )
+            if r.status_code != 429:
+                break
+            ra = float(r.headers.get("Retry-After", "1"))
+            time.sleep(min(ra, 2.0))
     except requests.Timeout:
         return ProbeResult(
             name=probe.name, ok=False, http_status=0,

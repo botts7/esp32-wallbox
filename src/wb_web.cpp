@@ -850,7 +850,13 @@ static void handleApiCommand() {
     // BLE task gives up at its own 5 s default even if the caller
     // asked for ?wait=12000. We add a small headroom (250 ms) so the
     // BAPI completion has time to land before the HTTP wait deadline.
-    uint32_t bapiTimeout = (uint32_t)waitMs + 250;
+    //
+    // Step 9e fix: pure async (?wait=0) callers DON'T want a 250 ms
+    // BAPI timeout — that would kill the BAPI before it had a chance
+    // to complete, the response would be empty, and _storeResponse
+    // would skip it (it filters empty JSON), so /api/command_status
+    // would poll forever. Use 0 to mean "BLE task default" (5 s).
+    uint32_t bapiTimeout = (waitMs > 0) ? ((uint32_t)waitMs + 250) : 0;
     uint32_t reqId = wallboxBLE.enqueueRequest(
         met, par.c_str(),
         WallboxBLE::ReplyMode::WAKE_AND_MQTT, self, bapiTimeout);
