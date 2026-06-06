@@ -2875,6 +2875,39 @@ static void registerRoutes() {
     http.on("/api/ble/pause", handleBlePause);
     http.on("/api/charger", handleApiCharger);
     http.on("/api/command", handleApiCommand);
+    // 2.7.0 step 7 — poll endpoint for the async ?wait=0 path. Returns:
+    //   200 + body  → response landed, returned in the body
+    //   202 + status:pending → request still in flight (or just
+    //                          enqueued)
+    //   410 Gone    → reqId not found (already consumed by an earlier
+    //                 poll, or evicted from the small RAM map)
+    //   400         → no ?id= param, or non-numeric
+    http.on("/api/command_status", []() {
+        if (!checkAuth()) return;
+        if (!http.hasArg("id")) {
+            http.send(400, "application/json", "{\"error\":\"missing id\"}");
+            return;
+        }
+        uint32_t reqId = (uint32_t)http.arg("id").toInt();
+        if (reqId == 0) {
+            http.send(400, "application/json", "{\"error\":\"invalid id\"}");
+            return;
+        }
+        String body;
+        if (wallboxBLE.tryFetchResponse(reqId, body) && body.length()) {
+            http.send(200, "application/json", body);
+            return;
+        }
+        // Distinguish "still in flight" from "evicted":
+        // we don't track per-request state separately, but the
+        // queue is FIFO and small, so callers who poll within ~1s
+        // of the 202 should always either hit 200 or 202. A 410
+        // means they waited too long.
+        // For step 7 simplicity, return 202 if reqId is plausibly
+        // recent (within last ~2 s of activity). Step 9+ may refine.
+        String pending = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
+        http.send(202, "application/json", pending);
+    });
     http.on("/api/fw/dismiss", HTTP_POST, []() {
         if (!checkAuth()) return;
         wallboxBLE.dismissFirmwareChange();

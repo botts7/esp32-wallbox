@@ -74,37 +74,38 @@ def _send_cmd(
 
 
 class TestBaselineSync(unittest.TestCase):
-    """Behaviour every commit on this branch must preserve."""
+    """Pre-refactor contract — preserved via the `?sync=1` escape hatch
+    in Step 6. These tests verify the legacy byte-for-byte shape that
+    existing curl scripts / HA automations rely on. Without `?sync=1`
+    the default path is now async and may return 202 instead of 200,
+    which is captured in TestAsyncPath."""
 
     @classmethod
     def setUpClass(cls) -> None:
         _require_env()
 
-    def test_g_tzn_returns_200_with_json_body(self) -> None:
+    def test_g_tzn_sync_returns_200_with_body(self) -> None:
         """The cheapest BAPI call (timezone) round-trips with a body."""
-        r, dur = _send_cmd("g_tzn")
+        r, dur = _send_cmd("g_tzn", sync=1)
         self.assertEqual(r.status_code, 200, r.text[:200])
         self.assertIn("application/json", r.headers.get("Content-Type", ""))
         data = r.json()
-        # The shape today: {"id": N, "r": {...}} on success, {"error": "..."} on failure.
+        # Shape: {"id": N, "r": {...}} on success, {"error": "..."} on failure.
         self.assertTrue("r" in data or "error" in data, data)
 
-    def test_r_dat_returns_status_object(self) -> None:
+    def test_r_dat_sync_returns_status_object(self) -> None:
         """A typical status read — heavier than g_tzn but still fast."""
-        r, dur = _send_cmd("r_dat")
+        r, dur = _send_cmd("r_dat", sync=1)
         self.assertEqual(r.status_code, 200)
         data = r.json()
-        # r_dat.r should have a `st` field (the local status enum, PR #7)
         if "r" in data and isinstance(data["r"], dict):
             self.assertIn("st", data["r"])
 
-    def test_unknown_method_returns_error_in_body(self) -> None:
+    def test_unknown_method_sync_returns_error_in_body(self) -> None:
         """Server-side validation: unknown BAPI methods should fail
-        cleanly without taking the timeout window."""
-        r, dur = _send_cmd("notamethod")
-        self.assertEqual(r.status_code, 200, "today's behavior — error in body")
-        # We don't assert on dur — the rejection path might still spend
-        # the BLE timeout on some implementations. Caught in latency test.
+        cleanly in the body."""
+        r, dur = _send_cmd("notamethod", sync=1)
+        self.assertEqual(r.status_code, 200, "sync path — error in body")
 
 
 # ---------------------------------------------------------------------------
@@ -120,37 +121,32 @@ class TestLatencyBounds(unittest.TestCase):
         _require_env()
 
     def test_cheap_command_under_1s(self) -> None:
-        """g_tzn should be well under 1 s on a healthy MAX."""
-        r, dur = _send_cmd("g_tzn")
+        """g_tzn over the sync path should be well under 1.5 s. The
+        async default path can return 202 if the BLE link is busy,
+        which is fine — captured separately in TestAsyncPath."""
+        r, dur = _send_cmd("g_tzn", sync=1)
         self.assertEqual(r.status_code, 200)
         self.assertLess(dur, 1.5, f"g_tzn took {dur:.2f}s")
 
     def test_loop_max_ms_stays_bounded_under_10x_load(self) -> None:
-        """Hit /api/command 10× in a tight loop; loop_max_ms should
-        not spike above 2 s. Today's sync behaviour might exceed this;
-        the refactor target is sub-200 ms per iteration."""
-        # Clear-counters first — exercises the existing /api/diag/clear
-        # to give a clean baseline.
-        try:
-            requests.get(
-                f"{GATEWAY}/info",
-                auth=AUTH,
-                timeout=5,
-            )
-        except requests.RequestException:
-            pass
+        """Hit /api/command 10× in a tight loop, alternating async
+        default + sync escape hatch. loop_max_ms records the worst
+        main-loop gap seen during the burst. Pre-refactor: ~800-1500
+        ms. Post-Step-4 target: bounded by the slowest single command
+        the BLE link served, NOT the burst total."""
         baseline = _loop_max_ms()
         peak = baseline
-        for _ in range(10):
-            r, dur = _send_cmd("g_tzn")
-            self.assertEqual(r.status_code, 200)
-        # Give the gateway a moment to publish the updated metric
+        for i in range(10):
+            # Alternate paths so we cover both async + sync under load
+            if i % 2 == 0:
+                r, dur = _send_cmd("g_tzn")
+                self.assertIn(r.status_code, (200, 202))
+            else:
+                r, dur = _send_cmd("g_tzn", sync=1)
+                self.assertEqual(r.status_code, 200)
         time.sleep(2)
         after = _loop_max_ms()
         peak = max(peak, after)
-        # Pre-refactor: this typically reads ~800-1500 ms.
-        # Post-refactor target: <200 ms.
-        # For now we just record; tighten the bound after each step.
         print(
             f"\n[latency] baseline={baseline}ms peak={peak}ms "
             f"delta={peak - baseline}ms"
@@ -176,11 +172,10 @@ class TestStep2Plumbing(unittest.TestCase):
         _require_env()
 
     def test_sync_path_unaffected_by_queue_addition(self) -> None:
-        """Step 2 adds a drain block to the BLE task loop. With no
-        enqueue callers yet, the drain is a no-op (xQueueReceive
-        returns immediately) and the existing sync sendCommand path
-        is unchanged. g_tzn should complete in roughly the same
-        time it did pre-refactor.
+        """The ?sync=1 escape hatch path must remain unaffected
+        end-to-end by the steps 1-7 plumbing. g_tzn over the sync
+        path should complete in roughly the same time it did
+        pre-refactor.
 
         Bound is generous (2.5 s avg) because individual BAPI calls
         vary 100-2000 ms depending on charger response time, WiFi
@@ -190,7 +185,7 @@ class TestStep2Plumbing(unittest.TestCase):
         """
         durations = []
         for _ in range(5):
-            r, dur = _send_cmd("g_tzn")
+            r, dur = _send_cmd("g_tzn", sync=1)
             self.assertEqual(r.status_code, 200)
             durations.append(dur)
         avg = sum(durations) / len(durations)
@@ -217,10 +212,14 @@ class TestAsyncPath(unittest.TestCase):
         self.assertIn("id", data)
         self.assertEqual(data.get("status"), "pending")
 
-    @unittest.skip("/api/command_status lands in plan step 7")
     def test_command_status_polls_to_completion(self) -> None:
+        """?wait=0 returns 202 immediately with an id; polling
+        /api/command_status?id=N eventually returns 200 + body."""
         r, _ = _send_cmd("g_tzn", wait=0)
+        self.assertEqual(r.status_code, 202)
         req_id = r.json()["id"]
+        # Poll up to 2 s for the response to land. g_tzn should complete
+        # well within that on a healthy MAX.
         for _ in range(20):
             time.sleep(0.1)
             poll = requests.get(
@@ -229,8 +228,21 @@ class TestAsyncPath(unittest.TestCase):
                 timeout=5,
             )
             if poll.status_code == 200:
+                # Body must have the actual BAPI response shape.
+                data = poll.json()
+                self.assertTrue("r" in data or "error" in data, data)
                 return
         self.fail(f"command_status never returned 200 for id={req_id}")
+
+    def test_command_status_400_on_missing_id(self) -> None:
+        r = requests.get(f"{GATEWAY}/api/command_status", auth=AUTH, timeout=5)
+        self.assertEqual(r.status_code, 400)
+
+    def test_command_status_400_on_invalid_id(self) -> None:
+        r = requests.get(
+            f"{GATEWAY}/api/command_status?id=notanumber", auth=AUTH, timeout=5
+        )
+        self.assertEqual(r.status_code, 400)
 
     def test_short_wait_default_returns_200_or_202(self) -> None:
         """Default ~800ms wait: should be 200 on healthy MAX."""
