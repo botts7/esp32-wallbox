@@ -15,18 +15,16 @@ and have deferred. Each one can wedge `loop_max_ms` for multi-second
 periods under the right conditions. Same architectural class as the
 MQTT discovery burst we fixed in 2.6.0.
 
-- [ ] **WiFi.reconnect off main loop** (task #70 —
+- [x] **WiFi.reconnect off main loop** (task #70 — shipped in 2.7.0;
   [full plan](plans/2.7.0-wifi-reconnect.md))
 
-  Event-driven (`WiFi.onEvent`) primary + exponential backoff defer
-  policy. Event handler sets flags only; `wb_net::tick()` on main
-  drives the explicit `WiFi.reconnect()` only when driver's own
-  auto-reconnect has clearly given up (≥60 s since `GOT_IP`), with
-  1/2/5/15/60 s backoff. Most of the time the driver auto-reconnects
-  on its own and we never explicitly call it. New `wb_net` module
-  (~150 LOC); `wb_diag` extended for WIFI Kind (auto-gives WiFi the
-  same 30 s loop-gate as BLE/MQTT). ~+200 net LOC across 7 files,
-  9-step impl order with small/medium/large tags.
+  Shipped as the `wb_net` module + `wb_diag` WIFI Kind. Event
+  handlers on the WiFi driver's event task set flags only; main
+  loop's `wb_net::tick()` drains pending work and only calls
+  explicit `WiFi.reconnect()` after the driver has clearly given
+  up (≥ 60 s gate + 1/2/5/15/60 s backoff). Measured
+  loop_max_ms baseline post-OTA: 17 ms. See CHANGELOG.md → 2.7.0
+  for the full entry.
 
 - [x] **`/api/command` BLE-passthrough async** (task #71 — shipped
   in 2.7.0;

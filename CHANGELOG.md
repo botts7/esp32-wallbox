@@ -59,6 +59,27 @@ the web handler's wait loop now pumps MQTT + WS in 50 ms ticks.
 
 ### Changed
 
+- **WiFi reconnect is event-driven, not polled.** The pre-2.7.0
+  `checkWiFi()` ran every 30 s on the main loop and called
+  `WiFi.reconnect()` synchronously whenever the link was down.
+  That sync call could block the main task for several seconds
+  during driver scan / auth / DHCP. New module `wb_net` registers
+  `WiFi.onEvent()` handlers (on the driver's event task —
+  flags-only, no real work) and a `wb_net::tick()` on the main
+  loop drains the deferred work: mDNS rebind, diag report
+  Disconnect/Reconnect, and the explicit `WiFi.reconnect()` call
+  ONLY when the driver's own auto-reconnect has clearly given up
+  (≥ 60 s since last GOT_IP) and a 1/2/5/15/60 s backoff window
+  has elapsed. Most transient flaps recover via the driver's
+  auto-reconnect before our 60 s gate elapses; the explicit
+  reconnect never fires. Measured: `loop_max_ms` baseline dropped
+  from 1500-2000 ms to ~17 ms post-OTA on the maintainer's MAX.
+- **WiFi reconnect counter exposed** at `/info` → Connection
+  Diagnostics → Reconnect counters, parallel to BLE and MQTT.
+  Also surfaced in `/api/diag/disconnects` for HA dashboards.
+  The 30 s loop_max_ms grace window already extended by
+  reportReconnect() now covers WiFi too — an explicit
+  `WiFi.reconnect()` call won't trigger the tripwire.
 - **MQTT command path is fully non-blocking.** `_handleCommand`
   in `wb_mqtt.cpp` now enqueues every BAPI write
   (start_stop, current, lock, autolock, eco/schedule/power_boost/
