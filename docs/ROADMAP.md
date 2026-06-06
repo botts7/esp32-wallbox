@@ -73,10 +73,12 @@ Nice-to-have improvements that don't fix observed bugs but raise the
 quality bar. Lower priority than the 2.7.0 blockers, but each is small
 and self-contained.
 
-- [ ] **Smart tripwire — recent-events ring** (task #74)
-  `loop_max_ms` is currently "max ever since clear" — one outlier sticks
-  for hours. Track last N events with timestamps so users distinguish
-  "one transient overnight" from "recurring spikes." ~50 LOC in wb_diag.
+- [x] **Smart tripwire — recent-events ring** (task #74 — shipped)
+  Ring of last 8 long iterations (≥ 1 s) with timestamps. Lives in
+  `wb_diag::recordLoopEvent` + ring exposed in
+  `/api/diag/disconnects → loop_events`. Renders on /info → Connection
+  Diagnostics under "Recent long loop iterations" with the same color
+  scale as the latched scalar (neutral / amber / red).
 
 - [ ] **Compress or paginate `/api/settings` response** (task #75)
   Audit flagged 67 KB per response. Strip whitespace + GZIP could
