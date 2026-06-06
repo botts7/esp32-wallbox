@@ -59,11 +59,14 @@ fix proactively but we should be ready when the report lands.
   negative values and converts RSSI → quality %, but the path is
   untested on real Plus hardware.
 
-- [ ] **README refresh for 2.4.x → 2.6.x feature surface** (task #76)
-  Project root `README.md` is stale on community PRs (status enum,
-  switch toggles, autolock), persistent CSRF, one-publish-per-tick
-  discovery, protocol auto-detect, Diagnostic-category entities,
-  dynamic `sw_version`. Separate commit — not bundled with code work.
+- [x] **README refresh for 2.4.x → 2.8.0 feature surface** (task #76
+  — shipped)
+  Added "Recent releases" block, refreshed HA integration section
+  (diagnostic-category entities, non-blocking commands, dynamic
+  sw_version), Admin section (mDNS rebind, persistent CSRF, smart
+  tripwire), Compatible Chargers (corrected the 6.11.26 line),
+  Project structure (now matches src/ + tests/ + scripts/), and
+  added @peter-mcc + @mvanlijden to Contributors.
 
 ---
 
