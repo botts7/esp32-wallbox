@@ -341,6 +341,14 @@ private:
     // No-op if reqId == 0 (fire-and-forget) or json is empty.
     void _storeResponse(uint32_t reqId, const String& json);
 
+    // 2.7.0 step 4: the "direct" BAPI write+wait path. Same body as
+    // the pre-step-4 sendCommand: takes _cmdMutex, writes the framed
+    // BAPI bytes to _chr, polls _responseReady. Used by the BLE-task-
+    // internal callers (periodic polls, keepalive, post-connect
+    // identity reads, PIN auth, drain loop). External callers go
+    // through the public sendCommand() wrapper which queues + waits.
+    String _sendCommandDirect(const char* met, const char* par = "null", uint32_t timeoutMs = 5000);
+
     // RSSI smoothing — NimBLE's getRssi() returns per-packet instantaneous
     // values that swing wildly (issue #6). Sample on a fixed cadence and
     // apply an EMA so all UI/MQTT/WS consumers see the same stable number.
