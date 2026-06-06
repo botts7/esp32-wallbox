@@ -1974,6 +1974,13 @@ function loadDiag(){
         prior.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':(e.kind==='wifi'?'#34d399':'#22d3ee');h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0;opacity:.55"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+' of that boot, down '+fmtDur(e.dur)+'</div>'});
       }
     }
+    // Smart tripwire: recent loop_max spikes with timestamps.
+    // Lets users distinguish "one outlier overnight" from a
+    // recurring pattern without trusting the latched scalar alone.
+    if(d.loop_events&&d.loop_events.length){
+      h+='<div style="margin-top:8px;font-size:.82em;color:var(--text2)">Recent long loop iterations (≥1 s):</div>';
+      d.loop_events.slice(0,8).forEach(function(e){var ms=e.dur_ms;var col=ms>8000?'#ef4444':(ms>2000?'#f59e0b':'#a3a3a3');h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0"><span style="color:'+col+'">LOOP</span> at +'+fmtUptime(e.start)+' for '+ms+' ms</div>'});
+    }
     rows.innerHTML=h||'<div style="color:var(--text3)">No diagnostics logged yet.</div>';
   }).catch(function(){})
 }

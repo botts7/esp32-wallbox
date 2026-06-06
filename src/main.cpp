@@ -384,6 +384,10 @@ void loop() {
         if (g_loopLastMs > 60000 && !wb_diag::loopMaxGateActive(now)) {
             uint32_t gap = now - g_loopLastMs;
             if (gap > g_loopMaxMs) g_loopMaxMs = gap;
+            // Smart tripwire (task #74): record significant gaps in
+            // a ring so users see "is this one-off or recurring."
+            // No-ops below the threshold; caller doesn't need a check.
+            wb_diag::recordLoopEvent(gap);
         }
         g_loopLastMs = now;
     }

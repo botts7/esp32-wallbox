@@ -33,6 +33,15 @@ static uint32_t _wifiLastReconnect = 0;
 // record the gap.
 static uint32_t _loopMaxGateUntilMs = 0;
 
+// Smart tripwire ring (task #74). Head points to the next slot to
+// write; entries that match _loopEventsCount < MAX_LOOP_EVENTS are
+// populated. After the ring fills, _loopEventsCount stays at the
+// max and we just overwrite the oldest slot. Single-word writes
+// keep this safe for best-effort cross-task reads.
+static LoopEvent _loopEvents[MAX_LOOP_EVENTS] = {};
+static volatile uint8_t  _loopEventsHead  = 0;
+static volatile uint8_t  _loopEventsCount = 0;
+
 // Pending disconnect start times (one outstanding per kind)
 static uint32_t _bleDownStart = 0;   // 0 means no outstanding BLE disconnect
 static uint32_t _mqttDownStart = 0;  // 0 means no outstanding MQTT disconnect
@@ -149,6 +158,29 @@ void extendLoopMaxGate(uint32_t graceMs) {
     if (deadline > _loopMaxGateUntilMs) _loopMaxGateUntilMs = deadline;
 }
 
+void recordLoopEvent(uint32_t duration_ms) {
+    if (duration_ms < LOOP_EVENT_THRESHOLD_MS) return;
+    uint8_t slot = _loopEventsHead;
+    _loopEvents[slot].uptime_s    = millis() / 1000;
+    _loopEvents[slot].duration_ms = duration_ms;
+    _loopEventsHead = (slot + 1) % MAX_LOOP_EVENTS;
+    if (_loopEventsCount < MAX_LOOP_EVENTS) _loopEventsCount++;
+}
+
+void copyLoopEvents(LoopEvent* out, uint8_t& count) {
+    uint8_t n = _loopEventsCount;
+    if (n > MAX_LOOP_EVENTS) n = MAX_LOOP_EVENTS;
+    count = n;
+    if (n == 0) return;
+    // Walk backward from the most recently written slot so the
+    // caller sees newest-first.
+    uint8_t idx = (_loopEventsHead + MAX_LOOP_EVENTS - 1) % MAX_LOOP_EVENTS;
+    for (uint8_t i = 0; i < n; i++) {
+        out[i] = _loopEvents[idx];
+        idx = (idx + MAX_LOOP_EVENTS - 1) % MAX_LOOP_EVENTS;
+    }
+}
+
 bool loopMaxGateActive(uint32_t nowMs) {
     if (_loopMaxGateUntilMs == 0) return false;
     if (nowMs >= _loopMaxGateUntilMs) {
@@ -191,6 +223,16 @@ String toJson() {
     for (int i = (int)arr.size() - 1; i >= 0; i--) {
         events.add(arr[i]);
     }
+    // Smart tripwire ring — newest first. Live RAM only.
+    LoopEvent lev[MAX_LOOP_EVENTS];
+    uint8_t   lcount = 0;
+    copyLoopEvents(lev, lcount);
+    JsonArray loops = out["loop_events"].to<JsonArray>();
+    for (uint8_t i = 0; i < lcount; i++) {
+        JsonObject e = loops.add<JsonObject>();
+        e["start"] = lev[i].uptime_s;
+        e["dur_ms"] = lev[i].duration_ms;
+    }
     String s;
     serializeJson(out, s);
     return s;
@@ -205,7 +247,15 @@ void clear() {
     _bleDownStart = _mqttDownStart = _wifiDownStart = 0;
     _loopMaxGateUntilMs = 0;
     g_loopMaxMs = 0;
-    Log.println("[Diag] Counters cleared (incl. loop_max_ms tripwire)");
+    // Wipe the smart-tripwire ring too — same scope as g_loopMaxMs:
+    // the "Clear counters" button is for "I want a clean slate of
+    // observability data."
+    _loopEventsHead = 0;
+    _loopEventsCount = 0;
+    for (uint8_t i = 0; i < MAX_LOOP_EVENTS; i++) {
+        _loopEvents[i] = {};
+    }
+    Log.println("[Diag] Counters cleared (incl. loop_max_ms + smart tripwire)");
 }
 
 }  // namespace wb_diag
