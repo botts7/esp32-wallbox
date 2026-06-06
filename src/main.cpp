@@ -13,6 +13,7 @@
 #include "wb_log.h"
 #include "wb_health.h"
 #include "wb_diag.h"
+#include "wb_net.h"
 #include "wb_version.h"
 #include "bapi.h"
 #include <ArduinoJson.h>
@@ -23,36 +24,10 @@
 static uint32_t lastGatewayPublish = 0;
 
 // ---- WiFi ----
-static bool connectWiFi() {
-    const WBConfig& cfg = configMgr.get();
-    if (cfg.wifiSSID.length() == 0) return false;
-
-    Log.printf("[WiFi] Connecting to %s", cfg.wifiSSID.c_str());
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(cfg.wifiSSID.c_str(), cfg.wifiPass.c_str());
-
-    int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries < 40) {
-        delay(500);
-        Log.print(".");
-        tries++;
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Log.printf("\n[WiFi] Connected: %s\n", WiFi.localIP().toString().c_str());
-        return true;
-    }
-
-    Log.println("\n[WiFi] Failed to connect");
-    return false;
-}
-
-static void checkWiFi() {
-    if (WiFi.status() != WL_CONNECTED) {
-        Log.println("[WiFi] Reconnecting...");
-        WiFi.reconnect();
-    }
-}
+// connectWiFi() and checkWiFi() moved to src/wb_net.cpp in 2.7.0.
+// The sync 30 s checkWiFi() poll is replaced by an event-driven
+// state machine in wb_net::tick() that only calls WiFi.reconnect()
+// when the driver's own auto-reconnect has clearly given up.
 
 // ---- Last-published-seq tracking ----
 // Phase 2 (rc16): all periodic BAPI polling now runs on the BLE task
@@ -267,8 +242,10 @@ void setup() {
     esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  // fair share between WiFi and BLE
     Log.println("[Radio] Coexistence: BALANCE, WiFi PS: OFF");
 
-    // Try connecting to WiFi
-    if (!connectWiFi()) {
+    // Try connecting to WiFi via the wb_net module. wb_net::begin()
+    // does the initial blocking connect (~20 s timeout, same as
+    // pre-2.7.0) AND registers the event-driven reconnect machinery.
+    if (!wb_net::begin()) {
         // WiFi failed — start AP mode so user can fix settings
         Log.println("[Main] WiFi failed — starting AP mode for reconfiguration");
         webServer.beginAP();
@@ -285,23 +262,13 @@ void setup() {
     // canonical anycast resolver — no further config needed for UTC.
     configTime(0, 0, "pool.ntp.org");
 
-    // mDNS — access at http://wallbox-gw.local
-    // Retry a few times as mDNS init sometimes fails on first attempt
-    bool mdnsOk = false;
-    for (int i = 0; i < 3 && !mdnsOk; i++) {
-        mdnsOk = MDNS.begin("wallbox-gw");
-        if (!mdnsOk) delay(500);
-    }
-    if (mdnsOk) {
-        MDNS.addService("http", "tcp", 80);
-        MDNS.addServiceTxt("http", "tcp", "device", "wallbox-gateway");
-        MDNS.addServiceTxt("http", "tcp", "version", WB_VERSION);
-        MDNS.addServiceTxt("http", "tcp", "path", "/");
-        MDNS.addService("telnet", "tcp", 23);
-        Log.printf("[mDNS] http://wallbox-gw.local (IP: %s)\n", WiFi.localIP().toString().c_str());
-    } else {
-        Log.println("[mDNS] Failed to start — use IP address directly");
-    }
+    // mDNS — wb_net handles it now: initial bind happens on the
+    // first GOT_IP via wb_net::tick() pending-flag drain, and the
+    // same path also rebinds after a reconnect so the responder +
+    // service records stay current with the (possibly new) IP.
+    // Drive one tick here so the initial bind fires before
+    // webServer.beginSTA / OTA — both expect mDNS to be up.
+    wb_net::tick();
 
     // WiFi connected — start services
     webServer.beginSTA();
@@ -426,18 +393,19 @@ void loop() {
     webServer.loop();
     Log.loop();
 
-    // If in AP-only mode (no WiFi configured), just serve the portal
-    if (!configMgr.hasWiFi() || WiFi.status() != WL_CONNECTED) {
+    // If in AP-only mode (no WiFi configured), just serve the portal.
+    // Use wb_net's cached state here — cheaper than WiFi.status() and
+    // tracks the GOT_IP/STA_DISCONNECTED events from the driver.
+    if (!configMgr.hasWiFi() || !wb_net::isConnected()) {
         delay(10);
         return;
     }
 
-    // Check WiFi
-    static uint32_t lastWifiCheck = 0;
-    if (millis() - lastWifiCheck > 30000) {
-        lastWifiCheck = millis();
-        checkWiFi();
-    }
+    // Drive the WiFi event-driven state machine: drains any pending
+    // GOT_IP / STA_DISCONNECTED events, runs mDNS refresh, and only
+    // fires WiFi.reconnect() if the driver's own auto-reconnect has
+    // clearly given up. Cheap (~10 us) when nothing is pending.
+    wb_net::tick();
 
     // Run MQTT loop
     wallboxMQTT.loop();

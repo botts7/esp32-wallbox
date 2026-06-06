@@ -12,7 +12,7 @@
 
 namespace wb_diag {
 
-enum class Kind : uint8_t { BLE = 0, MQTT = 1 };
+enum class Kind : uint8_t { BLE = 0, MQTT = 1, WIFI = 2 };
 
 static const uint8_t MAX_EVENTS = 20;
 
@@ -33,14 +33,17 @@ void reportReconnect(Kind kind);
 // Counters since boot (volatile — not in NVS).
 uint32_t bleReconnects();
 uint32_t mqttReconnects();
+uint32_t wifiReconnects();
 
 // Longest duration seen since boot for each kind.
 uint32_t bleLongestDurationS();
 uint32_t mqttLongestDurationS();
+uint32_t wifiLongestDurationS();
 
 // Last uptime_s at which each kind reconnected (0 if never).
 uint32_t bleLastReconnectUptimeS();
 uint32_t mqttLastReconnectUptimeS();
+uint32_t wifiLastReconnectUptimeS();
 
 // Return the persisted ring as a JSON array (newest first).
 String toJson();

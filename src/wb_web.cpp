@@ -1958,18 +1958,20 @@ function loadDiag(){
     h+=_sect('Reconnect counters');
     h+=row('BLE reconnects (this boot)',d.ble_reconnects+(d.ble_longest_s?' (longest '+fmtDur(d.ble_longest_s)+')':''));
     h+=row('MQTT reconnects (this boot)',d.mqtt_reconnects+(d.mqtt_longest_s?' (longest '+fmtDur(d.mqtt_longest_s)+')':''));
+    if(typeof d.wifi_reconnects==='number')h+=row('WiFi reconnects (this boot)',d.wifi_reconnects+(d.wifi_longest_s?' (longest '+fmtDur(d.wifi_longest_s)+')':''));
     if(d.ble_last_at_s)h+=row('Last BLE reconnect',fmtUptime(d.ble_last_at_s)+' after boot');
     if(d.mqtt_last_at_s)h+=row('Last MQTT reconnect',fmtUptime(d.mqtt_last_at_s)+' after boot');
+    if(d.wifi_last_at_s)h+=row('Last WiFi reconnect',fmtUptime(d.wifi_last_at_s)+' after boot');
     if(d.events&&d.events.length){
       var thisBoot=d.events.filter(function(e){return e.start<=curUp});
       var prior=d.events.filter(function(e){return e.start>curUp});
       if(thisBoot.length){
         h+='<div style="margin-top:8px;font-size:.82em;color:var(--text2)">Events this boot:</div>';
-        thisBoot.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+', down '+fmtDur(e.dur)+'</div>'});
+        thisBoot.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':(e.kind==='wifi'?'#34d399':'#22d3ee');h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+', down '+fmtDur(e.dur)+'</div>'});
       }
       if(prior.length){
         h+='<div style="margin-top:8px;font-size:.82em;color:var(--text3)">From prior boots (NVS-persisted):</div>';
-        prior.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':'#22d3ee';h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0;opacity:.55"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+' of that boot, down '+fmtDur(e.dur)+'</div>'});
+        prior.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':(e.kind==='wifi'?'#34d399':'#22d3ee');h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0;opacity:.55"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+' of that boot, down '+fmtDur(e.dur)+'</div>'});
       }
     }
     rows.innerHTML=h||'<div style="color:var(--text3)">No diagnostics logged yet.</div>';

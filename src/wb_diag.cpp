@@ -19,10 +19,13 @@ static const char* NVS_KEY = "events";
 // In-memory state — counters reset on boot; ring buffer mirrored to NVS.
 static uint32_t _bleReconnects = 0;
 static uint32_t _mqttReconnects = 0;
+static uint32_t _wifiReconnects = 0;
 static uint32_t _bleLongest = 0;
 static uint32_t _mqttLongest = 0;
+static uint32_t _wifiLongest = 0;
 static uint32_t _bleLastReconnect = 0;
 static uint32_t _mqttLastReconnect = 0;
+static uint32_t _wifiLastReconnect = 0;
 
 // loop_max_ms tripwire grace deadline (absolute millis()). 0 = no
 // gate active. extendLoopMaxGate() pushes this forward; the main
@@ -33,6 +36,7 @@ static uint32_t _loopMaxGateUntilMs = 0;
 // Pending disconnect start times (one outstanding per kind)
 static uint32_t _bleDownStart = 0;   // 0 means no outstanding BLE disconnect
 static uint32_t _mqttDownStart = 0;  // 0 means no outstanding MQTT disconnect
+static uint32_t _wifiDownStart = 0;  // 0 means no outstanding WiFi disconnect
 
 // ---- NVS-backed ring (last MAX_EVENTS, newest at tail) ----
 
@@ -59,6 +63,15 @@ static void store(const JsonDocument& doc) {
     p.end();
 }
 
+static const char* _kindStr(Kind kind) {
+    switch (kind) {
+        case Kind::BLE:  return "ble";
+        case Kind::MQTT: return "mqtt";
+        case Kind::WIFI: return "wifi";
+    }
+    return "?";
+}
+
 static void appendEvent(uint32_t startS, uint32_t durationS, Kind kind) {
     JsonDocument doc;
     load(doc);
@@ -66,7 +79,7 @@ static void appendEvent(uint32_t startS, uint32_t durationS, Kind kind) {
     JsonObject e = arr.add<JsonObject>();
     e["start"] = startS;
     e["dur"]   = durationS;
-    e["kind"]  = (kind == Kind::BLE) ? "ble" : "mqtt";
+    e["kind"]  = _kindStr(kind);
     while ((int)arr.size() > MAX_EVENTS) arr.remove(0);
     store(doc);
 }
@@ -75,42 +88,57 @@ static void appendEvent(uint32_t startS, uint32_t durationS, Kind kind) {
 
 void reportDisconnect(Kind kind) {
     uint32_t now = millis() / 1000;
-    if (kind == Kind::BLE) {
-        if (_bleDownStart != 0) return;  // already tracking — don't double-count
-        _bleDownStart = now;
-        Log.printf("[Diag] BLE disconnect started at uptime %us\n", now);
-    } else {
-        if (_mqttDownStart != 0) return;
-        _mqttDownStart = now;
-        Log.printf("[Diag] MQTT disconnect started at uptime %us\n", now);
-    }
+    uint32_t* slot =
+        (kind == Kind::BLE)  ? &_bleDownStart  :
+        (kind == Kind::MQTT) ? &_mqttDownStart :
+                               &_wifiDownStart;
+    if (*slot != 0) return;  // already tracking — don't double-count
+    *slot = now;
+    Log.printf("[Diag] %s disconnect started at uptime %us\n",
+               _kindStr(kind), now);
 }
 
 void reportReconnect(Kind kind) {
     uint32_t now = millis() / 1000;
-    if (kind == Kind::BLE) {
-        if (_bleDownStart == 0) return;  // we never saw the corresponding disconnect
-        uint32_t dur = now - _bleDownStart;
-        appendEvent(_bleDownStart, dur, Kind::BLE);
-        _bleReconnects++;
-        if (dur > _bleLongest) _bleLongest = dur;
-        _bleLastReconnect = now;
-        Log.printf("[Diag] BLE reconnected after %us (total %u this boot)\n", dur, (unsigned)_bleReconnects);
-        _bleDownStart = 0;
-    } else {
-        if (_mqttDownStart == 0) return;
-        uint32_t dur = now - _mqttDownStart;
-        appendEvent(_mqttDownStart, dur, Kind::MQTT);
-        _mqttReconnects++;
-        if (dur > _mqttLongest) _mqttLongest = dur;
-        _mqttLastReconnect = now;
-        Log.printf("[Diag] MQTT reconnected after %us (total %u this boot)\n", dur, (unsigned)_mqttReconnects);
-        _mqttDownStart = 0;
+    uint32_t* downSlot;
+    uint32_t* counter;
+    uint32_t* longest;
+    uint32_t* lastAt;
+    switch (kind) {
+        case Kind::BLE:
+            downSlot = &_bleDownStart;
+            counter  = &_bleReconnects;
+            longest  = &_bleLongest;
+            lastAt   = &_bleLastReconnect;
+            break;
+        case Kind::MQTT:
+            downSlot = &_mqttDownStart;
+            counter  = &_mqttReconnects;
+            longest  = &_mqttLongest;
+            lastAt   = &_mqttLastReconnect;
+            break;
+        case Kind::WIFI:
+        default:
+            downSlot = &_wifiDownStart;
+            counter  = &_wifiReconnects;
+            longest  = &_wifiLongest;
+            lastAt   = &_wifiLastReconnect;
+            break;
     }
+    if (*downSlot == 0) return;  // never saw the corresponding disconnect
+    uint32_t dur = now - *downSlot;
+    appendEvent(*downSlot, dur, kind);
+    (*counter)++;
+    if (dur > *longest) *longest = dur;
+    *lastAt = now;
+    Log.printf("[Diag] %s reconnected after %us (total %u this boot)\n",
+               _kindStr(kind), dur, (unsigned)*counter);
+    *downSlot = 0;
     // Whichever side reconnected, give the loop_max_ms tripwire a
-    // grace window — sync PubSubClient::connect() and the BLE
-    // post-reconnect init burst (5 BAPI reads) are legitimate
-    // blocking events the tripwire was never meant to flag.
+    // grace window — sync PubSubClient::connect(), the BLE post-
+    // reconnect init burst (5 BAPI reads), and an explicit
+    // WiFi.reconnect() are all legitimate blocking events the
+    // tripwire was never meant to flag.
     extendLoopMaxGate();
 }
 
@@ -135,10 +163,13 @@ bool loopMaxGateActive(uint32_t nowMs) {
 
 uint32_t bleReconnects()             { return _bleReconnects; }
 uint32_t mqttReconnects()            { return _mqttReconnects; }
+uint32_t wifiReconnects()            { return _wifiReconnects; }
 uint32_t bleLongestDurationS()       { return _bleLongest; }
 uint32_t mqttLongestDurationS()      { return _mqttLongest; }
+uint32_t wifiLongestDurationS()      { return _wifiLongest; }
 uint32_t bleLastReconnectUptimeS()   { return _bleLastReconnect; }
 uint32_t mqttLastReconnectUptimeS()  { return _mqttLastReconnect; }
+uint32_t wifiLastReconnectUptimeS()  { return _wifiLastReconnect; }
 
 String toJson() {
     JsonDocument doc;
@@ -148,10 +179,13 @@ String toJson() {
     JsonDocument out;
     out["ble_reconnects"]   = _bleReconnects;
     out["mqtt_reconnects"]  = _mqttReconnects;
+    out["wifi_reconnects"]  = _wifiReconnects;
     out["ble_longest_s"]    = _bleLongest;
     out["mqtt_longest_s"]   = _mqttLongest;
+    out["wifi_longest_s"]   = _wifiLongest;
     out["ble_last_at_s"]    = _bleLastReconnect;
     out["mqtt_last_at_s"]   = _mqttLastReconnect;
+    out["wifi_last_at_s"]   = _wifiLastReconnect;
     out["uptime_s"]         = millis() / 1000;  // for "this boot vs prior" split on /info
     JsonArray events = out["events"].to<JsonArray>();
     for (int i = (int)arr.size() - 1; i >= 0; i--) {
@@ -165,10 +199,10 @@ String toJson() {
 void clear() {
     Preferences p;
     if (p.begin(NVS_NS, false)) { p.remove(NVS_KEY); p.end(); }
-    _bleReconnects = _mqttReconnects = 0;
-    _bleLongest = _mqttLongest = 0;
-    _bleLastReconnect = _mqttLastReconnect = 0;
-    _bleDownStart = _mqttDownStart = 0;
+    _bleReconnects = _mqttReconnects = _wifiReconnects = 0;
+    _bleLongest = _mqttLongest = _wifiLongest = 0;
+    _bleLastReconnect = _mqttLastReconnect = _wifiLastReconnect = 0;
+    _bleDownStart = _mqttDownStart = _wifiDownStart = 0;
     _loopMaxGateUntilMs = 0;
     g_loopMaxMs = 0;
     Log.println("[Diag] Counters cleared (incl. loop_max_ms tripwire)");
