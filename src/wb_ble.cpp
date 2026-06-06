@@ -55,6 +55,10 @@ void WallboxBLE::begin(const char* addr) {
     // own keepalive, and the main task's poll cycles).
     if (!_cmdMutex) _cmdMutex = xSemaphoreCreateMutex();
     if (!_cacheMutex) _cacheMutex = xSemaphoreCreateMutex();
+    // 2.7.0 step 1: BLE request queue infrastructure. Allocated here
+    // alongside the existing mutexes; no callers yet — this is the
+    // null-op scaffolding step. See docs/plans/2.7.0-api-command-async.md.
+    if (!_reqQueue) _reqQueue = xQueueCreate(kBleReqQueueDepth, sizeof(BleReq));
     if (!_taskHandle) {
         xTaskCreatePinnedToCore(
             _taskFn, "wb_ble",

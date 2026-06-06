@@ -5,6 +5,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <freertos/queue.h>
 #include "bapi.h"
 
 // Wallbox BLE connection manager.
@@ -274,6 +275,30 @@ private:
     void _pollSettings();
     void _pollNotifications();
     void _storeCache(String& dst, uint32_t& seq, const String& value);
+
+    // ---- Phase 3 BLE request queue (2.7.0 in progress) ----
+    // Single-slot _pendingCmd is being replaced by a real FreeRTOS queue
+    // so /api/command and MQTT _handleCommand can enqueue commands
+    // without blocking on _cmdMutex. See docs/plans/2.7.0-api-command-async.md.
+    // Step 1: infrastructure only — fields allocated, no callers yet.
+    enum class ReplyMode : uint8_t {
+        FIRE_AND_FORGET = 0,   // discard response
+        WAKE_WAITER     = 1,   // xTaskNotify the originating task
+        MQTT_PUBLISH    = 2,   // queue response for main task to publish
+    };
+    struct BleReq {
+        uint32_t  reqId;
+        char      met[16];
+        char      par[192];     // BAPI payloads are small; truncate-and-warn
+        ReplyMode replyMode;
+        TaskHandle_t waiter;    // xTaskNotify target, NULL if fire-and-forget
+        uint32_t  enqueuedAt;   // millis() for timeout / drop-old logic
+    };
+    // FreeRTOS queue handle, depth kBleReqQueueDepth.
+    QueueHandle_t _reqQueue = nullptr;
+    static const uint8_t kBleReqQueueDepth = 6;
+    // Monotonic request ID counter, bumped under _cmdMutex.
+    uint32_t _nextReqId = 1;
 
     // RSSI smoothing — NimBLE's getRssi() returns per-packet instantaneous
     // values that swing wildly (issue #6). Sample on a fixed cadence and
