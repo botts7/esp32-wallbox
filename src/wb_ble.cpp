@@ -59,6 +59,7 @@ void WallboxBLE::begin(const char* addr) {
     // alongside the existing mutexes; no callers yet — this is the
     // null-op scaffolding step. See docs/plans/2.7.0-api-command-async.md.
     if (!_reqQueue) _reqQueue = xQueueCreate(kBleReqQueueDepth, sizeof(BleReq));
+    if (!_responseMapMutex) _responseMapMutex = xSemaphoreCreateMutex();
     if (!_taskHandle) {
         xTaskCreatePinnedToCore(
             _taskFn, "wb_ble",
@@ -168,24 +169,22 @@ void WallboxBLE::loop() {
             }
         }
 
-        // ---- Phase 3 (2.7.0 step 2): drain async request queue ----
+        // ---- Phase 3 (2.7.0 steps 2+3): drain async request queue ----
         // Each enqueued BleReq is dispatched through sendCommand here
         // (safe — the BLE task already calls sendCommand for its own
-        // keepalive at line ~150, so calling it from the drain loop
-        // doesn't deadlock _cmdMutex against ourselves). We drain at
+        // keepalive, so re-entering doesn't deadlock _cmdMutex). At
         // most ONE request per loop iteration so periodic polling
-        // doesn't get starved. Response handling lands in step 3 —
-        // for now the reply is discarded. See docs/plans/
-        // 2.7.0-api-command-async.md.
+        // doesn't get starved. Step 3: response stored in RAM map
+        // keyed by req.reqId for tryFetchResponse() to pick up.
+        // xTaskNotify wake-waiter path lands in step 4; MQTT-publish
+        // back-channel in step 5.
         if (_reqQueue) {
             BleReq req;
             if (xQueueReceive(_reqQueue, &req, 0) == pdTRUE) {
                 String resp = sendCommand(req.met, req.par);
-                // TODO step 3: store resp in RAM map keyed by req.reqId,
-                // xTaskNotify(req.waiter, req.reqId) when replyMode ==
-                // WAKE_WAITER, queue for MQTT publish when ==
-                // MQTT_PUBLISH. For now we just drop it.
-                (void)resp;
+                _storeResponse(req.reqId, resp);
+                // (void)req.replyMode — wake & publish paths land in
+                // steps 4 and 5. FIRE_AND_FORGET is correct today.
             }
         }
 
@@ -861,11 +860,58 @@ void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_
     }
 }
 
+// 2.7.0 step 3 — store a completed response in the RAM map. Called
+// from the BLE task's drain loop after sendCommand returns. Mutex-
+// protected; safe to read from any task via tryFetchResponse.
+void WallboxBLE::_storeResponse(uint32_t reqId, const String& json) {
+    if (reqId == 0 || json.length() == 0) return;
+    if (!_responseMapMutex) return;
+    if (xSemaphoreTake(_responseMapMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        Log.printf("[BLE] _storeResponse %u — mutex timeout\n", (unsigned)reqId);
+        return;
+    }
+    ResponseSlot& slot = _responseMap[_responseMapHead];
+    if (slot.reqId != 0) {
+        // Evicting an unread response. Log once so a chronic poll-
+        // never-called bug shows up in /api/logs.
+        Log.printf("[BLE] response map evicting reqId=%u (unread)\n",
+                   (unsigned)slot.reqId);
+    }
+    slot.reqId       = reqId;
+    slot.completedAt = millis();
+    slot.json        = json;
+    _responseMapHead = (_responseMapHead + 1) % kResponseMapSize;
+    xSemaphoreGive(_responseMapMutex);
+}
+
+// 2.7.0 step 3 — fetch a completed response by request id. Returns
+// true and fills `out` if found; false if not yet completed or
+// already evicted.
+bool WallboxBLE::tryFetchResponse(uint32_t reqId, String& out) {
+    if (reqId == 0 || !_responseMapMutex) return false;
+    if (xSemaphoreTake(_responseMapMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return false;
+    }
+    bool found = false;
+    for (uint8_t i = 0; i < kResponseMapSize; i++) {
+        if (_responseMap[i].reqId == reqId) {
+            out = _responseMap[i].json;
+            // Consume — slot becomes available for next eviction.
+            _responseMap[i].reqId = 0;
+            _responseMap[i].json = String();  // free heap
+            found = true;
+            break;
+        }
+    }
+    xSemaphoreGive(_responseMapMutex);
+    return found;
+}
+
 // 2.7.0 step 2 — non-blocking enqueue of a BAPI request onto the BLE
 // task's internal queue. Returns the assigned request id; 0 on failure
 // (queue full or not initialised). The BLE task drains and dispatches
-// via sendCommand internally; for now the reply is discarded — step 3
-// will add the RAM map and waiter notification.
+// via sendCommand internally; response goes to the RAM map (step 3)
+// keyed by request id; waiter wake-up lands in step 4.
 uint32_t WallboxBLE::enqueueRequest(const char* met, const char* par,
                                     ReplyMode replyMode, TaskHandle_t waiter) {
     if (!_reqQueue || !met) return 0;

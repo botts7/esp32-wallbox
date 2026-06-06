@@ -41,13 +41,23 @@ public:
     };
     // Enqueues a BAPI request on the BLE task's internal queue and
     // returns immediately with the assigned request id (0 = queue
-    // full or not yet initialised). The BLE task drains at ~50 Hz and
-    // runs each request through sendCommand internally. Response
-    // handling (RAM map + xTaskNotify) lands in step 3.
+    // full or not yet initialised). The BLE task drains at ~50 Hz
+    // and runs each request through sendCommand internally; the
+    // response is stored in the RAM map (see tryFetchResponse).
     uint32_t enqueueRequest(const char* met,
                             const char* par = "null",
                             ReplyMode replyMode = ReplyMode::FIRE_AND_FORGET,
                             TaskHandle_t waiter = nullptr);
+
+    // 2.7.0 step 3 — fetch a previously-enqueued request's response
+    // by its assigned id. Returns true and fills `out` if the
+    // response is available; false if the request hasn't completed
+    // yet, or its entry has been FIFO-evicted from the small map
+    // (cap kResponseMapSize). Callers race the map: poll, sleep,
+    // poll again — or use xTaskNotifyWait (step 4) for the active
+    // wake path.
+    bool tryFetchResponse(uint32_t reqId, String& out);
+    static const uint8_t kResponseMapSize = 4;
 
     // State
     State state() const { return _state; }
@@ -312,6 +322,24 @@ private:
     static const uint8_t kBleReqQueueDepth = 6;
     // Monotonic request ID counter, bumped under _cmdMutex.
     uint32_t _nextReqId = 1;
+
+    // Step 3: response RAM map. Capped FIFO ring of {reqId, json}
+    // pairs populated by the drain loop after sendCommand returns
+    // and drained by tryFetchResponse(). Cap is intentionally small
+    // — if a caller hasn't polled within ~4 subsequent requests
+    // they probably aren't coming back, and the response would have
+    // been delivered via MQTT/WS by step 5 anyway. Mutex-protected.
+    struct ResponseSlot {
+        uint32_t reqId;          // 0 = empty slot
+        uint32_t completedAt;    // millis() when stored, for diag
+        String   json;
+    };
+    ResponseSlot _responseMap[kResponseMapSize] = {};
+    uint8_t      _responseMapHead = 0;  // next eviction index (FIFO)
+    SemaphoreHandle_t _responseMapMutex = nullptr;
+    // Internal: store a response in the map under _responseMapMutex.
+    // No-op if reqId == 0 (fire-and-forget) or json is empty.
+    void _storeResponse(uint32_t reqId, const String& json);
 
     // RSSI smoothing — NimBLE's getRssi() returns per-packet instantaneous
     // values that swing wildly (issue #6). Sample on a fixed cadence and
