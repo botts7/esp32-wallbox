@@ -42,15 +42,19 @@ static const char* AP_PASS = "wallbox123";
 // Once `csrfToken` is set during a boot, it MUST NOT be reassigned —
 // every rendered page caches it in window.WB_CSRF, and swapping it
 // mid-session would break every open tab.
-static String csrfToken;
+// 3.0 task #78: dropped `static` so wb_web_async.cpp can extern these
+// and validate CSRF tokens on the async port using the SAME secret.
+// Without sharing, async would need its own NVS namespace + token
+// rotation logic — wasted complexity for the migration window.
+String csrfToken;
 // Guard against simultaneous first-boot requests racing the NVS
 // generate/write step: without this two concurrent ensureCsrfToken()
 // calls could both see an empty NVS, both generate different tokens,
 // and end up with the second writer's value in RAM while the first
 // writer's value was the one persisted. Set to true once the token
 // is committed (either loaded or freshly written).
-static bool csrfTokenReady = false;
-static void ensureCsrfToken() {
+bool csrfTokenReady = false;
+void ensureCsrfToken() {
     if (csrfTokenReady) return;
     Preferences p;
     if (!p.begin("wbcsrf", false)) return;  // NVS unavailable — try again next call

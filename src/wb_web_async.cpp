@@ -6,6 +6,7 @@
 #include "wb_diag.h"
 #include "wb_ota_history.h"
 #include "wb_ble.h"
+#include "wb_web.h"  // for webServer.requestReboot()
 
 #if WB_ASYNC_WEB
 
@@ -37,6 +38,11 @@ String wb_buildBootHistoryJson();
 // this re-homes into local state in this TU.
 extern uint32_t authFailCount;
 extern uint32_t authLockoutUntil;
+
+// CSRF state — also shared with sync server for the same reason.
+extern String csrfToken;
+extern bool   csrfTokenReady;
+void ensureCsrfToken();
 
 namespace wb_web_async {
 
@@ -75,6 +81,26 @@ static bool _checkAuth(AsyncWebServerRequest* req) {
         return false;
     }
     authFailCount = 0;
+    return true;
+}
+
+// --- CSRF helper for state-mutating endpoints ---
+//
+// Mirrors wb_web.cpp::checkCsrf() — reads the `csrf` query/form
+// parameter and compares against the persisted token. Returns true
+// if the token matches; sends 403 and returns false otherwise.
+//
+// Same shared-token rationale as auth state — running two CSRF
+// secrets across the migration window is wasted complexity.
+static bool _checkCsrf(AsyncWebServerRequest* req) {
+    ensureCsrfToken();
+    String token;
+    if (req->hasParam("csrf"))         token = req->getParam("csrf")->value();
+    else if (req->hasParam("csrf", true)) token = req->getParam("csrf", true)->value();  // POST form
+    if (token.length() == 0 || token != csrfToken) {
+        req->send(403, "text/plain", "CSRF token mismatch");
+        return false;
+    }
     return true;
 }
 
@@ -224,8 +250,136 @@ static void _registerReadOnlyRoutes() {
     });
 }
 
+// =====================================================================
+// Static-content routes (sw.js, manifest.json, favicon) and small
+// state-mutating endpoints (reboot, pin, fw/dismiss, diag/clear,
+// ble/pause). These call into modules that are already cross-task
+// safe — wallboxBLE has its own mutex, configMgr's Preferences/NVS
+// API is thread-safe per ESP-IDF docs, webServer.requestReboot() is
+// a single bool write.
+// =====================================================================
+
+static void _registerStaticAndPostRoutes() {
+
+    // GET /sw.js — service worker. Static body.
+    _async.on("/sw.js", HTTP_GET, [](AsyncWebServerRequest* req) {
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "application/javascript",
+            "self.addEventListener('install',function(e){e.waitUntil(caches.keys().then(function(keys){return Promise.all(keys.map(function(k){return caches.delete(k)}))}).then(function(){return self.skipWaiting()}))});"
+            "self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim())});"
+            "self.addEventListener('fetch',function(e){e.respondWith(fetch(e.request,{cache:'no-cache'}))});");
+        res->addHeader("Cache-Control", "no-cache");
+        req->send(res);
+    });
+
+    // GET /manifest.json — PWA manifest. Static body matching sync.
+    _async.on("/manifest.json", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "application/manifest+json",
+            "{\"name\":\"Wallbox Gateway\",\"short_name\":\"Wallbox\","
+            "\"display\":\"standalone\",\"orientation\":\"portrait\","
+            "\"background_color\":\"#0f1117\",\"theme_color\":\"#0f1117\","
+            "\"start_url\":\"/\",\"scope\":\"/\","
+            "\"icons\":[{"
+            "\"src\":\"data:image/svg+xml;utf8,"
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'>"
+            "<rect width='192' height='192' rx='40' fill='%230f1117'/>"
+            "<path d='M104 36 L60 104 L92 104 L88 156 L132 88 L100 88 L104 36 Z' fill='%233b82f6'/>"
+            "</svg>\","
+            "\"sizes\":\"192x192\",\"type\":\"image/svg+xml\",\"purpose\":\"any\"}]}");
+        res->addHeader("Cache-Control", "public, max-age=86400");
+        req->send(res);
+    });
+
+    // GET /favicon.ico — return 204. Same as sync.
+    _async.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(204);
+    });
+
+    // GET /api/ble/pause?ms=N — pause BLE for N milliseconds.
+    // 5 min default, 30s minimum, 30 min maximum. wallboxBLE.pause()
+    // is mutex-protected internally.
+    _async.on("/api/ble/pause", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        uint32_t ms = 5 * 60 * 1000;
+        if (req->hasParam("ms")) {
+            ms = (uint32_t)req->getParam("ms")->value().toInt();
+        }
+        if (ms < 30000)            ms = 30000;
+        if (ms > 30 * 60 * 1000)   ms = 30 * 60 * 1000;
+        wallboxBLE.pause(ms);
+        String body = String("{\"paused_for_s\":") + String(ms / 1000) + "}";
+        req->send(200, "application/json", body);
+    });
+
+    // POST /api/fw/dismiss — clear the "firmware changed" banner.
+    // Auth only; no CSRF (matches sync, which intentionally allows
+    // a click-dismiss flow without form tokens).
+    _async.on("/api/fw/dismiss", HTTP_POST,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        wallboxBLE.dismissFirmwareChange();
+        req->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // POST /api/diag/clear — wipe reconnect counters, smart-tripwire
+    // ring, NVS-persisted event history. Auth + CSRF.
+    _async.on("/api/diag/clear", HTTP_POST,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        if (!_checkCsrf(req)) return;
+        wb_diag::clear();
+        req->send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // POST /api/reboot — schedule a reboot via the main task. We don't
+    // call ESP.restart() directly because the HTTP response needs to
+    // flush first; webServer.requestReboot() flips a flag that the
+    // sync server's loop() picks up after the current request.
+    _async.on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        if (!_checkCsrf(req)) return;
+        req->send(200, "application/json",
+            "{\"ok\":true,\"rebooting\":true}");
+        webServer.requestReboot();
+    });
+
+    // POST /api/pin — update the stored BLE passcode (NVS) and reboot
+    // so the new value takes effect on the next pair attempt. Sync
+    // handler validates "digits only, ≤ 16 chars" — mirror here.
+    _async.on("/api/pin", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        if (!_checkCsrf(req)) return;
+        String pin;
+        if (req->hasParam("pin"))            pin = req->getParam("pin")->value();
+        else if (req->hasParam("pin", true)) pin = req->getParam("pin", true)->value();
+        pin.trim();
+        if (pin.length() > 16) {
+            req->send(400, "application/json",
+                "{\"error\":\"passcode too long\"}");
+            return;
+        }
+        for (size_t i = 0; i < pin.length(); i++) {
+            char c = pin[i];
+            if (c < '0' || c > '9') {
+                req->send(400, "application/json",
+                    "{\"error\":\"passcode must be digits only\"}");
+                return;
+            }
+        }
+        configMgr.mut().blePin = pin;
+        configMgr.save();
+        req->send(200, "application/json",
+            "{\"ok\":true,\"rebooting\":true}");
+        webServer.requestReboot();
+    });
+}
+
 void begin() {
     _registerReadOnlyRoutes();
+    _registerStaticAndPostRoutes();
     _async.begin();
     Log.println("[Web-async] Listening on :8081 (migration coexistence)");
 }
