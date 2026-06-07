@@ -1441,18 +1441,31 @@ function watchStatusForNotif(s){
   _lastSt=st;
 }
 function saveAutoLock(){
-  /* Older firmware (Pulsar MAX): the charger expects a single number par
-     — minutes-until-lock, 0 = off. Newer firmware: full object with
-     enabled+time. The form remembers which shape it loaded with so we
-     send the right one back. */
-  var simple=document.getElementById('al-simple').value==='1';
+  /* On charger fw 6.11.x, s_alo expects a bare integer (minutes until
+     lock, 0 = disabled). The {enabled, time} object shape that some
+     older firmware accepted is silently rejected with "Unexpected Error"
+     on the current firmware, so we always send the integer form. */
   var en=parseInt(document.getElementById('al-en').value);
   var t=parseInt(document.getElementById('al-time').value);
-  var p=simple?String(en?t:0):JSON.stringify({enabled:en,time:t});
+  var p=String(en?t:0);
   toast('Saving auto lock...','info');
   fetch('/api/command?action=bapi&met=s_alo&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Auto lock saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})
 }
-function saveEco(){var mode=parseInt(document.getElementById('eco-mode').value);var espEl=document.getElementById('eco-esp');var esp=espEl?parseInt(espEl.value)||0:50;var p=JSON.stringify({mode:mode,esp:esp});toast('Saving eco smart...','info');fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
+function saveEco(){
+  /* s_ecos needs all three fields: ese (master enable), esm (mode), esp
+     (percentage). The form only carries mode + percentage; ese is
+     derived (1 when any mode is active, 0 when disabled). The old code
+     was sending {mode, esp} which is silently rejected on fw 6.11.x:
+       - field name was wrong ("mode" instead of "esm")
+       - missing ese field
+     Both fixed here so the save actually persists. */
+  var mode=parseInt(document.getElementById('eco-mode').value);
+  var espEl=document.getElementById('eco-esp');
+  var esp=espEl?parseInt(espEl.value)||0:50;
+  var p=JSON.stringify({ese:(mode>0?1:0),esm:mode,esp:esp});
+  toast('Saving eco smart...','info');
+  fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})
+}
 function saveOcpp(){var p=JSON.stringify({u:document.getElementById('ocpp-url').value,chid:document.getElementById('ocpp-id').value,pw:document.getElementById('ocpp-pw').value,e:parseInt(document.getElementById('ocpp-en').value)});toast('Saving OCPP...','info');fetch('/api/command?action=bapi&met=s_ocpp&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'OCPP config saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function savePhaseSw(){var en=parseInt(document.getElementById('phsw-en').value);var p=JSON.stringify({enabled:en});toast('Saving phase switch...','info');fetch('/api/command?action=bapi&met=s_phsw&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Phase switch saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function saveHalo(){var b=parseInt(document.getElementById('halo-b').value);var m=parseInt(document.getElementById('halo-m').value);var t=parseInt(document.getElementById('halo-t').value)||0;var p=JSON.stringify({bright:b,mode:m,time_s:t});toast('Saving halo...','info');fetch('/api/command?action=bapi&met=s_halocfg&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Halo saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
