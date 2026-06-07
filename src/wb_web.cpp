@@ -89,8 +89,15 @@ static bool checkCsrf() {
 }
 
 // ========== Web Authentication ==========
-static uint32_t authFailCount = 0;
-static uint32_t authLockoutUntil = 0;
+//
+// 3.0 task #78: dropped `static` so wb_web_async.cpp can `extern`
+// these and share the same lockout window across both servers.
+// A brute-forcer alternating port 80 and port 8081 would otherwise
+// get double the attempts per lockout cycle. When the sync server
+// retires post-migration, these can be re-scoped to the surviving
+// TU.
+uint32_t authFailCount    = 0;
+uint32_t authLockoutUntil = 0;
 
 static bool checkAuth() {
     const WBConfig& cfg = configMgr.get();

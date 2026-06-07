@@ -14,6 +14,7 @@
 #include "wb_health.h"
 #include "wb_diag.h"
 #include "wb_net.h"
+#include "wb_web_async.h"
 #include "wb_version.h"
 #include "bapi.h"
 #include <ArduinoJson.h>
@@ -274,6 +275,12 @@ void setup() {
     webServer.beginSTA();
     wallboxMQTT.begin();
     wbws::begin();
+    // 3.0 task #78 — async webserver coexistence layer. Compiles
+    // to a no-op when WB_ASYNC_WEB is 0 (default). When 1, starts
+    // an AsyncWebServer on port 8081 alongside the sync server on
+    // port 80 so individual routes can be migrated and verified
+    // one batch at a time without disrupting the live UI.
+    wb_web_async::begin();
     Log.begin();
 
     // OTA updates — hostname identifies this device on the network
