@@ -1709,6 +1709,22 @@ function cancelEdit(){
   document.getElementById('sched-edit').style.display='none';
   editingSid=null;
 }
+// Convert bitmask integer (bit 0=Mon..bit 6=Sun) to bit-array
+// [Mon,Tue,Wed,Thu,Fri,Sat,Sun]. The BAPI READ returns days as a
+// bitmask integer for backwards compat, but the s_sch WRITE expects
+// an array. Decoded from the official-app btsnoop on charger fw 6.11.x.
+function daysToArray(d){var a=[];for(var i=0;i<7;i++)a.push((d>>i)&1);return a}
+function timeToInt(s){return parseInt(String(s).replace(':',''),10)||0}
+// Build one schedule entry in the EXACT shape s_sch expects (decoded
+// from official-app BLE capture): sid/mcr/enabled all integers,
+// start/stop INTEGERS (NOT strings — that was the silent-fail
+// root cause), days BIT-ARRAY, no name/uid/created_at.
+function buildSchEntry(sid,start,stop,days,enabled,mcr,type,target,repeat){
+  return {sid:sid|0,start:timeToInt(start),stop:timeToInt(stop),
+          days:Array.isArray(days)?days:daysToArray(days|0),
+          mcr:mcr|0,type:type|0,enabled:enabled|0,
+          target:target||{type:0,value:0},repeat:(repeat===undefined?1:repeat|0)}
+}
 function saveSch(){
   var st=localToUtc(document.getElementById('ss').value);
   var sp=localToUtc(document.getElementById('se').value);
@@ -1718,48 +1734,24 @@ function saveSch(){
   var ekwh=parseInt(document.getElementById('se2').value)||0;
   var tgt=ekwh>0?{type:1,value:ekwh*1000}:{type:0,value:0};
   var en=parseInt(document.getElementById('sn').value);
-  // BAPI w_sch is INSERT-only on the charger side. Updating an
-  // existing sid returns {"error":{code:1,message:"Unexpected
-  // Error"}} silently or (with ulid present) hangs for >8s and
-  // never persists. Mirror doDeleteSchedule's approach: for edits,
-  // clr_sch all schedules and then re-write the full list with
-  // the modified one in place. New schedules still hit w_sch
-  // directly with a fresh sid.
+  // s_sch (advanced schedule write) replaces the existing schedule
+  // at the given sid OR inserts new. NO clr_sch round-trip needed
+  // — the charger fw handles both insert + update via the same
+  // method, distinguished by whether sid already exists.
+  var sid;
   if(editingSid!==null){
-    var idx=allSchedules.findIndex(function(s){return s.sid===editingSid});
-    if(idx<0){toast('Schedule not found','error');return}
-    var updated=allSchedules.slice();
-    updated[idx]=Object.assign({},updated[idx],{start:st,stop:sp,days:d,enabled:en,mcr:mcr,target:tgt});
-    toast('Saving...','info');
-    fetch('/api/command?action=bapi&met=clr_sch&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(c){
-      // ABORT if clr_sch reported an error. If clr_sch SUCCEEDED
-      // (charger actually cleared) but the subsequent w_sch writes
-      // fail, the user loses every schedule with no recovery. The
-      // charger's BAPI sometimes returns both {error:...} and
-      // {r:N} together; treat any error field as a hard stop.
-      if(c&&c.error){toast(c.error,'error');loadSchedules();return}
-      var i=0;
-      function next(){
-        if(i>=updated.length){toast('Schedule #'+editingSid+' updated','success');cancelEdit();loadSchedules();return}
-        var s=updated[i++];
-        var p=JSON.stringify({sid:i-1,start:s.start,stop:s.stop,days:s.days,enabled:s.enabled,mcr:s.mcr,repeat:s.repeat||1,type:s.type||0,name:s.name||'',target:s.target||{type:0,value:0}});
-        fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
-          if(r.error){toast(r.error,'error');loadSchedules();return}
-          next();
-        }).catch(function(e){toast('Error: '+(e.message||e),'error');loadSchedules()});
-      }
-      next();
-    }).catch(function(e){toast('Error: '+(e.message||e),'error');loadSchedules()});
-    return;
+    sid=editingSid;
+  } else {
+    var maxSid=allSchedules.length?Math.max.apply(null,allSchedules.map(function(s){return s.sid})):-1;
+    sid=maxSid+1;
   }
-  // New schedule — fresh sid, direct w_sch.
-  var maxSid=allSchedules.length?Math.max.apply(null,allSchedules.map(function(s){return s.sid})):-1;
-  var sid=maxSid+1;
-  var p=JSON.stringify({sid:sid,start:st,stop:sp,days:d,enabled:en,mcr:mcr,repeat:1,type:0,name:'',target:tgt});
+  var entry=buildSchEntry(sid,st,sp,d,en,mcr,0,tgt,1);
+  var p=JSON.stringify({schedules:[entry]});
+  var verb=(editingSid!==null)?'updated':'added';
   toast('Saving...','info');
-  fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){
-    if(d.error){toast(d.error,'error');return}
-    toast('Schedule added','success');
+  fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+    if(r&&r.error){toast(r.error,'error');return}
+    toast('Schedule #'+sid+' '+verb,'success');
     cancelEdit();
     loadSchedules();
   }).catch(function(e){toast('Error: '+(e.message||e),'error')});
@@ -1778,8 +1770,11 @@ function doDeleteSchedule(sid){
     function next(){
       if(i>=keep.length){toast('Deleted','success');loadSchedules();return}
       var s=keep[i++];
-      var p=JSON.stringify({sid:i-1,start:s.start,stop:s.stop,days:s.days,enabled:s.enabled,mcr:s.mcr,repeat:s.repeat||1,type:s.type||0,name:s.name||'',target:s.target||{type:0,value:0}});
-      fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+      // Use the official s_sch format decoded from app btsnoop:
+      // integer start/stop, bit-array days, par.schedules[] wrapper.
+      var entry=buildSchEntry(i-1,s.start,s.stop,s.days,s.enabled,s.mcr,s.type||0,s.target,s.repeat||1);
+      var p=JSON.stringify({schedules:[entry]});
+      fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
         if(r&&r.error){toast(r.error,'error');loadSchedules();return}
         next();
       }).catch(function(e){toast('Error: '+(e.message||e),'error');loadSchedules()});
