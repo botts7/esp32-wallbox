@@ -14,6 +14,7 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <esp_task_wdt.h>  // TWDT feed during long xTaskNotifyWait slices
+#include "_gen_settings_body_gz.h"  // pre-gzipped /settings body (task #75)
 #include <WiFi.h>
 #include <functional>
 
@@ -41,6 +42,7 @@ String wb_buildInfoPage();
 String wb_buildSessionsPage();
 String wb_buildOtaPage();
 String wb_buildLogsPage();
+String wb_buildSettingsPage();
 // Form-POST helpers (3.0 task #78 step E):
 String wb_applySaveForm(std::function<String(const char*)> getArg);
 String wb_applyResetAndPage();
@@ -442,6 +444,37 @@ static void _registerHtmlPages() {
     _async.on("/logs", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
         req->send(200, "text/html", wb_buildLogsPage());
+    });
+
+    // GET /settings/body.gz — pre-gzipped PROGMEM blob (task #75).
+    // The blob is sent verbatim with Content-Encoding: gzip; the
+    // browser decompresses on its side. beginResponse_P streams
+    // directly from flash without copying into RAM.
+    //
+    // IMPORTANT: must be registered BEFORE /settings. AsyncWebServer
+    // returns the first matching handler, and its canHandle() does
+    // a prefix match when the registered URI has a path. /settings
+    // would otherwise greedily match /settings/body.gz too.
+    _async.on("/settings/body.gz", HTTP_GET,
+        [](AsyncWebServerRequest* req) {
+            if (!_checkAuth(req)) return;
+            AsyncWebServerResponse* res = req->beginResponse_P(200,
+                "text/html",
+                (const uint8_t*)SETTINGS_BODY_GZ,
+                SETTINGS_BODY_GZ_LEN);
+            res->addHeader("Content-Encoding", "gzip");
+            res->addHeader("Cache-Control", "public, max-age=300");
+            res->addHeader("X-Uncompressed-Bytes",
+                String((unsigned long)SETTINGS_BODY_RAW_LEN));
+            req->send(res);
+        });
+
+    // GET /settings — shell page (small). The browser fetches the
+    // ~56 KB body separately from /settings/body.gz so we don't
+    // need chunked encoding here.
+    _async.on("/settings", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        req->send(200, "text/html", wb_buildSettingsPage());
     });
 }
 

@@ -1113,25 +1113,12 @@ static void handleDashboard() {
 }
 
 // ========== PAGE 2: Settings (/settings) ==========
-static void handleSettings() {
-    // 2.8.0 task #75: the big static body (~56 KB) is now pre-gzipped
-    // by scripts/precompress_settings.py at build time and served via
-    // /settings/body.gz with Content-Encoding: gzip. This handler
-    // sends a tiny stub that fetches the gzipped body and injects it
-    // — the browser decompresses, we re-execute inline <script> tags
-    // (innerHTML doesn't fire them), and the page is functionally
-    // identical. Net transmitted bytes for a fresh page load:
-    //   pre-2.8.0:  ~68 KB (head + body + foot, uncompressed)
-    //   post-2.8.0: head (~3 KB) + stub (~1 KB) + gzipped body
-    //               (~15 KB) + foot (~1 KB) = ~20 KB → ~3.4× win
-    // Flash cost: the gzipped blob lives in PROGMEM (+15 KB), the
-    // legacy literal below sits under #if 0 so it's source-only —
-    // the C++ compiler never sees it, the precompress script's
-    // text-level regex does. Single source of truth: this file.
-    http.setContentLength(CONTENT_LENGTH_UNKNOWN);
-    http.send(200, "text/html", "");
-    http.sendContent(htmlHead("Settings"));
-    http.sendContent(R"HTML(
+// 3.0 task #78: extracted into a builder so both servers share the
+// shell HTML. The big body is fetched by the browser separately
+// from /settings/body.gz (task #75 — pre-gzipped PROGMEM blob).
+String wb_buildSettingsPage() {
+    String page = htmlHead("Settings");
+    page += R"HTML(
 <div id='ld-stub' class='loading'><div class='ld-spin'></div>Loading Settings...</div>
 <div id='settings-body'></div>
 <script>
@@ -1163,8 +1150,17 @@ static void handleSettings() {
   });
 })();
 </script>
-)HTML");
-    http.sendContent(htmlFoot("/settings"));
+)HTML";
+    page += htmlFoot("/settings");
+    return page;
+}
+
+static void handleSettings() {
+    // Sync server keeps the chunked encoding it had pre-#78. Async
+    // path builds the same string and sends it via beginResponse.
+    http.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    http.send(200, "text/html", "");
+    http.sendContent(wb_buildSettingsPage());
     http.sendContent("");  // final empty chunk terminates chunked encoding
     return;
 
