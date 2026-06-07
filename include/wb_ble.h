@@ -293,6 +293,13 @@ private:
     uint32_t _lastActivityTime = 0;
     static const uint32_t PING_INTERVAL_MS = 30000;
 
+    // Charger clock sync (Wtime). The charger doesn't NTP itself; if
+    // its WiFi is down it drifts. The gateway has SNTP so it can push
+    // the wall-clock to the charger periodically. 0 = never synced
+    // this session (forces a sync on the first keepalive after auth).
+    uint32_t _lastTimeSyncMs = 0;
+    static const uint32_t TIME_SYNC_INTERVAL_MS = 3600000;  // 1 hour
+
     // Scan cache for smart reconnect
     uint32_t _lastSeenTime = 0;
     static const uint32_t SCAN_CACHE_MS = 30000;

@@ -157,6 +157,38 @@ void WallboxBLE::loop() {
             }
         }
 
+        // Periodic charger clock sync. The charger has no NTP of its
+        // own; if its WiFi is down it drifts. Push wall-clock from the
+        // gateway's SNTP every hour (and once on first keepalive after
+        // auth). Wtime accepts a 14-char ASCII string:
+        //   ss mm hh dd ww MM yy   (ww: weekday Sun=0..Sat=6, yy=year%100)
+        // Skips if NTP hasn't synced the gateway yet (year would be 1970).
+        if (_lastTimeSyncMs == 0 ||
+            millis() - _lastTimeSyncMs >= TIME_SYNC_INTERVAL_MS) {
+            time_t now = time(nullptr);
+            struct tm tmu;
+            gmtime_r(&now, &tmu);
+            if (tmu.tm_year >= 120) {  // 2020+; skip pre-NTP boot window
+                char buf[16];
+                // tm_wday: Sun=0..Sat=6 — matches charger format directly
+                snprintf(buf, sizeof(buf),
+                         "\"%02d%02d%02d%02d%02d%02d%02d\"",
+                         tmu.tm_sec, tmu.tm_min, tmu.tm_hour,
+                         tmu.tm_mday, tmu.tm_wday,
+                         tmu.tm_mon + 1, tmu.tm_year % 100);
+                // Mark BEFORE the call so a slow / empty response
+                // doesn't make us spam-retry every loop. Wtime returns
+                // {r:null} on success which the response parser may
+                // collapse to an empty string.
+                _lastTimeSyncMs = millis();
+                String r = _sendCommandDirect("Wtime", buf, 4000);
+                Log.printf("[BLE] Wtime sync %02d:%02d:%02d %02d-%02d-%02d UTC (%s)\n",
+                           tmu.tm_hour, tmu.tm_min, tmu.tm_sec,
+                           tmu.tm_year + 1900, tmu.tm_mon + 1, tmu.tm_mday,
+                           r.isEmpty() ? "no-reply" : "ack");
+            }
+        }
+
         // Process pending command
         if (_hasPending) {
             _hasPending = false;
@@ -795,6 +827,7 @@ void WallboxBLE::_disconnect() {
     _rssiSmoothed = -127;  // reset EMA so the next connect starts fresh
     _rssiLastSample = 0;
     _seenBapiThisConnection = false;  // re-enable raw-RX logging for next connect
+    _lastTimeSyncMs = 0;   // force a Wtime push on the next reconnect
 }
 
 bool WallboxBLE::_authenticate() {
