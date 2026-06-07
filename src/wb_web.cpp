@@ -1854,7 +1854,7 @@ function cancelEdit(){
 // Convert bitmask integer (bit 0=Mon..bit 6=Sun) to bit-array
 // [Mon,Tue,Wed,Thu,Fri,Sat,Sun]. The BAPI READ returns days as a
 // bitmask integer for backwards compat, but the s_sch WRITE expects
-// an array. Decoded from the official-app btsnoop on charger fw 6.11.x.
+// an array, observed via the live charger response shape.
 function daysToArray(d){var a=[];for(var i=0;i<7;i++)a.push((d>>i)&1);return a}
 function timeToInt(s){return parseInt(String(s).replace(':',''),10)||0}
 // Build one schedule entry in the EXACT shape s_sch expects (decoded
@@ -1912,8 +1912,8 @@ function doDeleteSchedule(sid){
     function next(){
       if(i>=keep.length){toast('Deleted','success');loadSchedules();return}
       var s=keep[i++];
-      // Use the official s_sch format decoded from app btsnoop:
-      // integer start/stop, bit-array days, par.schedules[] wrapper.
+      // s_sch on fw 6.11.x expects integer start/stop, a bit-array
+      // for days, and the par.schedules[] wrapper (see buildSchEntry).
       var entry=buildSchEntry(i-1,s.start,s.stop,s.days,s.enabled,s.mcr,s.type||0,s.target,s.repeat||1);
       var p=JSON.stringify({schedules:[entry]});
       fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
