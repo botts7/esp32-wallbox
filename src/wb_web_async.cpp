@@ -31,6 +31,13 @@ String wb_buildStatusJson();
 String wb_buildChargerJson();
 String wb_buildDiagRuntimeJson();
 String wb_buildBootHistoryJson();
+// HTML-page builders extracted from the sync handlers in wb_web.cpp.
+String wb_buildDashboardPage();
+String wb_buildConfigPage();
+String wb_buildInfoPage();
+String wb_buildSessionsPage();
+String wb_buildOtaPage();
+String wb_buildLogsPage();
 
 // Sync server's auth lockout state. Sharing it between sync and
 // async servers means a brute-forcer can't double their throughput
@@ -377,9 +384,63 @@ static void _registerStaticAndPostRoutes() {
     });
 }
 
+// =====================================================================
+// HTML pages — each dispatches to a wb_buildXxxPage() helper extracted
+// from the sync handler in wb_web.cpp. Same builder, same output —
+// the only thing the async server does differently is dispatch on
+// the AsyncTCP task instead of the main loop.
+// =====================================================================
+
+static void _registerHtmlPages() {
+
+    // GET / — STA-mode landing. Sync server only registers `/` for
+    // the dashboard in STA mode (the `/dashboard` path is captive-
+    // portal-only). Match that to keep sync vs async behavior
+    // identical.
+    _async.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "text/html", wb_buildDashboardPage());
+    });
+
+    // GET /config — config UI. No auth gate on the page itself
+    // (matches sync behavior — the config page is the entry point
+    // for setting up auth in the first place).
+    _async.on("/config", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "text/html", wb_buildConfigPage());
+    });
+
+    // GET /info — diagnostics + charger info.
+    _async.on("/info", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "text/html", wb_buildInfoPage());
+    });
+
+    // GET /sessions — charging sessions heatmap.
+    _async.on("/sessions", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "text/html", wb_buildSessionsPage());
+    });
+
+    // GET /ota — firmware update page. Auth required.
+    _async.on("/ota", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        req->send(200, "text/html", wb_buildOtaPage());
+    });
+
+    // GET /logs — auto-refreshing log viewer. Auth required.
+    _async.on("/logs", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        req->send(200, "text/html", wb_buildLogsPage());
+    });
+}
+
 void begin() {
     _registerReadOnlyRoutes();
     _registerStaticAndPostRoutes();
+    _registerHtmlPages();
+    // ESPAsyncWebServer doesn't auto-respond 404 for unregistered
+    // routes — without onNotFound() it falls through to a 500. Match
+    // the sync server's behavior (the sync WebServer auto-404s).
+    _async.onNotFound([](AsyncWebServerRequest* req) {
+        req->send(404, "text/plain", "Not Found");
+    });
     _async.begin();
     Log.println("[Web-async] Listening on :8081 (migration coexistence)");
 }

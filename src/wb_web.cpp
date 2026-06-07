@@ -991,7 +991,9 @@ static String normalizeMAC(const String& raw) {
 }
 
 // ========== PAGE 1: Dashboard (/) ==========
-static void handleDashboard() {
+// 3.0 task #78: extracted body of handleDashboard(). Non-static so
+// the async server can call it. Sync handler trampolines through.
+String wb_buildDashboardPage() {
     String page = htmlHead("Dashboard");
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Dashboard...</div>
@@ -1069,7 +1071,11 @@ updateBleHealth();setInterval(updateBleHealth,15000);
 </div>
 )HTML";
     page += htmlFoot("/");
-    http.send(200, "text/html", page);
+    return page;
+}
+
+static void handleDashboard() {
+    http.send(200, "text/html", wb_buildDashboardPage());
 }
 
 // ========== PAGE 2: Settings (/settings) ==========
@@ -1752,7 +1758,8 @@ function pauseBle(){
 }
 
 // ========== PAGE 3: Config (/config) ==========
-static void handleConfig() {
+// 3.0 task #78: extracted body so the async server can call it.
+String wb_buildConfigPage() {
     const WBConfig& cfg = configMgr.get();
     String page = htmlHead("Config");
 
@@ -1851,11 +1858,16 @@ static void handleConfig() {
     page += "<button type='button' class='btn btn-danger' style='margin-top:10px' onclick='confirm2(\"Erase all settings and reboot into setup mode?\",function(){var f=document.createElement(\"form\");f.method=\"POST\";f.action=\"/reset\";var i=document.createElement(\"input\");i.type=\"hidden\";i.name=\"csrf\";i.value=\"" + csrfToken + "\";f.appendChild(i);document.body.appendChild(f);f.submit()})'>&#x1F5D1; Factory Reset</button>";
 
     page += htmlFoot("/config");
-    http.send(200, "text/html", page);
+    return page;
+}
+
+static void handleConfig() {
+    http.send(200, "text/html", wb_buildConfigPage());
 }
 
 // ========== PAGE 4: Info (/info) ==========
-static void handleInfo() {
+// 3.0 task #78: extracted body so the async server can call it.
+String wb_buildInfoPage() {
     String page = htmlHead("Info");
     // CSRF token needed by interactive JS (e.g. clearDiag) — injected
     // here so the page-body raw string can stay static.
@@ -2108,7 +2120,11 @@ document.getElementById('ld').style.display='none';document.getElementById('pg')
 </div>
 )HTML";
     page += htmlFoot("/info");
-    http.send(200, "text/html", page);
+    return page;
+}
+
+static void handleInfo() {
+    http.send(200, "text/html", wb_buildInfoPage());
 }
 
 // ========== Save / Reset ==========
@@ -2227,7 +2243,8 @@ static void handleNotFound() {
 // ========== Server setup ==========
 // ========== Web OTA Upload ==========
 // ========== PAGE: Sessions Heatmap (/sessions) ==========
-static void handleSessionsPage() {
+// 3.0 task #78: extracted body so the async server can call it.
+String wb_buildSessionsPage() {
     String page = htmlHead("Sessions");
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading...</div>
@@ -2626,11 +2643,18 @@ loadSessions2();
 </script>
 )HTML";
     page += htmlFoot("/settings");
-    http.send(200, "text/html", page);
+    return page;
 }
 
-static void handleOtaPage() {
-    if (!checkAuth()) return;
+static void handleSessionsPage() {
+    http.send(200, "text/html", wb_buildSessionsPage());
+}
+
+// 3.0 task #78: extracted body so the async server can call it.
+// Note: auth check is the caller's responsibility — both servers
+// gate the page behind their own auth helper before invoking the
+// builder.
+String wb_buildOtaPage() {
     String page = htmlHead("Firmware Update");
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading...</div>
@@ -2732,7 +2756,46 @@ document.getElementById('ld').style.display='none';document.getElementById('pg')
 </script>
 )HTML";
     page += htmlFoot("/info");
-    http.send(200, "text/html", page);
+    return page;
+}
+
+static void handleOtaPage() {
+    if (!checkAuth()) return;
+    http.send(200, "text/html", wb_buildOtaPage());
+}
+
+// 3.0 task #78: extracted body of the /logs HTML page (was an
+// inline lambda in registerRoutes). Both sync and async servers
+// auth-check separately and then trampoline through this builder.
+String wb_buildLogsPage() {
+    String page = htmlHead("Logs");
+    page += "<h1>&#x1F4DC; Gateway Log <span id='log-state' style='font-size:.55em;vertical-align:middle;margin-left:8px;padding:3px 8px;border-radius:10px;background:rgba(34,197,94,.15);color:#22c55e'>online</span></h1>";
+    page += "<p style='color:var(--text3);font-size:.82em'>Last 16 KB of serial/telnet output. Auto-refreshes every 3s; scroll-locks to bottom unless you scroll up. Persists across page reloads, wiped on reboot.</p>";
+    page += "<div style='margin-bottom:8px'>";
+    page += "<button class='btn btn-outline' style='padding:6px 12px;font-size:.85em' onclick='copyLog()'>&#x1F4CB; Copy</button> ";
+    page += "<a href='/api/logs' download='wallbox-log.txt' class='btn btn-outline' style='padding:6px 12px;font-size:.85em;text-decoration:none'>&#x2B07; Download</a> ";
+    page += "<button class='btn btn-outline' style='padding:6px 12px;font-size:.85em' onclick='confirm2(\"Reboot the gateway? Config is preserved \\u2014 you can watch the boot trace appear here.\",function(){fetch(\"/api/reboot?csrf=" + csrfToken + "\",{method:\"POST\"}).then(function(){}).catch(function(){})})'>&#x21BB; Reboot &amp; capture boot trace</button>";
+    page += "</div>";
+    page += "<pre id='log' style='background:var(--bg);border-radius:8px;padding:10px;font-size:.78em;max-height:70vh;overflow:auto;white-space:pre-wrap;line-height:1.35'></pre>";
+    page += "<script>(function(){"
+            "var el=document.getElementById('log');"
+            "var st=document.getElementById('log-state');"
+            "var stick=true;var fails=0;"
+            "function setState(label,color,bg){st.textContent=label;st.style.color=color;st.style.background=bg}"
+            "function offline(){setState('offline — gateway rebooting?','#ef4444','rgba(239,68,68,.15)')}"
+            "function online(){setState('online','#22c55e','rgba(34,197,94,.15)');fails=0}"
+            "el.addEventListener('scroll',function(){"
+              "stick=(el.scrollHeight-el.scrollTop-el.clientHeight)<8;"
+            "});"
+            "window.copyLog=function(){var t=el.textContent||'';if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){toast&&toast('Copied','success')}).catch(function(){})}};"
+            "function load(){fetch('/api/logs',{cache:'no-store'})"
+              ".then(function(r){return r.text()})"
+              ".then(function(t){online();el.textContent=t;if(stick)el.scrollTop=el.scrollHeight})"
+              ".catch(function(){fails++;if(fails>=2)offline()});}"
+            "load();setInterval(load,3000);"
+            "})();</script>";
+    page += htmlFoot("/logs");
+    return page;
 }
 
 bool otaInProgress = false;
@@ -3228,37 +3291,12 @@ static void registerRoutes() {
         http.sendHeader("Cache-Control", "no-store");
         http.send(200, "text/plain; charset=utf-8", body);
     });
-    // /logs — auto-refreshing viewer
+    // /logs — auto-refreshing viewer. Handler logic extracted into
+    // wb_buildLogsPage() for the 3.0 async server migration (task
+    // #78).
     http.on("/logs", []() {
         if (!checkAuth()) return;
-        String page = htmlHead("Logs");
-        page += "<h1>&#x1F4DC; Gateway Log <span id='log-state' style='font-size:.55em;vertical-align:middle;margin-left:8px;padding:3px 8px;border-radius:10px;background:rgba(34,197,94,.15);color:#22c55e'>online</span></h1>";
-        page += "<p style='color:var(--text3);font-size:.82em'>Last 16 KB of serial/telnet output. Auto-refreshes every 3s; scroll-locks to bottom unless you scroll up. Persists across page reloads, wiped on reboot.</p>";
-        page += "<div style='margin-bottom:8px'>";
-        page += "<button class='btn btn-outline' style='padding:6px 12px;font-size:.85em' onclick='copyLog()'>&#x1F4CB; Copy</button> ";
-        page += "<a href='/api/logs' download='wallbox-log.txt' class='btn btn-outline' style='padding:6px 12px;font-size:.85em;text-decoration:none'>&#x2B07; Download</a> ";
-        page += "<button class='btn btn-outline' style='padding:6px 12px;font-size:.85em' onclick='confirm2(\"Reboot the gateway? Config is preserved \\u2014 you can watch the boot trace appear here.\",function(){fetch(\"/api/reboot?csrf=" + csrfToken + "\",{method:\"POST\"}).then(function(){}).catch(function(){})})'>&#x21BB; Reboot &amp; capture boot trace</button>";
-        page += "</div>";
-        page += "<pre id='log' style='background:var(--bg);border-radius:8px;padding:10px;font-size:.78em;max-height:70vh;overflow:auto;white-space:pre-wrap;line-height:1.35'></pre>";
-        page += "<script>(function(){"
-                "var el=document.getElementById('log');"
-                "var st=document.getElementById('log-state');"
-                "var stick=true;var fails=0;"
-                "function setState(label,color,bg){st.textContent=label;st.style.color=color;st.style.background=bg}"
-                "function offline(){setState('offline — gateway rebooting?','#ef4444','rgba(239,68,68,.15)')}"
-                "function online(){setState('online','#22c55e','rgba(34,197,94,.15)');fails=0}"
-                "el.addEventListener('scroll',function(){"
-                  "stick=(el.scrollHeight-el.scrollTop-el.clientHeight)<8;"
-                "});"
-                "window.copyLog=function(){var t=el.textContent||'';if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){toast&&toast('Copied','success')}).catch(function(){})}};"
-                "function load(){fetch('/api/logs',{cache:'no-store'})"
-                  ".then(function(r){return r.text()})"
-                  ".then(function(t){online();el.textContent=t;if(stick)el.scrollTop=el.scrollHeight})"
-                  ".catch(function(){fails++;if(fails>=2)offline()});}"
-                "load();setInterval(load,3000);"
-                "})();</script>";
-        page += htmlFoot("/logs");
-        http.send(200, "text/html", page);
+        http.send(200, "text/html", wb_buildLogsPage());
     });
     // Health endpoint — returns 200 only when the gateway is in a stable,
     // healthy state. Used by OTA tooling to confirm the previous flash
