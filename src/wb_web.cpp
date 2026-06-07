@@ -19,6 +19,13 @@
 #include <esp_ota_ops.h>
 #include <esp_task_wdt.h>
 #include <Preferences.h>
+#include <functional>  // 3.0 task #78: std::function for save-form getter
+
+// Forward declarations of the 3.0 #78 extracted helpers — defined
+// later in this TU but referenced by the sync handlers above their
+// definitions. Async server in wb_web_async.cpp also externs these.
+String wb_applySaveForm(std::function<String(const char*)> getArg);
+String wb_applyResetAndPage();
 WBWebServer webServer;
 
 static WebServer http(80);
@@ -2131,37 +2138,49 @@ static void handleInfo() {
 static void handleSave() {
     if (!checkAuth()) return;
     if (!checkCsrf()) return;
+    String page = wb_applySaveForm([](const char* k) {
+        return http.arg(k);
+    });
+    http.send(200, "text/html", page);
+    webServer.requestReboot();
+}
+
+// 3.0 task #78: extracted handleSave body so the async server can
+// reuse the field-assignment logic without copying ~20 lines of
+// http.arg() calls. Takes a getter callable so each server can
+// hand in its own arg-reader (http.arg vs req->getParam).
+//
+// Caller is responsible for auth + CSRF; this helper does NOT check
+// either, only writes config + saves.
+//
+// Returns the "Saved!" HTML response page. Caller sends it and then
+// invokes webServer.requestReboot().
+String wb_applySaveForm(std::function<String(const char*)> getArg) {
     WBConfig& cfg = configMgr.mut();
-    cfg.wifiSSID = http.arg("wifi_ssid"); cfg.wifiPass = http.arg("wifi_pass");
-    cfg.mqttHost = http.arg("mqtt_host"); cfg.mqttPort = http.arg("mqtt_port").toInt();
-    cfg.mqttUser = http.arg("mqtt_user"); cfg.mqttPass = http.arg("mqtt_pass");
-    cfg.mqttClientId = http.arg("mqtt_cid");
-    cfg.authEnabled = http.arg("auth_en") == "1";
-    cfg.authUser = http.arg("auth_user"); cfg.authPass = http.arg("auth_pass");
-    // Convenience: if the user typed a password but didn't flip the toggle, turn auth on for them.
+    cfg.wifiSSID = getArg("wifi_ssid"); cfg.wifiPass = getArg("wifi_pass");
+    cfg.mqttHost = getArg("mqtt_host"); cfg.mqttPort = getArg("mqtt_port").toInt();
+    cfg.mqttUser = getArg("mqtt_user"); cfg.mqttPass = getArg("mqtt_pass");
+    cfg.mqttClientId = getArg("mqtt_cid");
+    cfg.authEnabled = getArg("auth_en") == "1";
+    cfg.authUser = getArg("auth_user"); cfg.authPass = getArg("auth_pass");
     if (!cfg.authEnabled && cfg.authPass.length() > 0) cfg.authEnabled = true;
-    cfg.bleAddr = normalizeMAC(http.arg("ble_addr")); cfg.blePin = http.arg("ble_pin");
-    cfg.bleService = http.arg("ble_svc"); cfg.bleChar = http.arg("ble_chr");
-    cfg.bleTxChar = http.arg("ble_txchr");
-    cfg.chargerModel = http.arg("chg_model");
-    // Apply preset UUIDs if a model is selected (custom = leave fields as-typed).
-    // Copper SB / Quasar / Quasar 2 use the same dual-char Plus protocol per
-    // jagheterfredrik/wallbox-mqtt-bridge (supports Plus + Copper SB with the
-    // same BAPI surface; Quasar shares the BLE family and adds V2H state codes).
+    cfg.bleAddr = normalizeMAC(getArg("ble_addr")); cfg.blePin = getArg("ble_pin");
+    cfg.bleService = getArg("ble_svc"); cfg.bleChar = getArg("ble_chr");
+    cfg.bleTxChar = getArg("ble_txchr");
+    cfg.chargerModel = getArg("chg_model");
     if (cfg.chargerModel == "max") {
         cfg.bleService = "2456e1b9-26e2-8f83-e744-f34f01e9d701";
         cfg.bleChar    = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
-        cfg.bleTxChar  = "";  // single-char mode
+        cfg.bleTxChar  = "";
     } else if (cfg.chargerModel == "plus" || cfg.chargerModel == "copper"
             || cfg.chargerModel == "quasar" || cfg.chargerModel == "quasar2") {
-        // Nordic UART-style variant per jagheterfredrik/wallbox-ble
         cfg.bleService = "331a36f5-2459-45ea-9d95-6142f0c4b307";
-        cfg.bleChar    = "a9da6040-0823-4995-94ec-9ce41ca28833";  // RX (write)
-        cfg.bleTxChar  = "a73e9a10-628f-4494-a099-12efaf72258f";  // TX (notify)
+        cfg.bleChar    = "a9da6040-0823-4995-94ec-9ce41ca28833";
+        cfg.bleTxChar  = "a73e9a10-628f-4494-a099-12efaf72258f";
     }
-    cfg.statusPollMs = http.arg("poll_status").toInt();
-    cfg.realtimePollMs = http.arg("poll_rt").toInt();
-    cfg.haDiscoveryPrefix = http.arg("ha_prefix"); cfg.haDeviceId = http.arg("ha_devid");
+    cfg.statusPollMs = getArg("poll_status").toInt();
+    cfg.realtimePollMs = getArg("poll_rt").toInt();
+    cfg.haDiscoveryPrefix = getArg("ha_prefix"); cfg.haDeviceId = getArg("ha_devid");
     if (cfg.mqttPort == 0) cfg.mqttPort = 1883;
     if (cfg.statusPollMs < 1000) cfg.statusPollMs = 10000;
     if (cfg.realtimePollMs < 1000) cfg.realtimePollMs = 30000;
@@ -2173,9 +2192,6 @@ static void handleSave() {
     page += "<div class='spinner' style='margin:16px auto'></div>";
     page += "<p id='wait-detail' style='color:var(--text3);font-size:.82em;margin-top:8px'>Waiting for it to come back online — this page will reload when it does.</p>";
     page += "</div>";
-    // Poll the gateway every 2s until it responds, then redirect to the
-    // dashboard. Gives ~2 min of patience for slow reboots; after that
-    // shows a manual link so the user isn't stuck on the spinner forever.
     page += "<script>(function(){"
             "var n=0,max=60,started=Date.now();"
             "var msg=document.getElementById('wait-msg');"
@@ -2196,13 +2212,12 @@ static void handleSave() {
             "setTimeout(tick,5000);"
             "})();</script>";
     page += "</body></html>";
-    http.send(200, "text/html", page);
-    webServer.requestReboot();
+    return page;
 }
 
-static void handleReset() {
-    if (!checkAuth()) return;
-    if (!checkCsrf()) return;
+// 3.0 task #78: factory-reset core logic + response page. Caller
+// handles auth+CSRF and the post-response reboot.
+String wb_applyResetAndPage() {
     configMgr.reset();
     // Wipe the persisted CSRF token too — a factory-reset device should
     // come back with a fresh token, not inherit one from the previous
@@ -2215,7 +2230,13 @@ static void handleReset() {
     String page = htmlHead("Reset");
     page += "<div class='card' style='text-align:center'><h2 style='color:var(--warning)'>Factory Reset</h2>";
     page += "<p style='color:var(--text2)'>Rebooting into AP mode...</p></div></div></body></html>";
-    http.send(200, "text/html", page);
+    return page;
+}
+
+static void handleReset() {
+    if (!checkAuth()) return;
+    if (!checkCsrf()) return;
+    http.send(200, "text/html", wb_applyResetAndPage());
     webServer.requestReboot();
 }
 

@@ -13,6 +13,7 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
+#include <functional>
 
 // Forward declarations of state exposed by sync wb_web.cpp that the
 // async handlers need to read. Defined in wb_web.cpp (the `static`
@@ -38,6 +39,9 @@ String wb_buildInfoPage();
 String wb_buildSessionsPage();
 String wb_buildOtaPage();
 String wb_buildLogsPage();
+// Form-POST helpers (3.0 task #78 step E):
+String wb_applySaveForm(std::function<String(const char*)> getArg);
+String wb_applyResetAndPage();
 
 // Sync server's auth lockout state. Sharing it between sync and
 // async servers means a brute-forcer can't double their throughput
@@ -431,10 +435,50 @@ static void _registerHtmlPages() {
     });
 }
 
+// =====================================================================
+// Form-POST routes (/save, /reset). Field assignment + page-building
+// extracted into wb_applySaveForm() / wb_applyResetAndPage() in
+// wb_web.cpp; this just dispatches.
+//
+// NOTE: /api/config/import is NOT in this batch. It accepts a JSON
+// body which AsyncWebServer needs to accumulate via a separate
+// body-handler signature. Deferred to a follow-on commit so the
+// pattern can be designed cleanly rather than retrofitted here.
+// =====================================================================
+
+static void _registerFormPostRoutes() {
+
+    // POST /save — config form. wb_applySaveForm() reads ~20 fields
+    // via the getter callable. Pass a lambda that reads from the
+    // async request's form-encoded body (req->getParam(name, true)
+    // — the `true` is `is_post`).
+    _async.on("/save", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        if (!_checkCsrf(req)) return;
+        String page = wb_applySaveForm([req](const char* k) -> String {
+            if (req->hasParam(k, true)) {
+                return req->getParam(k, true)->value();
+            }
+            return String("");
+        });
+        req->send(200, "text/html", page);
+        webServer.requestReboot();
+    });
+
+    // POST /reset — factory reset + reboot.
+    _async.on("/reset", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        if (!_checkCsrf(req)) return;
+        req->send(200, "text/html", wb_applyResetAndPage());
+        webServer.requestReboot();
+    });
+}
+
 void begin() {
     _registerReadOnlyRoutes();
     _registerStaticAndPostRoutes();
     _registerHtmlPages();
+    _registerFormPostRoutes();
     // ESPAsyncWebServer doesn't auto-respond 404 for unregistered
     // routes — without onNotFound() it falls through to a 500. Match
     // the sync server's behavior (the sync WebServer auto-404s).
