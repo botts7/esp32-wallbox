@@ -26,6 +26,8 @@
 // definitions. Async server in wb_web_async.cpp also externs these.
 String wb_applySaveForm(std::function<String(const char*)> getArg);
 String wb_applyResetAndPage();
+struct ImportResult { int status; String body; bool reboot; };
+ImportResult wb_applyConfigImport(const String& jsonBody);
 WBWebServer webServer;
 
 static WebServer http(80);
@@ -2265,6 +2267,48 @@ static void handleReset() {
     webServer.requestReboot();
 }
 
+// 3.0 task #78: extracted /api/config/import core logic. Parses
+// the JSON body, applies non-sentinel ("***" = preserve) fields to
+// configMgr, saves. Returns the response status + body + a flag
+// telling the caller whether to schedule a reboot. Caller handles
+// auth + CSRF + body acquisition (sync uses http.arg("plain"),
+// async accumulates via the body-handler).
+ImportResult wb_applyConfigImport(const String& jsonBody) {
+    JsonDocument d;
+    if (deserializeJson(d, jsonBody) != DeserializationError::Ok) {
+        return { 400, "{\"ok\":false,\"error\":\"invalid JSON\"}", false };
+    }
+    auto take = [&](JsonVariantConst v, String& dst) {
+        if (v.is<const char*>()) {
+            const char* s = v.as<const char*>();
+            if (strcmp(s, "***") != 0) dst = s;
+        }
+    };
+    WBConfig& c = configMgr.mut();
+    take(d["wifi_ssid"],   c.wifiSSID);
+    take(d["wifi_pass"],   c.wifiPass);
+    take(d["mqtt_host"],   c.mqttHost);
+    if (d["mqtt_port"].is<uint16_t>()) c.mqttPort = d["mqtt_port"].as<uint16_t>();
+    take(d["mqtt_user"],   c.mqttUser);
+    take(d["mqtt_pass"],   c.mqttPass);
+    take(d["mqtt_cid"],    c.mqttClientId);
+    take(d["ble_addr"],    c.bleAddr);
+    take(d["ble_pin"],     c.blePin);
+    take(d["ble_svc"],     c.bleService);
+    take(d["ble_chr"],     c.bleChar);
+    take(d["ble_txchr"],   c.bleTxChar);
+    take(d["chg_model"],   c.chargerModel);
+    if (d["auth_enabled"].is<bool>()) c.authEnabled = d["auth_enabled"].as<bool>();
+    take(d["auth_user"],   c.authUser);
+    take(d["auth_pass"],   c.authPass);
+    if (d["poll_status"].is<uint32_t>()) c.statusPollMs = d["poll_status"].as<uint32_t>();
+    if (d["poll_rt"].is<uint32_t>())     c.realtimePollMs = d["poll_rt"].as<uint32_t>();
+    take(d["ha_prefix"],   c.haDiscoveryPrefix);
+    take(d["ha_devid"],    c.haDeviceId);
+    configMgr.save();
+    return { 200, "{\"ok\":true,\"rebooting\":true}", true };
+}
+
 static void handleNotFound() {
     // In AP mode, redirect to captive portal
     if (WiFi.getMode() == WIFI_AP_STA || WiFi.getMode() == WIFI_AP) {
@@ -3253,41 +3297,9 @@ static void registerRoutes() {
             http.send(400, "application/json", "{\"ok\":false,\"error\":\"missing body\"}");
             return;
         }
-        JsonDocument d;
-        if (deserializeJson(d, http.arg("plain")) != DeserializationError::Ok) {
-            http.send(400, "application/json", "{\"ok\":false,\"error\":\"invalid JSON\"}");
-            return;
-        }
-        auto take = [&](JsonVariantConst v, String& dst) {
-            if (v.is<const char*>()) {
-                const char* s = v.as<const char*>();
-                if (strcmp(s, "***") != 0) dst = s;
-            }
-        };
-        WBConfig& c = configMgr.mut();
-        take(d["wifi_ssid"],   c.wifiSSID);
-        take(d["wifi_pass"],   c.wifiPass);
-        take(d["mqtt_host"],   c.mqttHost);
-        if (d["mqtt_port"].is<uint16_t>()) c.mqttPort = d["mqtt_port"].as<uint16_t>();
-        take(d["mqtt_user"],   c.mqttUser);
-        take(d["mqtt_pass"],   c.mqttPass);
-        take(d["mqtt_cid"],    c.mqttClientId);
-        take(d["ble_addr"],    c.bleAddr);
-        take(d["ble_pin"],     c.blePin);
-        take(d["ble_svc"],     c.bleService);
-        take(d["ble_chr"],     c.bleChar);
-        take(d["ble_txchr"],   c.bleTxChar);
-        take(d["chg_model"],   c.chargerModel);
-        if (d["auth_enabled"].is<bool>()) c.authEnabled = d["auth_enabled"].as<bool>();
-        take(d["auth_user"],   c.authUser);
-        take(d["auth_pass"],   c.authPass);
-        if (d["poll_status"].is<uint32_t>()) c.statusPollMs = d["poll_status"].as<uint32_t>();
-        if (d["poll_rt"].is<uint32_t>())     c.realtimePollMs = d["poll_rt"].as<uint32_t>();
-        take(d["ha_prefix"],   c.haDiscoveryPrefix);
-        take(d["ha_devid"],    c.haDeviceId);
-        configMgr.save();
-        http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
-        webServer.requestReboot();
+        ImportResult r = wb_applyConfigImport(http.arg("plain"));
+        http.send(r.status, "application/json", r.body);
+        if (r.reboot) webServer.requestReboot();
     });
 
     // /api/ota/history — the last few OTA attempts (newest first)

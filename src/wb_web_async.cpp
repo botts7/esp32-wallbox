@@ -48,6 +48,9 @@ String wb_applyResetAndPage();
 String wb_runBleScan();
 struct ScanResult { int status; String body; };
 ScanResult wb_runWifiScan();
+// JSON-body POST helper (3.0 task #78 step G — config import):
+struct ImportResult { int status; String body; bool reboot; };
+ImportResult wb_applyConfigImport(const String& jsonBody);
 bool tbAllow();
 
 // Sync server's auth lockout state. Sharing it between sync and
@@ -644,12 +647,70 @@ static void _registerBleRoutes() {
     });
 }
 
+// 3.0 task #78 step G — routes that take a JSON request body.
+// AsyncWebServer doesn't surface POST bodies via getParam(); they
+// arrive as chunked callbacks (the 5-arg "body handler" overload).
+// We accumulate chunks into a request-scoped malloc'd buffer parked
+// on req->_tempObject (which AsyncWebServerRequest's destructor
+// free()s automatically), then the request handler runs once after
+// the body is fully received and dispatches to wb_applyConfigImport.
+static void _registerJsonBodyRoutes() {
+    // Hard cap on accepted body size. Live config JSON is ~1-2 KB;
+    // 8 KB is generous and small enough to fit comfortably in heap
+    // alongside the other request state.
+    constexpr size_t MAX_IMPORT_BODY = 8 * 1024;
+
+    _async.on("/api/config/import", HTTP_POST,
+        // requestHandler — called AFTER body is fully received.
+        [](AsyncWebServerRequest* req) {
+            if (!_checkAuth(req)) return;
+            if (!_checkCsrf(req)) return;
+            const char* buf = (const char*)req->_tempObject;
+            if (!buf) {
+                req->send(400, "application/json",
+                    "{\"ok\":false,\"error\":\"missing body\"}");
+                return;
+            }
+            ImportResult r = wb_applyConfigImport(String(buf));
+            req->send(r.status, "application/json", r.body);
+            if (r.reboot) webServer.requestReboot();
+        },
+        // uploadHandler — not used; this endpoint is JSON not multipart.
+        NULL,
+        // bodyHandler — invoked one or more times with body chunks.
+        // Allocate the accumulation buffer on the FIRST chunk (when
+        // `total` is known and `index` == 0). Reject oversize bodies
+        // up front so we don't burn heap accumulating then bail.
+        [MAX_IMPORT_BODY](AsyncWebServerRequest* req, uint8_t* data,
+                          size_t len, size_t index, size_t total) {
+            if (index == 0) {
+                if (total == 0 || total > MAX_IMPORT_BODY) {
+                    req->_tempObject = nullptr;
+                    return;
+                }
+                char* buf = (char*)malloc(total + 1);
+                if (!buf) {
+                    req->_tempObject = nullptr;
+                    return;
+                }
+                buf[total] = '\0';
+                req->_tempObject = buf;
+            }
+            char* buf = (char*)req->_tempObject;
+            if (buf && (index + len) <= MAX_IMPORT_BODY) {
+                memcpy(buf + index, data, len);
+            }
+        }
+    );
+}
+
 void begin() {
     _registerReadOnlyRoutes();
     _registerStaticAndPostRoutes();
     _registerHtmlPages();
     _registerFormPostRoutes();
     _registerBleRoutes();
+    _registerJsonBodyRoutes();
     // ESPAsyncWebServer doesn't auto-respond 404 for unregistered
     // routes — without onNotFound() it falls through to a 500. Match
     // the sync server's behavior (the sync WebServer auto-404s).
