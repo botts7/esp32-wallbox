@@ -2885,14 +2885,18 @@ String wb_buildLogsPage() {
 }
 
 bool otaInProgress = false;
-static size_t expectedOtaSize = 0;  // Content-Length captured at FILE_START for truncation check
+// 3.0 task #78 step I: these three lost their `static` so the async
+// OTA handler in wb_web_async.cpp can share the same admission +
+// retry state with the sync handler — preventing a brute-forcer from
+// alternating ports to bypass the otaInProgress guard.
+size_t expectedOtaSize = 0;  // Content-Length captured at FILE_START for truncation check
 // When admission rejects an upload at FILE_START we set otaRetryAfterSec so
 // FILE_END can emit a proper 503 + Retry-After. doOTA() in the browser
 // parses Retry-After and schedules one auto-retry — peter-mcc #4 follow-up:
 // the typical "rejected because we just rebooted" case should self-heal
 // without the user re-clicking Upload.
-static uint16_t otaRetryAfterSec = 0;
-static String   otaRejectReason;
+uint16_t otaRetryAfterSec = 0;
+String   otaRejectReason;
 
 static void handleOtaUpload() {
     // DEFENCE IN DEPTH — the Arduino WebServer routes both multipart AND

@@ -15,6 +15,12 @@
 #include <ArduinoJson.h>
 #include <esp_task_wdt.h>  // TWDT feed during long xTaskNotifyWait slices
 #include "_gen_settings_body_gz.h"  // pre-gzipped /settings body (task #75)
+#include "wb_health.h"     // OTA admission guard (step I)
+#include "wb_watchdog.h"   // wb_wdt::extendTo/restore for OTA flash erase
+#include "wb_ota_history.h" // recordOta() for the OTA history badge
+#include "wb_version.h"    // WB_VERSION for OTA history records
+#include <Update.h>         // ESP32 Arduino OTA write API
+#include <esp_ota_ops.h>    // esp_ota_get_next_update_partition for size check
 #include <WiFi.h>
 #include <functional>
 
@@ -25,6 +31,15 @@
 extern volatile uint32_t g_loopMaxMs;
 extern volatile int      g_webMaxReentry;
 int wb_web_tokens_remaining();
+
+// OTA shared state — defined in wb_web.cpp. Sharing prevents a
+// concurrent upload on the other port from sneaking past the
+// otaInProgress guard, and lets the rejection retry-after counter
+// roll over consistently.
+extern bool     otaInProgress;
+extern size_t   expectedOtaSize;
+extern uint16_t otaRetryAfterSec;
+extern String   otaRejectReason;
 
 // 3.0 task #78: JSON builders extracted from sync handlers in
 // wb_web.cpp so the async server emits IDENTICAL payloads without
@@ -737,6 +752,233 @@ static void _registerJsonBodyRoutes() {
     );
 }
 
+// =====================================================================
+// 3.0 task #78 step I — /api/ota (firmware upload).
+//
+// Distinct route because AsyncWebServer has a dedicated upload-handler
+// signature for multipart/form-data:
+//   onUpload(req, filename, index, data, len, final)
+// The per-chunk callback runs on AsyncTCP. The request handler (the
+// first lambda) runs ONCE AFTER all chunks have been consumed — that
+// is where we MUST send the response (sending from inside the upload
+// handler is rejected by the library).
+//
+// We deliberately mirror the sync handler's behaviour byte-for-byte:
+//   - auth check at the very first chunk before Update.begin() erases
+//   - admission guard (otaInProgress + wb_health::canAcceptOta)
+//   - BLE paused for the OTA window (5 min) — radio coex starves WiFi
+//   - WDT extended to 60 s — Update.begin() erases the partition
+//     synchronously and can take >5 s on a fresh partition
+//   - first-byte magic check (ESP32 image starts with 0xE9)
+//   - optional X-Firmware-MD5 integrity check
+//   - truncation tolerance ±256 bytes for the multipart envelope
+//   - response classification: 503+Retry-After for admission rejects,
+//     500 for hard failures, 200 + reboot for success
+//
+// The reboot does NOT call ESP.restart() from the request handler.
+// Instead we set webServer.requestReboot() — the main loop will
+// observe the flag and ESP.restart() ~2 s later (see
+// WBWebServer::loop). That gives AsyncTCP time to flush the 200
+// response back to the client before the device dies.
+//
+// SYNC HANDLER STAYS IN PLACE. While the async route is fresh, the
+// sync server still serves /api/ota on port 80; a broken async path
+// can't brick the gateway because the user can fall back. Once the
+// async OTA is exercised across both botts7+peter-mcc test rigs,
+// the port swap can land and the sync handler retires.
+// =====================================================================
+
+// File-static OTA progress state. Safe to share across requests
+// because the otaInProgress guard ensures only one upload is ever
+// in flight. Declared at file scope so both lambdas inside
+// _registerOtaRoute can capture them.
+static bool   _asyncOtaError        = false;
+static bool   _asyncOtaShouldReboot = false;
+static size_t _asyncOtaTotalSize    = 0;
+
+static void _registerOtaRoute() {
+    _async.on("/api/ota", HTTP_POST,
+        // requestHandler — runs ONCE after the upload completes
+        // (or fails). Examines the file-static result vars below and
+        // sends the appropriate response.
+        [](AsyncWebServerRequest* req) {
+            if (_asyncOtaError) {
+                if (otaRetryAfterSec > 0) {
+                    AsyncWebServerResponse* res = req->beginResponse(503,
+                        "application/json",
+                        String("{\"error\":\"") + otaRejectReason
+                            + "\",\"retry_after\":"
+                            + String(otaRetryAfterSec) + "}");
+                    res->addHeader("Retry-After",
+                        String(otaRetryAfterSec));
+                    req->send(res);
+                } else {
+                    req->send(500, "text/plain", "Upload failed");
+                }
+            } else {
+                req->send(200, "text/plain", "OK");
+                if (_asyncOtaShouldReboot) {
+                    // Defer the actual ESP.restart() to the main loop —
+                    // see WBWebServer::loop. ~2 s after the flag is set
+                    // the loop calls ESP.restart(), giving AsyncTCP
+                    // time to flush this 200.
+                    webServer.requestReboot();
+                }
+            }
+        },
+        // uploadHandler — per-chunk. State (totalSize, error) lives
+        // file-static below; the otaInProgress guard ensures only one
+        // OTA is ever in flight so static is safe.
+        [](AsyncWebServerRequest* req, String filename,
+           size_t index, uint8_t* data, size_t len, bool final) {
+            if (index == 0) {
+                // ---- START ----
+                otaRetryAfterSec = 0;
+                otaRejectReason  = String();
+                _asyncOtaError = false;
+                _asyncOtaShouldReboot = false;
+                _asyncOtaTotalSize = 0;
+
+                // SECURITY: auth check BEFORE Update.begin() erases
+                // the partition. _checkAuth handles the 401 response;
+                // we just need to flag the error so the request
+                // handler stays quiet (AsyncWebServer requires the
+                // request handler to send something or the connection
+                // hangs; we send 500 in the error path below).
+                if (!_checkAuth(req)) {
+                    _asyncOtaError = true;
+                    return;
+                }
+                if (otaInProgress) {
+                    _asyncOtaError    = true;
+                    otaRetryAfterSec  = 10;
+                    otaRejectReason   = "another OTA already in progress";
+                    return;
+                }
+                String reason;
+                if (!wb_health::canAcceptOta(reason)) {
+                    _asyncOtaError    = true;
+                    otaRetryAfterSec  =
+                        (uint16_t)wb_health::otaRetryAfterSeconds();
+                    otaRejectReason   = reason;
+                    return;
+                }
+
+                Log.printf("[OTA-async] Upload start: %s\n",
+                    filename.c_str());
+                otaInProgress = true;
+
+                wallboxBLE.pause(5 * 60 * 1000);  // 5 min
+                wb_wdt::extendTo(60);  // erase can take >5 s
+
+                size_t expected = (size_t)req->contentLength();
+                expectedOtaSize = expected;
+
+                const esp_partition_t* partition =
+                    esp_ota_get_next_update_partition(NULL);
+                if (partition && expected > 0 &&
+                        expected > partition->size) {
+                    Log.printf("[OTA-async] REJECTED: payload (%u) "
+                               "larger than partition (%u)\n",
+                               (unsigned)expected,
+                               (unsigned)partition->size);
+                    _asyncOtaError = true;
+                    otaInProgress  = false;
+                    return;
+                }
+
+                bool ok = expected > 0
+                    ? Update.begin(expected)
+                    : Update.begin(UPDATE_SIZE_UNKNOWN);
+                if (!ok) {
+                    Log.printf("[OTA-async] Begin failed: %s\n",
+                        Update.errorString());
+                    _asyncOtaError = true;
+                    return;
+                }
+                if (req->hasHeader("X-Firmware-MD5")) {
+                    String md5 =
+                        req->getHeader("X-Firmware-MD5")->value();
+                    md5.trim();
+                    md5.toLowerCase();
+                    if (md5.length() == 32) {
+                        if (Update.setMD5(md5.c_str())) {
+                            Log.printf("[OTA-async] Expecting MD5 %s\n",
+                                md5.c_str());
+                        }
+                    }
+                }
+            }
+
+            if (!_asyncOtaError && len > 0) {
+                // ---- WRITE ----
+                if (_asyncOtaTotalSize == 0 && len > 0) {
+                    if (data[0] != 0xE9) {
+                        Log.println("[OTA-async] REJECTED: not ESP32 "
+                                    "firmware (magic byte != 0xE9)");
+                        Update.abort();
+                        _asyncOtaError = true;
+                        return;
+                    }
+                    Log.println("[OTA-async] Firmware magic byte OK");
+                }
+                if (Update.write(data, len) != len) {
+                    Log.printf("[OTA-async] Write failed: %s\n",
+                        Update.errorString());
+                    _asyncOtaError = true;
+                }
+                _asyncOtaTotalSize += len;
+            }
+
+            if (final) {
+                // ---- END ----
+                otaInProgress = false;
+                wb_wdt::restore();
+
+                if (!_asyncOtaError && expectedOtaSize > 0) {
+                    size_t diff = (_asyncOtaTotalSize < expectedOtaSize)
+                        ? expectedOtaSize - _asyncOtaTotalSize
+                        : _asyncOtaTotalSize - expectedOtaSize;
+                    if (diff > 256) {
+                        Log.printf("[OTA-async] TRUNCATED: expected ~%u "
+                                   "bytes, got %u — aborting\n",
+                                   (unsigned)expectedOtaSize,
+                                   (unsigned)_asyncOtaTotalSize);
+                        _asyncOtaError = true;
+                    }
+                }
+
+                if (_asyncOtaError) {
+                    Update.abort();
+                    if (otaRetryAfterSec > 0) {
+                        wb_ota_history::recordOta(millis() / 1000,
+                            WB_VERSION, _asyncOtaTotalSize, false,
+                            (String("rejected: ") + otaRejectReason).c_str());
+                    } else {
+                        wb_ota_history::recordOta(millis() / 1000,
+                            WB_VERSION, _asyncOtaTotalSize, false,
+                            "aborted");
+                    }
+                } else if (Update.end(true)) {
+                    Log.printf("[OTA-async] Success! %u bytes written\n",
+                        (unsigned)_asyncOtaTotalSize);
+                    wb_ota_history::recordOta(millis() / 1000,
+                        WB_VERSION, _asyncOtaTotalSize, true, "ok");
+                    wb_health::markOtaSuccess();
+                    _asyncOtaShouldReboot = true;
+                } else {
+                    Log.printf("[OTA-async] End failed: %s\n",
+                        Update.errorString());
+                    wb_ota_history::recordOta(millis() / 1000,
+                        WB_VERSION, _asyncOtaTotalSize, false,
+                        Update.errorString());
+                    _asyncOtaError = true;
+                }
+            }
+        }
+    );
+}
+
 void begin() {
     _registerReadOnlyRoutes();
     _registerStaticAndPostRoutes();
@@ -744,6 +986,7 @@ void begin() {
     _registerFormPostRoutes();
     _registerBleRoutes();
     _registerJsonBodyRoutes();
+    _registerOtaRoute();
     // ESPAsyncWebServer doesn't auto-respond 404 for unregistered
     // routes — without onNotFound() it falls through to a 500. Match
     // the sync server's behavior (the sync WebServer auto-404s).
