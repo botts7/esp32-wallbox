@@ -3,6 +3,9 @@
 #include "wb_log.h"
 #include "wb_version.h"
 #include "wb_health.h"
+#include "wb_diag.h"
+#include "wb_ota_history.h"
+#include "wb_ble.h"
 
 #if WB_ASYNC_WEB
 
@@ -17,6 +20,16 @@
 extern volatile uint32_t g_loopMaxMs;
 extern volatile int      g_webMaxReentry;
 int wb_web_tokens_remaining();
+
+// 3.0 task #78: JSON builders extracted from sync handlers in
+// wb_web.cpp so the async server emits IDENTICAL payloads without
+// duplicating the field lists. See those functions for the per-field
+// rationale (charger_sessions null encoding, cache-age semantics,
+// etc.).
+String wb_buildStatusJson();
+String wb_buildChargerJson();
+String wb_buildDiagRuntimeJson();
+String wb_buildBootHistoryJson();
 
 // Sync server's auth lockout state. Sharing it between sync and
 // async servers means a brute-forcer can't double their throughput
@@ -103,6 +116,111 @@ static void _registerReadOnlyRoutes() {
                     + WB_VERSION
                     + "\",\"server\":\"async\"}";
         req->send(200, "application/json", body);
+    });
+
+    // GET /api/status — large status snapshot for /info + the web UI's
+    // diag panel.
+    _async.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        req->send(200, "application/json", wb_buildStatusJson());
+    });
+
+    // GET /api/charger — cached status JSON for the dashboard. Never
+    // blocks on BLE; the cache is refreshed by the main task's BLE
+    // poll completion.
+    _async.on("/api/charger", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        req->send(200, "application/json", wb_buildChargerJson());
+    });
+
+    // GET /api/diag/disconnects — counters + NVS-persisted ring of
+    // BLE/MQTT/WiFi reconnect events.
+    _async.on("/api/diag/disconnects", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "application/json", wb_diag::toJson());
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
+    // GET /api/diag/runtime — heap + per-task stack high-water marks.
+    _async.on("/api/diag/runtime", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "application/json", wb_buildDiagRuntimeJson());
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
+    // GET /api/boot/history — last ~10 boot reasons.
+    _async.on("/api/boot/history", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "application/json", wb_buildBootHistoryJson());
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
+    // GET /api/ota/history — newest-first list of OTA attempts.
+    _async.on("/api/ota/history", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "application/json", wb_ota_history::toJson());
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
+    // GET /api/logs — last ~16 KB of serial / telnet output as plain
+    // text. Used by /logs page and external monitors.
+    _async.on("/api/logs", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        String body;
+        Log.copyBuffer(body);
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "text/plain; charset=utf-8", body);
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
+    // GET /api/command_status?id=N — poll endpoint for async BAPI
+    // requests enqueued via /api/command?wait=0. Returns:
+    //   200 + body  → response landed (consumed-on-read)
+    //   202         → still in flight or evicted but possibly tracked
+    //   410         → id was never issued by this gateway boot
+    //   400         → missing or zero id
+    // Same semantics as the sync handler in wb_web.cpp. Calls
+    // wallboxBLE.tryFetchResponse / peekNextReqId which are both
+    // already cross-task safe (mutex-protected response map + atomic
+    // _nextReqId per the 2.7.0 audit fix).
+    _async.on("/api/command_status", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        if (!req->hasParam("id")) {
+            req->send(400, "application/json", "{\"error\":\"missing id\"}");
+            return;
+        }
+        uint32_t reqId = (uint32_t)req->getParam("id")->value().toInt();
+        if (reqId == 0) {
+            req->send(400, "application/json", "{\"error\":\"invalid id\"}");
+            return;
+        }
+        String body;
+        if (wallboxBLE.tryFetchResponse(reqId, body) && body.length()) {
+            req->send(200, "application/json", body);
+            return;
+        }
+        uint32_t nextId = wallboxBLE.peekNextReqId();
+        if (reqId >= nextId) {
+            req->send(410, "application/json",
+                "{\"error\":\"unknown id — never issued\"}");
+            return;
+        }
+        String pending = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
+        req->send(202, "application/json", pending);
     });
 }
 

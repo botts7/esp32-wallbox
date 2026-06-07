@@ -624,7 +624,11 @@ static void handleWifiScan() {
     http.send(200, "application/json", json);
 }
 
-static void handleApiStatus() {
+// 3.0 task #78: extracted body of handleApiStatus(). Non-static so the
+// async server in wb_web_async.cpp can extern it and serve the SAME
+// JSON shape on its port without duplicating the field list. The
+// sync handler below is now a one-line trampoline.
+String wb_buildStatusJson() {
     String json = "{";
     json += "\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") + "\"";
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
@@ -670,7 +674,11 @@ static void handleApiStatus() {
     json += ",\"auth_enabled\":" + String(configMgr.get().authEnabled && configMgr.get().authPass.length() > 0 ? "true" : "false");
     json += ",\"sta_connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
     json += "}";
-    http.send(200, "application/json", json);
+    return json;
+}
+
+static void handleApiStatus() {
+    http.send(200, "application/json", wb_buildStatusJson());
 }
 
 static void handleBlePause() {
@@ -694,13 +702,46 @@ void WBWebServer::updateCache(const String& status, const String& realtime) {
     _cacheTime = millis();
 }
 
-static void handleApiCharger() {
+// 3.0 task #78: same extraction pattern as wb_buildStatusJson —
+// non-static so the async server can call it.
+String wb_buildChargerJson() {
     // Always return cached data instantly — never block on BLE
-    String json = "{\"status\":" + _cachedStatus +
-                  ",\"realtime\":" + _cachedRealtime +
-                  ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"" +
-                  ",\"cache_age\":" + String((millis() - _cacheTime) / 1000) + "}";
-    http.send(200, "application/json", json);
+    return "{\"status\":" + _cachedStatus +
+           ",\"realtime\":" + _cachedRealtime +
+           ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"" +
+           ",\"cache_age\":" + String((millis() - _cacheTime) / 1000) + "}";
+}
+
+static void handleApiCharger() {
+    http.send(200, "application/json", wb_buildChargerJson());
+}
+
+// 3.0 task #78: builders extracted from /api/diag/runtime and
+// /api/boot/history inline lambdas. Same shape as the sync
+// handlers' bodies — the async server in wb_web_async.cpp calls
+// these to emit identical payloads.
+String wb_buildDiagRuntimeJson() {
+    String body = "{";
+    body += "\"heap_free\":" + String(ESP.getFreeHeap());
+    body += ",\"heap_min_ever\":" + String(ESP.getMinFreeHeap());
+    body += ",\"heap_max_alloc\":" + String(ESP.getMaxAllocHeap());
+    body += ",\"psram_free\":" + String(ESP.getFreePsram());
+    body += ",\"main_stack_hwm\":" + String(uxTaskGetStackHighWaterMark(NULL));
+    body += ",\"ble_stack_hwm\":";
+    TaskHandle_t ble = xTaskGetHandle("wb_ble");
+    body += ble ? String(uxTaskGetStackHighWaterMark(ble)) : String("null");
+    body += ",\"loop_stack_hwm\":";
+    TaskHandle_t arduinoLoop = xTaskGetHandle("loopTask");
+    body += arduinoLoop ? String(uxTaskGetStackHighWaterMark(arduinoLoop)) : String("null");
+    body += ",\"uptime_s\":" + String(millis() / 1000);
+    body += "}";
+    return body;
+}
+
+String wb_buildBootHistoryJson() {
+    return "{\"current\":\"" + String(wb_health::currentBootReasonStr())
+         + "\",\"current_fw\":\"" + String(WB_VERSION)
+         + "\",\"history\":" + wb_health::bootHistoryJson() + "}";
 }
 
 // Inflight counter for the `?sync=1` escape hatch only. Async
@@ -3147,22 +3188,8 @@ static void registerRoutes() {
     // preceded a panic (the panic itself doesn't tell us that).
     http.on("/api/diag/runtime", []() {
         if (!checkAuth()) return;
-        String body = "{";
-        body += "\"heap_free\":" + String(ESP.getFreeHeap());
-        body += ",\"heap_min_ever\":" + String(ESP.getMinFreeHeap());
-        body += ",\"heap_max_alloc\":" + String(ESP.getMaxAllocHeap());
-        body += ",\"psram_free\":" + String(ESP.getFreePsram());
-        body += ",\"main_stack_hwm\":" + String(uxTaskGetStackHighWaterMark(NULL));
-        body += ",\"ble_stack_hwm\":";
-        TaskHandle_t ble = xTaskGetHandle("wb_ble");
-        body += ble ? String(uxTaskGetStackHighWaterMark(ble)) : String("null");
-        body += ",\"loop_stack_hwm\":";
-        TaskHandle_t arduinoLoop = xTaskGetHandle("loopTask");
-        body += arduinoLoop ? String(uxTaskGetStackHighWaterMark(arduinoLoop)) : String("null");
-        body += ",\"uptime_s\":" + String(millis() / 1000);
-        body += "}";
         http.sendHeader("Cache-Control", "no-store");
-        http.send(200, "application/json", body);
+        http.send(200, "application/json", wb_buildDiagRuntimeJson());
     });
     // /api/boot/history — last ~10 boot reasons (newest first).
     // Lets us see WHY the gateway rebooted (panic / WDT / power-on / etc).
@@ -3171,12 +3198,8 @@ static void registerRoutes() {
         http.sendHeader("Cache-Control", "no-store");
         // current_fw lets /info's badge count "bad boots on THIS firmware"
         // instead of including pre-upgrade dev-testing panics still in
-        // the NVS ring. Entries without a `fw` field are treated as
-        // "prior firmware" by the client.
-        String body = "{\"current\":\"" + String(wb_health::currentBootReasonStr())
-                    + "\",\"current_fw\":\"" + String(WB_VERSION)
-                    + "\",\"history\":" + wb_health::bootHistoryJson() + "}";
-        http.send(200, "application/json", body);
+        // the NVS ring.
+        http.send(200, "application/json", wb_buildBootHistoryJson());
     });
     // /api/diag/disconnects — counters + recent BLE/MQTT reconnect events
     http.on("/api/diag/disconnects", []() {
