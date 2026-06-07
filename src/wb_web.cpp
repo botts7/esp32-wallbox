@@ -1717,15 +1717,52 @@ function saveSch(){
   var mcr=parseInt(document.getElementById('sc').value);
   var ekwh=parseInt(document.getElementById('se2').value)||0;
   var tgt=ekwh>0?{type:1,value:ekwh*1000}:{type:0,value:0};
-  var sid;
-  if(editingSid!==null){sid=editingSid}else{var maxSid=allSchedules.length?Math.max.apply(null,allSchedules.map(function(s){return s.sid})):-1;sid=maxSid+1}
-  var p=JSON.stringify({sid:sid,start:st,stop:sp,days:d,enabled:parseInt(document.getElementById('sn').value),mcr:mcr,repeat:1,type:0,name:'',target:tgt});
+  var en=parseInt(document.getElementById('sn').value);
+  // BAPI w_sch is INSERT-only on the charger side. Updating an
+  // existing sid returns {"error":{code:1,message:"Unexpected
+  // Error"}} silently or (with ulid present) hangs for >8s and
+  // never persists. Mirror doDeleteSchedule's approach: for edits,
+  // clr_sch all schedules and then re-write the full list with
+  // the modified one in place. New schedules still hit w_sch
+  // directly with a fresh sid.
+  if(editingSid!==null){
+    var idx=allSchedules.findIndex(function(s){return s.sid===editingSid});
+    if(idx<0){toast('Schedule not found','error');return}
+    var updated=allSchedules.slice();
+    updated[idx]=Object.assign({},updated[idx],{start:st,stop:sp,days:d,enabled:en,mcr:mcr,target:tgt});
+    toast('Saving...','info');
+    fetch('/api/command?action=bapi&met=clr_sch&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(c){
+      // ABORT if clr_sch reported an error. If clr_sch SUCCEEDED
+      // (charger actually cleared) but the subsequent w_sch writes
+      // fail, the user loses every schedule with no recovery. The
+      // charger's BAPI sometimes returns both {error:...} and
+      // {r:N} together; treat any error field as a hard stop.
+      if(c&&c.error){toast(c.error,'error');loadSchedules();return}
+      var i=0;
+      function next(){
+        if(i>=updated.length){toast('Schedule #'+editingSid+' updated','success');cancelEdit();loadSchedules();return}
+        var s=updated[i++];
+        var p=JSON.stringify({sid:i-1,start:s.start,stop:s.stop,days:s.days,enabled:s.enabled,mcr:s.mcr,repeat:s.repeat||1,type:s.type||0,name:s.name||'',target:s.target||{type:0,value:0}});
+        fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+          if(r.error){toast(r.error,'error');loadSchedules();return}
+          next();
+        }).catch(function(e){toast('Error: '+(e.message||e),'error');loadSchedules()});
+      }
+      next();
+    }).catch(function(e){toast('Error: '+(e.message||e),'error');loadSchedules()});
+    return;
+  }
+  // New schedule — fresh sid, direct w_sch.
+  var maxSid=allSchedules.length?Math.max.apply(null,allSchedules.map(function(s){return s.sid})):-1;
+  var sid=maxSid+1;
+  var p=JSON.stringify({sid:sid,start:st,stop:sp,days:d,enabled:en,mcr:mcr,repeat:1,type:0,name:'',target:tgt});
   toast('Saving...','info');
   fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){
     if(d.error){toast(d.error,'error');return}
-    toast(editingSid!==null?'Schedule #'+sid+' updated':'Schedule added','success');
+    toast('Schedule added','success');
     cancelEdit();
-    loadSchedules();  }).catch(function(e){toast('Error: '+e.message,'error')});
+    loadSchedules();
+  }).catch(function(e){toast('Error: '+(e.message||e),'error')});
 }
 function deleteSchedule(sid){
   confirm2('Delete schedule #'+sid+'?',function(){doDeleteSchedule(sid)});
@@ -1733,13 +1770,19 @@ function deleteSchedule(sid){
 function doDeleteSchedule(sid){
   var keep=allSchedules.filter(function(s){return s.sid!==sid});
   toast('Deleting schedule #'+sid+'...','info');
-  fetch('/api/command?action=bapi&met=clr_sch&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(){
+  fetch('/api/command?action=bapi&met=clr_sch&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(c){
+    // Abort if clr_sch errored — if the clear succeeded but the
+    // restore writes fail, user loses all schedules.
+    if(c&&c.error){toast(c.error,'error');loadSchedules();return}
     var i=0;
     function next(){
       if(i>=keep.length){toast('Deleted','success');loadSchedules();return}
       var s=keep[i++];
       var p=JSON.stringify({sid:i-1,start:s.start,stop:s.stop,days:s.days,enabled:s.enabled,mcr:s.mcr,repeat:s.repeat||1,type:s.type||0,name:s.name||'',target:s.target||{type:0,value:0}});
-      fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(next).catch(next);
+      fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+        if(r&&r.error){toast(r.error,'error');loadSchedules();return}
+        next();
+      }).catch(function(e){toast('Error: '+(e.message||e),'error');loadSchedules()});
     }
     next();
   }).catch(function(e){toast('Error: '+e.message,'error');loadSchedules()});
