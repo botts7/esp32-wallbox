@@ -4,6 +4,108 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.0.0] - 2026-06-07
+
+The platform release. Three changes worth a major-version bump:
+
+1. **AsyncWebServer everywhere.** The whole HTTP surface migrated
+   from the bundled Arduino `WebServer` to `mathieucarbou/ESPAsyncWebServer@3.6.0`
+   over ten staged steps (A–J). The sync server has been fully
+   retired in STA mode; AP mode still uses the sync path as a
+   bring-up fallback.
+2. **WebSocket pushes for live state.** No more 1 Hz HTTP polling
+   from the dashboard. The browser receives `r_sta`, `r_dca`, settings
+   merges, and BLE health pushes over `ws://host/ws` (attached to the
+   same listener as HTTP — no separate TCP port).
+3. **First-class HA integration story.** Companion HA Add-on
+   (dashboard + OTA upload) and native HA Integration (sensors +
+   controls) ship alongside this firmware as their own repos. MQTT
+   discovery continues to work unchanged for users who already have a
+   broker — the new paths are for everyone else.
+
+### Added
+
+- **Async HTTP layer** built on ESPAsyncWebServer + AsyncTCP.
+  `WB_ASYNC_WEB` build flag was the staging switch during migration;
+  both paths build clean, async is the default in `feature/3.0`.
+- **AsyncWebSocket push channel** at `ws://host/ws`. Frame envelope
+  is `{"t":"<type>","d":<payload>}`. Types: `status` (r_sta),
+  `meter` (r_dca), `settings` (merged poll), `ble`
+  (`{state, rssi, last_activity_s}`).
+- **New `/api/command` query parameters** to control sync vs async
+  for BAPI calls (`?wait=N`, `?wait=0` for pure async, `?sync=1`
+  for legacy blocking behaviour). Pairs with the existing
+  `/api/command_status?id=N` poll endpoint from 2.7.0.
+- **Power-flow card** on the dashboard. Animated Grid → Charger → EV
+  flow with battery indicator and current-direction arrows. Matches
+  the Wallbox app's visual language.
+- **One-tap pause/play per schedule row.** Toggle a single schedule
+  without opening the editor.
+- **Hourly Wtime auto-sync.** Gateway pushes the charger's clock from
+  its own NTP source every hour, so the charger never drifts more
+  than ~60 minutes from real time.
+- **Proactive BLE pairing on connect.** Reduces the "first command
+  fails on cold connect" window.
+
+### Fixed
+
+- **Schedule writes** were silently broken since v2.1.0 — the BAPI
+  shape diverged from what newer firmware expects. Now uses `s_sch`
+  with integer `start`/`stop`, the `par.schedules[]` wrapper, and
+  the bit-array `days` field. Schedules created from the dashboard
+  round-trip correctly.
+- **`s_alo` and `s_ecos` BAPI write shapes** for fw 6.11.x. Auto-lock
+  now uses the bare-integer seconds shape; Eco-Smart uses the
+  `{ese, esm, esp}` object shape with `esp` preserved across mode
+  changes.
+- **Charger-timezone conversion** in `saveSch`/`loadSchedules`. The
+  old `Date.toLocaleString` round-trip mis-applied the offset on DST
+  boundaries; replaced with `Intl.DateTimeFormat.formatToParts()`
+  driven `tzOffsetMinutes`/`localToUtc`/`utcToLocal` helpers.
+- **`[object Object]` toast** on schedule save failure — the BAPI
+  error envelope is a structured object, not a string. `toast()`
+  hardened to render the `.message` field with a JSON fallback for
+  unknown shapes.
+- **`/style.css` and `/app.js` 404s** after the port swap (task #78
+  step J). Both routes had been missed in the step C migration —
+  hotfix extracted the literals into shared `wb_getStyleCssLiteral()`
+  / `wb_getAppJsLiteral()` accessors callable from both async and
+  sync handlers.
+- **WebSocket port collisions** during migration. The legacy
+  links2004 server briefly ran on `:81` (collided with sync HTTP
+  after the swap), then `:82`, then migrated to AsyncWebSocket on
+  `:80/ws`.
+- **Schedule save/delete robustness** — `delSch`'s clear-then-write
+  loop now aborts on `clr_sch` errors instead of forging ahead and
+  writing into an unknown schedule slot. Edit-mode no longer
+  duplicates the slot id.
+
+### Changed
+
+- **Sync `WebServer` retired in STA mode.** `beginSTA()` no longer
+  starts it; `loop()` only pumps `http.handleClient()` while in AP
+  mode (provisioning). Async serves everything else.
+- **Schedule load handler** uses the longer 20 s retry timeout on
+  the second attempt (up from 15 s on the first), since the BLE
+  task can be saturated in the seconds immediately after a write.
+- Table-driven HA MQTT discovery moved from the per-call hand-rolled
+  topic builders to the topic table introduced in task #77.
+
+### Removed
+
+- `links2004/WebSockets@^2.4.1` dependency — replaced by
+  `AsyncWebSocket` inside ESPAsyncWebServer. One fewer TCP listener,
+  one fewer library to track for security advisories.
+
+### Compatibility
+
+- ESP32-S3 only. No Arduino-IDE board variant changes.
+- Companion repos:
+  [`wallbox-gateway-ha-addon`](https://github.com/botts7/wallbox-gateway-ha-addon)
+  v0.2.0 and
+  [`hass-wallbox-gateway`](https://github.com/botts7/hass-wallbox-gateway)
+  v0.2.0 ship as part of this milestone.
+
 ## [2.7.0] - 2026-06-06
 
 The main-loop blocker pass. HA automations no longer freeze
