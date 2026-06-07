@@ -16,6 +16,7 @@
 #include <esp_task_wdt.h>  // TWDT feed during long xTaskNotifyWait slices
 #include "_gen_settings_body_gz.h"  // pre-gzipped /settings body (task #75)
 #include "wb_health.h"     // OTA admission guard (step I)
+#include "wb_ws.h"         // AsyncWebSocket handler (#82 migration)
 #include "wb_watchdog.h"   // wb_wdt::extendTo/restore for OTA flash erase
 #include "wb_ota_history.h" // recordOta() for the OTA history badge
 #include "wb_version.h"    // WB_VERSION for OTA history records
@@ -1038,6 +1039,12 @@ void begin() {
     _registerBleRoutes();
     _registerJsonBodyRoutes();
     _registerOtaRoute();
+    // 3.0 task #82: register the AsyncWebSocket handler so /ws lives
+    // on the same port (:80) as everything else. wbws::begin() is
+    // called from main.cpp's setup() to wire the onEvent callback;
+    // here we just plumb the handler into the async webserver before
+    // starting it.
+    _async.addHandler(&wbws::handler());
     // ESPAsyncWebServer doesn't auto-respond 404 for unregistered
     // routes — without onNotFound() it falls through to a 500. Match
     // the sync server's behavior (the sync WebServer auto-404s).
