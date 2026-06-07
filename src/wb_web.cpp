@@ -1714,7 +1714,11 @@ function loadSchedules(_retry){
       var lim=(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A';
       var ek=(s.target&&s.target.type==1)?(s.target.value/1000)+' kWh':'';
       var badge=s.enabled?'<span class=\"badge badge-success\">On</span>':'<span class=\"badge badge-warning\">Off</span>';
-      html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" \u2013 "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" \u00B7 "+lim+(ek?' \u00B7 '+ek:'')+" \u00B7 #"+s.sid+"</div></div><div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>\u270E</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>\u2716</button></div></div></div>";
+      // Toggle icon: pause when On (one tap to disable), play when Off
+      var togIcon=s.enabled?'\u23F8':'\u25B6';
+      var togColor=s.enabled?'var(--warning)':'var(--success)';
+      var togTitle=s.enabled?'Pause this schedule':'Resume this schedule';
+      html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" \u2013 "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" \u00B7 "+lim+(ek?' \u00B7 '+ek:'')+" \u00B7 #"+s.sid+"</div></div><div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' title='"+togTitle+"' style='padding:6px 10px;font-size:.85em;color:"+togColor+"' onclick='toggleSchedule("+s.sid+")'>"+togIcon+"</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>\u270E</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>\u2716</button></div></div></div>";
     });
     l.innerHTML=html;
   }).catch(function(e){
@@ -1733,6 +1737,23 @@ function newSchedule(){
   document.getElementById('sn').value='1';
   document.getElementById('sched-edit').style.display='block';
   document.getElementById('sched-edit').scrollIntoView({behavior:'smooth',block:'start'});
+}
+// One-tap toggle for a schedule's enabled flag (the ⏸/▶ button in
+// the row). Builds the same s_sch payload saveSch would but only
+// flips the `enabled` bit and re-uses the existing times / days /
+// limits so the user doesn't have to open the edit form.
+function toggleSchedule(sid){
+  var s=allSchedules.find(function(x){return x.sid===sid});
+  if(!s){toast('Schedule not found','error');return}
+  var newEn=s.enabled?0:1;
+  var entry=buildSchEntry(sid,s.start,s.stop,s.days,newEn,s.mcr,s.type||0,s.target,s.repeat||1);
+  var verb=newEn?'resumed':'paused';
+  toast(newEn?'Resuming...':'Pausing...','info');
+  fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(JSON.stringify({schedules:[entry]})),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+    if(r&&r.error){toast(r.error,'error');return}
+    toast('Schedule #'+sid+' '+verb,'success');
+    loadSchedules();
+  }).catch(function(e){toast('Error: '+(e.message||e),'error')});
 }
 function editSchedule(sid){
   var s=allSchedules.find(function(x){return x.sid===sid});
