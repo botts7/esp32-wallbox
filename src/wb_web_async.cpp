@@ -87,7 +87,12 @@ namespace wb_web_async {
 // Async-server instance. Port 8081 during migration; will move to
 // port 80 when all 40 sync routes have been migrated and the legacy
 // sync server is retired.
-static AsyncWebServer _async(8081);
+// 3.0 task #78 step J — port swap. Async is now the production
+// server on port 80. The sync WebServer in wb_web.cpp moved to
+// port 81 as a fallback during 3.0 testing; once the async path
+// has been exercised across both botts7+peter-mcc rigs the sync
+// server retires entirely (next commit's territory).
+static AsyncWebServer _async(80);
 
 // --- Auth helper ---
 //
@@ -994,7 +999,7 @@ void begin() {
         req->send(404, "text/plain", "Not Found");
     });
     _async.begin();
-    Log.println("[Web-async] Listening on :8081 (migration coexistence)");
+    Log.println("[Web-async] Listening on :80 (production, post port-swap)");
 }
 
 }  // namespace wb_web_async

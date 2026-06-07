@@ -30,7 +30,14 @@ struct ImportResult { int status; String body; bool reboot; };
 ImportResult wb_applyConfigImport(const String& jsonBody);
 WBWebServer webServer;
 
-static WebServer http(80);
+// 3.0 task #78 step J — port swap. The legacy sync server moves
+// from 80 to 81 in STA mode (fallback), while async takes over
+// port 80 in wb_web_async.cpp. In AP mode the async server is
+// never started (no STA WiFi for it to bind to) so the sync
+// server must keep port 80 — otherwise the captive portal can't
+// be reached. Port is therefore set at begin() time per mode,
+// not at construction.
+static WebServer http;
 static DNSServer dns;
 static const char* AP_SSID = "WallboxGW-Setup";
 static const char* AP_PASS = "wallbox123";
@@ -3427,8 +3434,10 @@ void WBWebServer::beginAP() {
     http.on("/settings", handleSettings);
     http.on("/info", handleInfo);
     http.onNotFound(handleNotFound);
-    http.begin();
-    Log.println("[Web] AP captive portal ready");
+    // AP mode keeps the sync server on port 80 so the OS captive-
+    // portal probe (always on the standard HTTP port) can find it.
+    http.begin(80);
+    Log.println("[Web] AP captive portal ready on :80");
 }
 
 void WBWebServer::beginSTA() {
@@ -3438,8 +3447,13 @@ void WBWebServer::beginSTA() {
     http.on("/config", handleConfig);
     http.on("/settings", handleSettings);
     http.on("/info", handleInfo);
-    http.begin();
-    Log.printf("[Web] http://%s/ (dashboard)\n", WiFi.localIP().toString().c_str());
+    http.begin(81);
+    // Post step J port swap: async owns port 80 (the URL users
+    // actually bookmark); sync is the :81 fallback. Once the
+    // async server has been exercised across both botts7+peter-mcc
+    // rigs, the sync server retires entirely.
+    Log.printf("[Web] http://%s:81/ (sync fallback — async is on :80)\n",
+        WiFi.localIP().toString().c_str());
 }
 
 void WBWebServer::loop() {
