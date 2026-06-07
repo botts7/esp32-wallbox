@@ -7,11 +7,13 @@
 #include "wb_ota_history.h"
 #include "wb_ble.h"
 #include "wb_web.h"  // for webServer.requestReboot()
+#include "bapi.h"     // for MET_* constants used in /api/command
 
 #if WB_ASYNC_WEB
 
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
+#include <esp_task_wdt.h>  // TWDT feed during long xTaskNotifyWait slices
 #include <WiFi.h>
 #include <functional>
 
@@ -42,6 +44,11 @@ String wb_buildLogsPage();
 // Form-POST helpers (3.0 task #78 step E):
 String wb_applySaveForm(std::function<String(const char*)> getArg);
 String wb_applyResetAndPage();
+// BLE-passthrough helpers (3.0 task #78 step F):
+String wb_runBleScan();
+struct ScanResult { int status; String body; };
+ScanResult wb_runWifiScan();
+bool tbAllow();
 
 // Sync server's auth lockout state. Sharing it between sync and
 // async servers means a brute-forcer can't double their throughput
@@ -474,11 +481,175 @@ static void _registerFormPostRoutes() {
     });
 }
 
+// =====================================================================
+// BLE-passthrough routes — the architectural reason for this whole
+// migration. /api/command in particular is the route that 2.7.0's
+// chunked-wait pump (step 9c) was working around. Running on
+// AsyncTCP gives us a separate-from-main-loop execution context;
+// xTaskNotifyWait here doesn't block the main task, doesn't need the
+// pump.
+//
+// Trade-off: blocking AsyncTCP for the BAPI wait queues OTHER async
+// requests behind it. AsyncTCP processes requests serially. During
+// the migration window this is fine — most clients hit sync on port
+// 80; after retiring sync, we'll revisit (deferred-response via SSE
+// or req->_tempObject + cross-task wake from BLE drain).
+//
+// /api/ble-scan and /api/wifi-scan are similar — they block AsyncTCP
+// for ~5-8 s but that's the same time the sync server blocks on its
+// own task. No regression.
+// =====================================================================
+
+static void _registerBleRoutes() {
+
+    // GET /api/ble-scan — kicks off an 8 s BLE scan, returns devices
+    // as JSON. Blocking call on AsyncTCP task.
+    _async.on("/api/ble-scan", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "application/json", wb_runBleScan());
+    });
+
+    // GET /api/wifi-scan — kicks off a WiFi scan (~5 s).
+    // Async server always runs in STA mode (started by wb_web_async::
+    // begin() only when WiFi is up), so the AP-bypass branch from the
+    // sync handler isn't applicable here — always auth-gate.
+    _async.on("/api/wifi-scan", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        ScanResult r = wb_runWifiScan();
+        req->send(r.status, "application/json", r.body);
+    });
+
+    // GET /api/command — the BAPI passthrough. Mirrors the sync
+    // handler logic except:
+    //   - No `?sync=1` escape hatch (deprecated, sync server still
+    //     hosts it for legacy callers).
+    //   - No chunked-pump (AsyncTCP task isn't shared with main loop,
+    //     so blocking here doesn't starve MQTT/WS).
+    //   - Single xTaskNotifyWait with the full waitMs timeout.
+    _async.on("/api/command", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        if (!wallboxBLE.isConnected()) {
+            req->send(503, "application/json",
+                "{\"error\":\"BLE not connected\"}");
+            return;
+        }
+        if (!tbAllow()) {
+            AsyncWebServerResponse* res = req->beginResponse(429,
+                "application/json",
+                "{\"error\":\"rate_limited\",\"retry\":true}");
+            res->addHeader("Retry-After", "1");
+            req->send(res);
+            return;
+        }
+        // ?wait=N: 0..8000 default 5000. Same clamp as sync.
+        int waitMs = 5000;
+        if (req->hasParam("wait")) {
+            waitMs = req->getParam("wait")->value().toInt();
+            if (waitMs < 0) waitMs = 0;
+            if (waitMs > 8000) waitMs = 8000;
+        }
+
+        // Resolve action -> met + par.
+        String action = req->hasParam("action")
+            ? req->getParam("action")->value() : String("");
+        String value = req->hasParam("value")
+            ? req->getParam("value")->value() : String("");
+        const char* met = nullptr;
+        String par;
+        if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
+        else if (action == "stop")    { met = bapi::MET_START_STOP;  par = "2"; }
+        else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
+        else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
+        else if (action == "current") { met = bapi::MET_SET_CURRENT; par = value; }
+        else if (action == "reboot")  { met = bapi::MET_REBOOT;      par = "null"; }
+        else if (action == "bapi") {
+            // Use a per-request String for the met arg so its c_str()
+            // outlives the lookup below. The static trick from sync
+            // handler isn't safe across AsyncTCP requests.
+            String userMet = req->hasParam("met")
+                ? req->getParam("met")->value() : String("");
+            if (userMet.length() == 0) {
+                req->send(400, "application/json",
+                    "{\"error\":\"missing met\"}");
+                return;
+            }
+            // Stash on the request's tempObject for the lifetime of
+            // the handler. We dispose at the bottom.
+            String* metStorage = new String(userMet);
+            met = metStorage->c_str();
+            par = req->hasParam("par")
+                ? req->getParam("par")->value() : String("null");
+            if (par.isEmpty()) par = "null";
+            // We'll delete this at end of handler — see below.
+            req->onDisconnect([metStorage]() { delete metStorage; });
+        } else {
+            req->send(400, "application/json",
+                "{\"error\":\"unknown action\"}");
+            return;
+        }
+
+        // Async path. Enqueue with WAKE_AND_MQTT so a missed wake
+        // still publishes to wallbox/response/<met> for polling.
+        TaskHandle_t self = xTaskGetCurrentTaskHandle();
+        xTaskNotifyStateClear(self);
+        uint32_t bapiTimeout = (waitMs > 0)
+            ? ((uint32_t)waitMs + 250) : 0;
+        uint32_t reqId = wallboxBLE.enqueueRequest(
+            met, par.c_str(),
+            WallboxBLE::ReplyMode::WAKE_AND_MQTT, self, bapiTimeout);
+        if (reqId == 0) {
+            AsyncWebServerResponse* res = req->beginResponse(503,
+                "application/json", "{\"error\":\"busy\",\"retry\":true}");
+            res->addHeader("Retry-After", "1");
+            req->send(res);
+            return;
+        }
+
+        if (waitMs == 0) {
+            // Pure async — return 202 + id immediately.
+            String body = "{\"id\":" + String(reqId)
+                        + ",\"status\":\"pending\"}";
+            req->send(202, "application/json", body);
+            return;
+        }
+
+        // Block AsyncTCP task on the per-request notify. Sliced to
+        // 2-second chunks so we can feed the TWDT between slices.
+        // The AsyncTCP task is subscribed to the task watchdog (5s
+        // default) — a single waitMs up to 8000ms would trip it.
+        // esp_task_wdt_reset() is a no-op if this task isn't
+        // subscribed, so the call is safe either way.
+        uint32_t notified = 0;
+        BaseType_t got = pdFALSE;
+        uint32_t remaining = (uint32_t)waitMs;
+        while (remaining > 0) {
+            uint32_t slice = remaining > 2000 ? 2000 : remaining;
+            got = xTaskNotifyWait(0, ULONG_MAX, &notified,
+                                  pdMS_TO_TICKS(slice));
+            if (got == pdTRUE) break;
+            remaining -= slice;
+            esp_task_wdt_reset();
+        }
+        if (got == pdTRUE) {
+            String resp;
+            if (wallboxBLE.tryFetchResponse(reqId, resp) && resp.length()) {
+                req->send(200, "application/json", resp);
+                return;
+            }
+        }
+        // Deadline elapsed or notify race lost. Same fallback as sync:
+        // BLE task will still complete and publish to MQTT; the caller
+        // can poll /api/command_status?id=N.
+        String body = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
+        req->send(202, "application/json", body);
+    });
+}
+
 void begin() {
     _registerReadOnlyRoutes();
     _registerStaticAndPostRoutes();
     _registerHtmlPages();
     _registerFormPostRoutes();
+    _registerBleRoutes();
     // ESPAsyncWebServer doesn't auto-respond 404 for unregistered
     // routes — without onNotFound() it falls through to a 500. Match
     // the sync server's behavior (the sync WebServer auto-404s).

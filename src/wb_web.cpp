@@ -565,13 +565,19 @@ static String htmlFoot(const char* activePath) {
 
 // ========== API endpoints ==========
 
-static void handleBleScan() {
-    // Don't scan if BLE is actively connecting — causes conflicts
+// 3.0 task #78: extracted BLE scan body. Both servers call this and
+// then ->send() the result.
+//
+// BLOCKS for ~8 seconds while the NimBLE scan runs. On sync server
+// that blocks the main loop. On async server that blocks the
+// AsyncTCP task (other async requests queue behind it). Acceptable
+// in both cases — BLE scan is a manual user action initiated from
+// the Config page during pairing.
+String wb_runBleScan() {
     if (wallboxBLE.state() == WallboxBLE::State::CONNECTING ||
         wallboxBLE.state() == WallboxBLE::State::AUTHENTICATING) {
         Log.println("[BLE-Scan] requested via web UI, but BLE is busy — refused");
-        http.send(200, "application/json", "{\"devices\":[],\"busy\":true}");
-        return;
+        return "{\"devices\":[],\"busy\":true}";
     }
     Log.println("[BLE-Scan] requested via web UI, starting 8s scan...");
     NimBLEScan* scan = NimBLEDevice::getScan();
@@ -598,14 +604,22 @@ static void handleBleScan() {
         json += "{\"addr\":\"" + addr + "\",\"name\":\"" + name + "\",\"rssi\":" + String(rssi) + ",\"is_wallbox\":" + (isWB ? "true" : "false") + "}";
     }
     json += "]}";
-    http.send(200, "application/json", json);
+    return json;
 }
 
-static void handleWifiScan() {
-    // Auth not required in AP mode (otherwise users can't pick a WiFi
-    // during initial setup). When in STA mode (already connected),
-    // require auth to avoid leaking nearby SSIDs to anyone on the LAN.
-    if (WiFi.getMode() != WIFI_AP && !checkAuth()) return;
+static void handleBleScan() {
+    http.send(200, "application/json", wb_runBleScan());
+}
+
+// 3.0 task #78: extracted WiFi scan body. Auth check is the
+// caller's responsibility (the AP-vs-STA decision happens at the
+// route layer — async server runs in STA only so it always
+// auth-gates; sync server keeps the AP-mode bypass).
+//
+// Returns (status_code, body). Status is 200 on success, 500 on
+// scan failure. BLOCKS for ~5 s on the scan call.
+struct ScanResult { int status; String body; };
+ScanResult wb_runWifiScan() {
     // Ensure STA is enabled for scanning (AP-only mode can't scan)
     wifi_mode_t mode = WiFi.getMode();
     if (mode == WIFI_AP) WiFi.mode(WIFI_AP_STA);
@@ -615,8 +629,7 @@ static void handleWifiScan() {
     int n = WiFi.scanNetworks(false, true, false, 400);
     if (n < 0) {
         Log.printf("[WiFi-Scan] failed (code %d)\n", n);
-        http.send(500, "application/json", "{\"error\":\"scan failed\",\"code\":" + String(n) + "}");
-        return;
+        return { 500, "{\"error\":\"scan failed\",\"code\":" + String(n) + "}" };
     }
     Log.printf("[WiFi-Scan] complete: %d network(s) found\n", n);
     String json = "{\"networks\":[";
@@ -626,13 +639,21 @@ static void handleWifiScan() {
         if (ssid.length() == 0) continue;  // hidden networks
         if (!first) json += ",";
         first = false;
-        // Escape quotes in SSID
         String s = ssid; s.replace("\\", "\\\\"); s.replace("\"", "\\\"");
         json += "{\"ssid\":\"" + s + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
     }
     json += "]}";
     WiFi.scanDelete();
-    http.send(200, "application/json", json);
+    return { 200, json };
+}
+
+static void handleWifiScan() {
+    // Auth not required in AP mode (otherwise users can't pick a WiFi
+    // during initial setup). When in STA mode (already connected),
+    // require auth to avoid leaking nearby SSIDs to anyone on the LAN.
+    if (WiFi.getMode() != WIFI_AP && !checkAuth()) return;
+    ScanResult r = wb_runWifiScan();
+    http.send(r.status, "application/json", r.body);
 }
 
 // 3.0 task #78: extracted body of handleApiStatus(). Non-static so the
@@ -798,7 +819,11 @@ static const float TB_REFILL = 2.0f;   // tokens per second
 static float       _tbTokens = TB_CAP;
 static uint32_t    _tbLastMs = 0;
 
-static bool tbAllow() {
+// 3.0 task #78: non-static so wb_web_async.cpp can call into the
+// same token bucket — sharing the rate limit between sync and async
+// servers keeps a flooder from doubling their throughput by
+// alternating ports.
+bool tbAllow() {
     uint32_t now = millis();
     if (_tbLastMs == 0) _tbLastMs = now;
     _tbTokens += (now - _tbLastMs) * (TB_REFILL / 1000.0f);

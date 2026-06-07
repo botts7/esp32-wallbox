@@ -266,7 +266,9 @@ private:
     String _chrUUID;          // write characteristic (also notify in single-char mode)
     String _txChrUUID;        // optional separate notify characteristic (Pulsar Plus)
     NimBLEAddress _foundAddr;
-    State _state = State::DISCONNECTED;
+    // volatile: written by BLE task (core 1), read by AsyncTCP task (core 0)
+    // via isConnected(). Without this the compiler may cache the read.
+    volatile State _state = State::DISCONNECTED;
     bool _pinRequired = false;
 
     // Response handling
