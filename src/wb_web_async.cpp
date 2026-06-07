@@ -24,6 +24,13 @@
 #include <WiFi.h>
 #include <functional>
 
+// File-scope (global namespace) externs for the shared CSS/JS
+// literals defined in wb_web.cpp. MUST live outside namespace
+// wb_web_async — otherwise the linker mangles them as
+// wb_web_async::wb_getStyleCssLiteral() and fails to resolve.
+extern const char* wb_getStyleCssLiteral();
+extern const char* wb_getAppJsLiteral();
+
 // Forward declarations of state exposed by sync wb_web.cpp that the
 // async handlers need to read. Defined in wb_web.cpp (the `static`
 // qualifier was dropped on the auth-lockout vars so the linker can
@@ -338,6 +345,29 @@ static void _registerStaticAndPostRoutes() {
     // GET /favicon.ico — return 204. Same as sync.
     _async.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(204);
+    });
+
+    // GET /style.css — shared dashboard stylesheet. The literal lives
+    // in wb_web.cpp behind ::wb_getStyleCssLiteral(); same
+    // Cache-Control header as the sync handler (immutable / 1 year
+    // — URL carries ?v=<buildVer> as the cache-bust signal).
+    _async.on("/style.css", HTTP_GET, [](AsyncWebServerRequest* req) {
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "text/css", ::wb_getStyleCssLiteral());
+        res->addHeader("Cache-Control",
+            "public, max-age=31536000, immutable");
+        req->send(res);
+    });
+
+    // GET /app.js — shared dashboard JS. Same caching contract as
+    // /style.css; was a missed migration in step C that surfaced
+    // only after step J flipped async onto port 80.
+    _async.on("/app.js", HTTP_GET, [](AsyncWebServerRequest* req) {
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "application/javascript", ::wb_getAppJsLiteral());
+        res->addHeader("Cache-Control",
+            "public, max-age=31536000, immutable");
+        req->send(res);
     });
 
     // GET /api/ble/pause?ms=N — pause BLE for N milliseconds.

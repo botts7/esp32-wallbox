@@ -147,17 +147,13 @@ static bool checkAuth() {
 }
 
 // ========== CSS ==========
-static void handleStyleCss() {
-    // Aggressive caching is safe — URL carries ?v=<buildVer> so cache
-    // is naturally busted on upgrade. Was no-cache → every navigation
-    // triggered a conditional GET (304 round-trip) that piled on TCP
-    // sockets alongside in-flight BAPI calls. Under heavy /settings
-    // load the resulting heap pressure was crashing the gateway
-    // (heap_min_ever observed dipping to ~59 KB; panic threshold is
-    // ~30 KB). immutable tells the browser to skip revalidation
-    // entirely until the URL hash changes.
-    http.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
-    http.send(200, "text/css", R"CSS(
+// 3.0 task #78 hotfix: extracted CSS literal so both servers
+// can serve it from one source of truth. The async server was
+// the first to need this — when it took over port 80 in step J,
+// the dashboard started rendering unstyled because /style.css
+// had only been registered on sync (which now sits on port 81).
+const char* wb_getStyleCssLiteral() {
+    return R"CSS(
 :root{--bg:#0f1117;--surface:#1a1d28;--card:#1a1d28;--elevated:#232736;--primary:#3b82f6;--success:#22c55e;--danger:#ef4444;--warning:#f59e0b;--text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;--border:#2a2d3a;--accent:#4fc3f7}
 @media (prefers-color-scheme:light){:root:not([data-theme]){--bg:#f5f7fa;--surface:#ffffff;--card:#ffffff;--elevated:#eef2f7;--text:#1e293b;--text2:#475569;--text3:#64748b;--border:#d8dfe8;--accent:#1d4ed8}}
 :root[data-theme="light"]{--bg:#f5f7fa;--surface:#ffffff;--card:#ffffff;--elevated:#eef2f7;--text:#1e293b;--text2:#475569;--text3:#64748b;--border:#d8dfe8;--accent:#1d4ed8}
@@ -209,16 +205,20 @@ input[type=range]::-webkit-slider-runnable-track{border-radius:3px}
 .nav-item{flex:1 1 0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;text-decoration:none;color:var(--text3);font-size:.7em;font-weight:500;padding:6px 4px;transition:color .2s;min-width:0}
 .nav-item.active{color:var(--primary)}
 .nav-item svg{width:22px;height:22px;fill:currentColor}
-)CSS");
+)CSS";
+}
+
+static void handleStyleCss() {
+    // Aggressive caching is safe — URL carries ?v=<buildVer> so cache
+    // is naturally busted on upgrade. immutable tells the browser to
+    // skip revalidation entirely until the URL hash changes.
+    http.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+    http.send(200, "text/css", wb_getStyleCssLiteral());
 }
 
 // ========== JS (shared) ==========
-static void handleAppJs() {
-    // See handleStyleCss() — same rationale. ?v=<buildVer> in the URL
-    // is the cache-bust signal; immutable means no re-validation
-    // round-trip on subsequent navigations within the same firmware.
-    http.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
-    http.send(200, "application/javascript", R"JS(
+const char* wb_getAppJsLiteral() {
+    return R"JS(
 function toast(msg,type){type=type||'info';var c=document.getElementById('toast-c');if(!c){c=document.createElement('div');c.id='toast-c';c.className='toast-container';document.body.appendChild(c)}var t=document.createElement('div');t.className='toast toast-'+type;t.textContent=msg;c.appendChild(t);setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove()},300)},3000)}
 function confirm2(msg,cb){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;display:flex;align-items:center;justify-content:center';o.innerHTML="<div style='background:#1a1d28;border:1px solid #2a2d3a;border-radius:14px;padding:24px;max-width:320px;text-align:center'><p style='margin:0 0 16px;color:#e2e8f0'>"+msg+"</p><div style='display:flex;gap:10px'><button id='cf-cancel' style='flex:1;padding:12px;border-radius:8px;border:1px solid #2a2d3a;background:transparent;color:#94a3b8;cursor:pointer'>Cancel</button><button id='cf-ok' style='flex:1;padding:12px;border-radius:8px;border:none;background:#ef4444;color:#fff;cursor:pointer'>Confirm</button></div></div>";document.body.appendChild(o);document.getElementById('cf-cancel').onclick=function(){o.remove()};document.getElementById('cf-ok').onclick=function(){o.remove();cb()};o.onclick=function(e){if(e.target===o)o.remove()}}
 function selectDevice(addr,ev){document.getElementById('ble_addr').value=addr;document.querySelectorAll('.scan-result').forEach(function(e){e.style.borderColor=''});if(ev&&ev.currentTarget)ev.currentTarget.style.borderColor='var(--primary)'}
@@ -262,7 +262,15 @@ function scanWifi(){
   });
 }
 function row(l,v){return "<div class='info-row'><span class='info-label'>"+l+"</span><span class='info-value'>"+v+"</span></div>"}
-)JS");
+)JS";
+}
+
+static void handleAppJs() {
+    // See handleStyleCss() — same caching rationale. ?v=<buildVer> in
+    // the URL is the cache-bust signal; immutable means no
+    // revalidation round-trip on subsequent navigations.
+    http.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+    http.send(200, "application/javascript", wb_getAppJsLiteral());
 }
 
 // ========== HTML helpers ==========
