@@ -1065,7 +1065,7 @@ String wb_buildDashboardPage() {
     <line id='pf-line2' x1='215' y1='70' x2='285' y2='70' stroke='var(--success)' stroke-width='2.5' stroke-dasharray='8 5' stroke-dashoffset='0' marker-end='url(#pf-arrow)' style='opacity:0;transition:opacity .25s'/>
     <g><circle cx='45' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><text x='45' y='78' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x1F50C;</text><text x='45' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Grid</text><text id='pf-grid-kw' x='45' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
     <g><rect x='150' y='40' width='60' height='60' rx='12' fill='var(--surface)' stroke='var(--primary)' stroke-width='1.5'/><text x='180' y='80' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x26A1;</text><text x='180' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Charger</text></g>
-    <g><circle cx='315' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><text x='315' y='78' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x1F697;</text><text x='315' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Vehicle</text><text id='pf-veh-kw' x='315' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
+    <g><circle cx='315' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><g transform='translate(295,62)' fill='none' stroke='var(--text)' stroke-width='1.6' stroke-linejoin='round' stroke-linecap='round'><path d='M2 12 Q3 7 7 7 L11 3 Q14 1 19 1 L28 1 Q33 1 36 5 L40 7 L41 12 L41 13 L2 13 Z' fill='var(--surface)'/><circle cx='11' cy='13' r='2.6' fill='var(--elevated)'/><circle cx='34' cy='13' r='2.6' fill='var(--elevated)'/></g><g id='pf-battery' transform='translate(303,82)'><rect x='0' y='0' width='22' height='7' rx='1.2' fill='var(--surface)' stroke='var(--text3)' stroke-width='.7'/><rect x='22' y='2' width='1.6' height='3' fill='var(--text3)'/><rect id='pf-batt-1' x='1.6' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-2' x='8.4' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-3' x='15.2' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/></g><text x='315' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Vehicle</text><text id='pf-veh-kw' x='315' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
   </svg>
   <div style='display:flex;justify-content:space-between;font-size:.85em;padding:10px 14px 4px;border-top:1px solid var(--border);margin-top:8px'>
     <span style='color:var(--text2)'>Since plugged in</span><span id='pf-session' style='font-weight:600;font-variant-numeric:tabular-nums'>--</span>
@@ -1120,6 +1120,48 @@ function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;
 // solar-inverter integration that doesn't exist today. Adding it later
 // is a 30-line follow-up.
 var _pfState={cp:null,en:null,house:null};
+// Flowing-dash animation: scrolls the stroke-dashoffset negatively so
+// dashes appear to march Grid->Charger->Vehicle. Speed scales with
+// the actual charging power so visually-faster = more kW. Capped so
+// even at 11 kW the animation is still readable, not strobing. Uses
+// Web Animations API (well-supported in Chrome 83+, the head-unit
+// WebView floor noted in [[feedback_webview_compat]]).
+function _pfAnimate(el,on,kw){
+  if(!el)return;
+  if(on){
+    var dur=Math.max(500,1400-(kw||0)*100);  // 1.4s @ idle .. 500ms @ ~9kW
+    if(el._anim){
+      // Just retune duration if speed changed materially
+      if(Math.abs((el._animDur||0)-dur)>50){el._anim.cancel();el._anim=null}
+    }
+    if(!el._anim){
+      el._anim=el.animate([{strokeDashoffset:0},{strokeDashoffset:-26}],{duration:dur,iterations:Infinity});
+      el._animDur=dur;
+    }
+  } else if(el._anim){
+    el._anim.cancel();el._anim=null;el._animDur=0;
+  }
+}
+// Battery-fill cycling: 3 cells fade in then reset, giving the vehicle
+// a "receiving charge" pulse. Frame-loop kept lightweight (~4 fps) so
+// the head-unit WebView doesn't burn CPU on the dashboard.
+var _pfBattTimer=null,_pfBattFrame=0;
+function _pfBatteryAnimate(on){
+  var cells=[document.getElementById('pf-batt-1'),document.getElementById('pf-batt-2'),document.getElementById('pf-batt-3')];
+  if(!on){
+    if(_pfBattTimer){clearInterval(_pfBattTimer);_pfBattTimer=null}
+    cells.forEach(function(c){if(c)c.style.opacity='0'});
+    return;
+  }
+  if(_pfBattTimer)return;  // already running
+  _pfBattFrame=0;
+  _pfBattTimer=setInterval(function(){
+    // Frames 0..3: progressively light cells; frame 3 = all on; then reset.
+    var f=_pfBattFrame%4;
+    cells.forEach(function(c,i){if(c)c.style.opacity=(i<f)?'1':'0'});
+    _pfBattFrame++;
+  },260);
+}
 function _pfRender(){
   var cp=_pfState.cp,h=_pfState.house;
   if(typeof cp==='number'){_setText('pf-veh-kw',cp.toFixed(2)+' kW')}
@@ -1129,6 +1171,8 @@ function _pfRender(){
   var l1=document.getElementById('pf-line1'),l2=document.getElementById('pf-line2');
   if(l1)l1.style.opacity=charging?'1':'0';
   if(l2)l2.style.opacity=charging?'1':'0';
+  _pfAnimate(l1,charging,cp);_pfAnimate(l2,charging,cp);
+  _pfBatteryAnimate(charging);
 }
 function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
 function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
