@@ -3639,27 +3639,31 @@ void WBWebServer::beginAP() {
 }
 
 void WBWebServer::beginSTA() {
+    // 3.0 sync-server retirement: the legacy sync WebServer only runs
+    // in AP mode now (where the OS captive-portal probe needs :80 and
+    // the async server isn't started yet). Once we're in STA mode the
+    // async server in wb_web_async.cpp on :80 handles every route and
+    // there's nothing left for the sync server to do — no fallback
+    // listener, no registerRoutes(), no http.begin().
     _apMode = false;
-    registerRoutes();
-    http.on("/", handleDashboard);  // STA mode: dashboard is home
-    http.on("/config", handleConfig);
-    http.on("/settings", handleSettings);
-    http.on("/info", handleInfo);
-    http.begin(81);
-    // Post step J port swap: async owns port 80 (the URL users
-    // actually bookmark); sync is the :81 fallback. Once the
-    // async server has been exercised across both botts7+peter-mcc
-    // rigs, the sync server retires entirely.
-    Log.printf("[Web] http://%s:81/ (sync fallback — async is on :80)\n",
+    Log.printf("[Web] http://%s/ (async on :80, sync retired)\n",
         WiFi.localIP().toString().c_str());
 }
 
 void WBWebServer::loop() {
-    if (_apMode) dns.processNextRequest();
-    g_webReentryDepth++;
-    if (g_webReentryDepth > g_webMaxReentry) g_webMaxReentry = g_webReentryDepth;
-    http.handleClient();
-    g_webReentryDepth--;
+    if (_apMode) {
+        // AP-mode captive-portal path. The async server isn't up yet
+        // (no STA WiFi) so the sync WebServer + DNS captive trick is
+        // still load-bearing here.
+        dns.processNextRequest();
+        g_webReentryDepth++;
+        if (g_webReentryDepth > g_webMaxReentry) g_webMaxReentry = g_webReentryDepth;
+        http.handleClient();
+        g_webReentryDepth--;
+    }
+    // STA mode: nothing to pump — async server has its own task.
+    // The reboot flag still gets serviced from here so the existing
+    // async OTA handler's webServer.requestReboot() call still works.
     if (_rebootRequested) {
         static uint32_t rt = 0;
         if (rt == 0) rt = millis();
