@@ -1056,6 +1056,23 @@ String wb_buildDashboardPage() {
 <div id='notif-modal' style='display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:300;align-items:center;justify-content:center;padding:16px' onclick='if(event.target===this)this.style.display=\"none\"'><div id='notif-modal-inner' style='background:var(--card);border-radius:12px;max-width:480px;width:100%;max-height:80vh;overflow:auto;padding:16px'></div></div>
 
 <div class='card'>
+  <div class='card-header'><span class='card-icon'>&#x26A1;</span><h2 style='margin:0;font-size:1em'>Power Flow</h2></div>
+  <svg viewBox='0 0 360 130' style='display:block;width:100%;max-width:360px;margin:0 auto' role='img' aria-label='Live power flow Grid Charger Vehicle'>
+    <defs><marker id='pf-arrow' viewBox='0 0 6 6' refX='5' refY='3' markerWidth='5' markerHeight='5' orient='auto'><path d='M0,0 L6,3 L0,6 z' fill='var(--accent)'/></marker></defs>
+    <line x1='75' y1='70' x2='145' y2='70' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
+    <line x1='215' y1='70' x2='285' y2='70' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
+    <line id='pf-line1' x1='75' y1='70' x2='145' y2='70' stroke='var(--success)' stroke-width='2.5' stroke-dasharray='8 5' stroke-dashoffset='0' marker-end='url(#pf-arrow)' style='opacity:0;transition:opacity .25s'/>
+    <line id='pf-line2' x1='215' y1='70' x2='285' y2='70' stroke='var(--success)' stroke-width='2.5' stroke-dasharray='8 5' stroke-dashoffset='0' marker-end='url(#pf-arrow)' style='opacity:0;transition:opacity .25s'/>
+    <g><circle cx='45' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><text x='45' y='78' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x1F50C;</text><text x='45' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Grid</text><text id='pf-grid-kw' x='45' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
+    <g><rect x='150' y='40' width='60' height='60' rx='12' fill='var(--surface)' stroke='var(--primary)' stroke-width='1.5'/><text x='180' y='80' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x26A1;</text><text x='180' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Charger</text></g>
+    <g><circle cx='315' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><text x='315' y='78' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x1F697;</text><text x='315' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Vehicle</text><text id='pf-veh-kw' x='315' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
+  </svg>
+  <div style='display:flex;justify-content:space-between;font-size:.85em;padding:10px 14px 4px;border-top:1px solid var(--border);margin-top:8px'>
+    <span style='color:var(--text2)'>Since plugged in</span><span id='pf-session' style='font-weight:600;font-variant-numeric:tabular-nums'>--</span>
+  </div>
+</div>
+
+<div class='card'>
   <div id='sg' style='display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px'>
     <div><label>Status</label><div id='v-st' class='info-value'>--</div></div>
     <div><label>Charging Power</label><div id='v-pw' class='info-value'>--</div></div>
@@ -1096,8 +1113,25 @@ var CHARGER_TZ='UTC';try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().time
 fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function _setText(id,txt){var el=document.getElementById(id);if(el)el.textContent=txt}
 function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;var el=document.getElementById(id);if(!el)return;el.textContent=(fmt?fmt(val):val)+(suffix||'')}
-function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
-function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
+// Power Flow card: Grid -> Charger -> Vehicle live kW + animated flow.
+// State is built up from two BAPI sources so we cache last-seen values
+// here (status pushes cp + en; meter pushes the house-power reading).
+// Solar / "Green" branch is intentionally not rendered yet — needs a
+// solar-inverter integration that doesn't exist today. Adding it later
+// is a 30-line follow-up.
+var _pfState={cp:null,en:null,house:null};
+function _pfRender(){
+  var cp=_pfState.cp,h=_pfState.house;
+  if(typeof cp==='number'){_setText('pf-veh-kw',cp.toFixed(2)+' kW')}
+  if(typeof h==='number'){_setText('pf-grid-kw',(h/1000).toFixed(2)+' kW')}
+  if(typeof _pfState.en==='number'){_setText('pf-session',(_pfState.en/100).toFixed(2)+' kWh')}
+  var charging=(typeof cp==='number'&&cp>0.05);
+  var l1=document.getElementById('pf-line1'),l2=document.getElementById('pf-line2');
+  if(l1)l1.style.opacity=charging?'1':'0';
+  if(l2)l2.style.opacity=charging?'1':'0';
+}
+function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
+function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
 function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null')return;var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){applyMeterData(d.r)}).catch(function(){})}
 // Hook WS push handlers
 if(window.wbws){window.wbws.subscribe('status',function(d){var s=d&&d.r?d.r:d;applyStatusData(s,null);if(window.wbCheckStatus)window.wbCheckStatus(s)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});}
