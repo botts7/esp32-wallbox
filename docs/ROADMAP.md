@@ -93,45 +93,51 @@ and self-contained.
 
 ---
 
-## 🔵 Architectural backlog — 3.x
+## 🔵 3.0 — the big one
 
-These are bigger changes that affect the gateway's distribution or
-core architecture. Don't need to do — but they're on the radar.
+3.0 is a coordinated release bundling three pieces of work. All
+decisions settled 2026-06-07. 3.0 does NOT ship until ALL three
+are implemented AND the HA Add-on (#79) is end-to-end tested
+against the new firmware in a real HAOS VM. No partial 3.0
+launches.
 
-- [ ] **Table-driven HA discovery refactor** (task #77 — plan
-  ready: [docs/plans/3.0-discovery-table.md](plans/3.0-discovery-table.md))
-  Replace the 57-case switch in `tickDiscovery` with a `DiscoveryEntry`
-  struct table (was an alternative considered for 2.6.0 — the switch
-  approach was picked for transcription safety; a follow-up cleanup
-  can swap it for the table now that the wire format is locked in).
-  No functional change. Lower per-tick overhead and easier to add
-  entities. Pure code-cleanup. Plan captures the 5-step migration
-  (build flag, group-wise transcription with HA verification per
-  group, flip default, remove legacy switch).
+Implementation gate: 2.7.0 has been in the field long enough that
+the maintainer is confident there's no regression to chase.
 
-- [ ] **ESPHome AsyncWebServer backport** (task #78 — research
-  done: [docs/plans/3.x-async-webserver.md](plans/3.x-async-webserver.md))
-  Replace sync Arduino WebServer with AsyncWebServer
-  (mathieucarbou fork — me-no-dev archived). Would eliminate
-  per-request main-loop blocking entirely. Doc covers route
-  audit (40 routes, 18 method calls), risks (library churn,
-  PubSubClient+AsyncTCP coexistence, +30-50 KB RAM, OTA brick
-  risk), three migration strategies, ~40 hr effort estimate,
-  and 5 decision points the maintainer needs to answer before
-  implementation starts.
+- [ ] **Table-driven HA discovery refactor** (task #77 — code
+  built dormant on `feature/3.0-table-driven-discovery`;
+  [plan](plans/3.0-discovery-table.md))
+  Replace the 57-case switch in `tickDiscovery` with a
+  `DiscoveryEntry` struct table. Code is already committed,
+  compiles clean both with `WB_DISCOVERY_TABLE_DRIVEN=0`
+  (default, dormant) and `=1` (active). 3.0 flips the default
+  to 1; the legacy switch is removed in the same release.
 
-- [ ] **HA Add-on packaging** (task #79 — research done:
+- [ ] **AsyncWebServer migration** (task #78 — plan +
+  decisions: [docs/plans/3.x-async-webserver.md](plans/3.x-async-webserver.md))
+  Replace sync Arduino WebServer with mathieucarbou's
+  ESPAsyncWebServer (pinned tag). Per-route `#if WB_ASYNC_WEB`
+  flag for incremental migration. OTA stays sync on port 81
+  during the migration, removed only after async-OTA verifies
+  under the hardening + longevity harness. ~40 hr effort.
+
+- [ ] **HA Add-on** (task #79 — plan + decisions:
   [docs/plans/3.x-ha-addon.md](plans/3.x-ha-addon.md))
-  Package a HA Add-on (Python + Flask behind HA ingress) that
-  provides a HA-native dashboard for the ESP32 gateway plus
-  one-click OTA. Doc covers Add-on anatomy, three-phase scope
-  (read-only v0.1 → OTA v0.2 → polish v0.3), repo layout
-  trade-offs (separate repo recommended), multi-arch build,
-  framework rationale (Flask preferred over FastAPI given
-  mid-2026 Starlette/FastAPI CVEs and our minimal endpoint
-  surface), ~30 hr effort, 5 decision points. Out-of-scope
-  notes the separate HACS-integration option as a complementary
-  4.x conversation.
+  New repo `botts7/wallbox-gateway-ha-addon`. Python + Flask
+  behind HA Supervisor ingress. Three-phase scope: read-only
+  dashboard (v0.1) → OTA upload proxy (v0.2) → polish (v0.3).
+  Released in lockstep with the 3.0 firmware. ~30 hr effort.
+
+## 🟣 4.x — speculative
+
+- [ ] **HACS custom integration.** A `wallbox_gateway` custom
+  component (Python in HA core, distributed via HACS) that
+  exposes the gateway's diagnostics as native HA sensors instead
+  of via the MQTT bridge. Different audience to the 3.0 Add-on
+  (Docker / venv HA installs, not just HAOS) and a much larger
+  Python codebase since it would integrate with HA core
+  directly. Could deprecate parts of the MQTT discovery surface
+  in a follow-on 4.x release.
 
 ---
 
