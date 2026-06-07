@@ -28,6 +28,7 @@ String wb_applySaveForm(std::function<String(const char*)> getArg);
 String wb_applyResetAndPage();
 struct ImportResult { int status; String body; bool reboot; };
 ImportResult wb_applyConfigImport(const String& jsonBody);
+String wb_buildConfigExportJson();
 WBWebServer webServer;
 
 // 3.0 task #78 step J — port swap. The legacy sync server moves
@@ -219,7 +220,7 @@ static void handleStyleCss() {
 // ========== JS (shared) ==========
 const char* wb_getAppJsLiteral() {
     return R"JS(
-function toast(msg,type){type=type||'info';var c=document.getElementById('toast-c');if(!c){c=document.createElement('div');c.id='toast-c';c.className='toast-container';document.body.appendChild(c)}var t=document.createElement('div');t.className='toast toast-'+type;t.textContent=msg;c.appendChild(t);setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove()},300)},3000)}
+function toast(msg,type){type=type||'info';if(msg&&typeof msg==='object'){msg=msg.message||msg.error||(msg.code!=null?('Code '+msg.code):JSON.stringify(msg))}var c=document.getElementById('toast-c');if(!c){c=document.createElement('div');c.id='toast-c';c.className='toast-container';document.body.appendChild(c)}var t=document.createElement('div');t.className='toast toast-'+type;t.textContent=String(msg);c.appendChild(t);setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove()},300)},3000)}
 function confirm2(msg,cb){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;display:flex;align-items:center;justify-content:center';o.innerHTML="<div style='background:#1a1d28;border:1px solid #2a2d3a;border-radius:14px;padding:24px;max-width:320px;text-align:center'><p style='margin:0 0 16px;color:#e2e8f0'>"+msg+"</p><div style='display:flex;gap:10px'><button id='cf-cancel' style='flex:1;padding:12px;border-radius:8px;border:1px solid #2a2d3a;background:transparent;color:#94a3b8;cursor:pointer'>Cancel</button><button id='cf-ok' style='flex:1;padding:12px;border-radius:8px;border:none;background:#ef4444;color:#fff;cursor:pointer'>Confirm</button></div></div>";document.body.appendChild(o);document.getElementById('cf-cancel').onclick=function(){o.remove()};document.getElementById('cf-ok').onclick=function(){o.remove();cb()};o.onclick=function(e){if(e.target===o)o.remove()}}
 function selectDevice(addr,ev){document.getElementById('ble_addr').value=addr;document.querySelectorAll('.scan-result').forEach(function(e){e.style.borderColor=''});if(ev&&ev.currentTarget)ev.currentTarget.style.borderColor='var(--primary)'}
 function formatMAC(i){var v=i.value.replace(/[^0-9a-fA-F]/g,'').toUpperCase(),f='';for(var j=0;j<v.length&&j<12;j++){if(j>0&&j%2===0)f+=':';f+=v[j]}i.value=f}
@@ -409,7 +410,7 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
         // patch. Dropped my separate wrapper that was here — it would
         // double-wrap fetch() and double-count retries.)
         "<script>(function(){try{var t=localStorage.getItem('wb-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}})();</script>"
-        "<script>(function(){var handlers={};var sock=null;var rd=1000;var open=false;function connect(){try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.hostname+':81/');sock.onopen=function(){open=true;rd=1000;document.documentElement.setAttribute('data-ws','1')};sock.onmessage=function(e){try{var m=JSON.parse(e.data);var hs=handlers[m.t];if(hs){for(var i=0;i<hs.length;i++){try{hs[i](m.d,m)}catch(ee){}}}}catch(err){}};sock.onclose=function(){open=false;document.documentElement.removeAttribute('data-ws');sock=null;setTimeout(connect,rd);rd=Math.min(rd*2,30000)};sock.onerror=function(){}}catch(e){setTimeout(connect,rd)}}window.wbws={subscribe:function(t,fn){(handlers[t]=handlers[t]||[]).push(fn)},isOpen:function(){return open},send:function(s){if(sock&&open)sock.send(s)}};connect();})();</script>"
+        "<script>(function(){var handlers={};var sock=null;var rd=1000;var open=false;function connect(){try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.hostname+':82/');sock.onopen=function(){open=true;rd=1000;document.documentElement.setAttribute('data-ws','1')};sock.onmessage=function(e){try{var m=JSON.parse(e.data);var hs=handlers[m.t];if(hs){for(var i=0;i<hs.length;i++){try{hs[i](m.d,m)}catch(ee){}}}}catch(err){}};sock.onclose=function(){open=false;document.documentElement.removeAttribute('data-ws');sock=null;setTimeout(connect,rd);rd=Math.min(rd*2,30000)};sock.onerror=function(){}}catch(e){setTimeout(connect,rd)}}window.wbws={subscribe:function(t,fn){(handlers[t]=handlers[t]||[]).push(fn)},isOpen:function(){return open},send:function(s){if(sock&&open)sock.send(s)}};connect();})();</script>"
         // Notification dispatcher: state-code groupings use the LOCAL
         // BLE 0-18 enum (per jagheterfredrik/wallbox-ble + benvanmierloo
         // PR #7). Older builds used the cloud status_id mapping which
@@ -2278,6 +2279,40 @@ static void handleReset() {
     webServer.requestReboot();
 }
 
+// 3.0 task #78 audit fix: /api/config/export was missed during
+// the per-route migration. Extract the JSON-building loop so both
+// servers serve byte-identical bodies. Secret fields are masked
+// with "***" — same masking sync had pre-extraction.
+String wb_buildConfigExportJson() {
+    const WBConfig& c = configMgr.get();
+    JsonDocument d;
+    d["version"]      = 1;
+    d["exported_at"]  = millis() / 1000;
+    d["wifi_ssid"]    = c.wifiSSID;
+    d["wifi_pass"]    = c.wifiPass.length() ? "***" : "";
+    d["mqtt_host"]    = c.mqttHost;
+    d["mqtt_port"]    = c.mqttPort;
+    d["mqtt_user"]    = c.mqttUser;
+    d["mqtt_pass"]    = c.mqttPass.length() ? "***" : "";
+    d["mqtt_cid"]     = c.mqttClientId;
+    d["ble_addr"]     = c.bleAddr;
+    d["ble_pin"]      = c.blePin.length() ? "***" : "";
+    d["ble_svc"]      = c.bleService;
+    d["ble_chr"]      = c.bleChar;
+    d["ble_txchr"]    = c.bleTxChar;
+    d["chg_model"]    = c.chargerModel;
+    d["auth_enabled"] = c.authEnabled;
+    d["auth_user"]    = c.authUser;
+    d["auth_pass"]    = c.authPass.length() ? "***" : "";
+    d["poll_status"]  = c.statusPollMs;
+    d["poll_rt"]      = c.realtimePollMs;
+    d["ha_prefix"]    = c.haDiscoveryPrefix;
+    d["ha_devid"]     = c.haDeviceId;
+    String body;
+    serializeJsonPretty(d, body);
+    return body;
+}
+
 // 3.0 task #78: extracted /api/config/import core logic. Parses
 // the JSON body, applies non-sentinel ("***" = preserve) fields to
 // configMgr, saves. Returns the response status + body + a flag
@@ -3272,34 +3307,9 @@ static void registerRoutes() {
     // passwords/PINs masked. Safe to share for support/backup.
     http.on("/api/config/export", []() {
         if (!checkAuth()) return;
-        const WBConfig& c = configMgr.get();
-        JsonDocument d;
-        d["version"] = 1;
-        d["exported_at"] = millis() / 1000;
-        d["wifi_ssid"]   = c.wifiSSID;
-        d["wifi_pass"]   = c.wifiPass.length() ? "***" : "";
-        d["mqtt_host"]   = c.mqttHost;
-        d["mqtt_port"]   = c.mqttPort;
-        d["mqtt_user"]   = c.mqttUser;
-        d["mqtt_pass"]   = c.mqttPass.length() ? "***" : "";
-        d["mqtt_cid"]    = c.mqttClientId;
-        d["ble_addr"]    = c.bleAddr;
-        d["ble_pin"]     = c.blePin.length() ? "***" : "";
-        d["ble_svc"]     = c.bleService;
-        d["ble_chr"]     = c.bleChar;
-        d["ble_txchr"]   = c.bleTxChar;
-        d["chg_model"]   = c.chargerModel;
-        d["auth_enabled"]= c.authEnabled;
-        d["auth_user"]   = c.authUser;
-        d["auth_pass"]   = c.authPass.length() ? "***" : "";
-        d["poll_status"] = c.statusPollMs;
-        d["poll_rt"]     = c.realtimePollMs;
-        d["ha_prefix"]   = c.haDiscoveryPrefix;
-        d["ha_devid"]    = c.haDeviceId;
-        String body;
-        serializeJsonPretty(d, body);
-        http.sendHeader("Content-Disposition", "attachment; filename=\"wallbox-config.json\"");
-        http.send(200, "application/json", body);
+        http.sendHeader("Content-Disposition",
+            "attachment; filename=\"wallbox-config.json\"");
+        http.send(200, "application/json", wb_buildConfigExportJson());
     });
 
     // /api/config/import — POST a JSON payload to restore config. Values

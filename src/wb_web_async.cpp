@@ -30,6 +30,7 @@
 // wb_web_async::wb_getStyleCssLiteral() and fails to resolve.
 extern const char* wb_getStyleCssLiteral();
 extern const char* wb_getAppJsLiteral();
+extern String wb_buildConfigExportJson();
 
 // Forward declarations of state exposed by sync wb_web.cpp that the
 // async handlers need to read. Defined in wb_web.cpp (the `static`
@@ -241,6 +242,19 @@ static void _registerReadOnlyRoutes() {
     });
 
     // GET /api/ota/history — newest-first list of OTA attempts.
+    // GET /api/config/export — JSON dump of current config with
+    // secret fields masked. Audit fix: was missed during the
+    // per-route migration and surfaced after the port swap.
+    _async.on("/api/config/export", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "application/json", ::wb_buildConfigExportJson());
+        res->addHeader("Content-Disposition",
+            "attachment; filename=\"wallbox-config.json\"");
+        req->send(res);
+    });
+
     _async.on("/api/ota/history", HTTP_GET,
               [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;

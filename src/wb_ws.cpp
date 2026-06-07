@@ -4,7 +4,15 @@
 
 namespace wbws {
 
-static WebSocketsServer _ws(81);
+// 3.0 task #78 step J port-swap fix: WS lived on port 81 historically
+// (so it didn't collide with sync HTTP on 80). After step J flipped
+// the sync server onto 81, both wanted the same TCP port and sync
+// won the bind — WS upgrade handshakes were getting 200 OK from the
+// HTTP server instead of the 101 Switching Protocols they needed.
+// Moved to 82 to dodge the collision; client JS in wb_web.cpp
+// updated to match. Full AsyncWebSocket migration is still on the
+// to-do list but not blocking this fix.
+static WebSocketsServer _ws(82);
 
 static void onEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
     if (type == WStype_CONNECTED) {
