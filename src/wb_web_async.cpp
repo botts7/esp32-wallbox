@@ -640,7 +640,9 @@ static void _registerBleRoutes() {
             req->send(res);
             return;
         }
-        // ?wait=N: 0..8000 default 5000. Same clamp as sync.
+        // ?wait=N: 0..8000 default 5000. Same clamp as sync. A larger
+        // cap (tried 16000) starves the BLE task long enough to trigger
+        // a watchdog panic — keep the cap at 8s.
         int waitMs = 5000;
         if (req->hasParam("wait")) {
             waitMs = req->getParam("wait")->value().toInt();

@@ -188,6 +188,11 @@ void WallboxBLE::loop() {
                 // gupdc (10 s cloud check) gave up at the 5 s default
                 // and the waiter saw a 202 even though the user asked
                 // to wait 12 s. 0 = use the function's own default.
+                // 5s default. Tried 15s to capture slow s_sch responses
+                // but it caused panics — holding the BLE _cmdMutex for
+                // 15s starved enough other paths to trigger a watchdog
+                // panic. If a method genuinely needs a longer wait it
+                // can override via bapiTimeoutMs from the caller.
                 uint32_t to = req.bapiTimeoutMs ? req.bapiTimeoutMs : 5000;
                 String resp = _sendCommandDirect(req.met, req.par, to);
                 _storeResponse(req.reqId, resp);
@@ -449,6 +454,29 @@ void WallboxBLE::_connect() {
             return;
         }
         Log.println("[BLE] Using dual-char mode (separate notify characteristic)");
+    }
+
+    // 3.0 schedule-write fix attempt: proactively pair/encrypt
+    // before subscribing for notifies. jagheterfredrik's HACS
+    // reference always pairs on connect, and the live Pulsar MAX
+    // (fw 6.11.16) silently accepts reads from unpaired clients
+    // but appears to reject settings writes (w_sch/s_sch/s_alo
+    // all return "Unexpected Error" without it). Most chargers
+    // without a BAPI PIN use "Just Works" pairing — no user
+    // prompt. We do this BEFORE CCCD subscription rather than as
+    // a fallback so the first-write authorisation is in place
+    // from the start of the session.
+    Log.println("[BLE] Initiating SMP encryption (proactive pair)...");
+    bool secureOk = _client->secureConnection();
+    if (secureOk) {
+        Log.println("[BLE] Encryption established");
+        // NimBLE 1.4.1 can return before bond info fully lands —
+        // small delay matches the fallback path's behaviour.
+        delay(200);
+    } else {
+        Log.printf("[BLE] secureConnection() failed (err 0x%02x) — "
+                   "continuing unpaired; writes may be rejected\n",
+                   _client->getLastError());
     }
 
     // Subscribe to notifications — if CCCD write is rejected, encrypt and retry
