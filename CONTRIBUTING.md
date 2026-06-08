@@ -84,11 +84,11 @@ Keep commits focused — one logical change per commit.
 By contributing, you agree your contributions are licensed under the MIT License
 (same as the project).
 
-Don't submit code you don't own or have rights to. Specifically:
-- No decompiled code from the Wallbox APK
+Don't submit code or assets you don't own or have rights to. Specifically:
+- No code from sources that don't permit redistribution
 - No proprietary protocol documentation
 - No BAPI commands copied from non-public sources
 
-The BAPI method names in this project are string constants sent over BLE, not copied source
-code. They were discovered through legitimate BLE protocol analysis (EU Directive 2009/24/EC
-Art. 6 — decompilation for interoperability).
+The BAPI method names in this project are public-API string constants observed on the wire
+during normal Wallbox device communication. Contributions that arrive through standard
+interoperability research (EU Directive 2009/24/EC Art. 6) are welcome.
