@@ -25,6 +25,12 @@ public:
 
     void requestReboot() { _rebootRequested = true; }
 
+    // Lets htmlHead() decide whether to render the boot overlay. In AP /
+    // setup mode there is no BLE link to wait for, so the overlay would
+    // never dismiss and the setup page would appear stuck. peter-mcc hit
+    // exactly this on a fresh USB-flash of rc21 — see issue #4.
+    bool isAPMode() const { return _apMode; }
+
 private:
     bool _rebootRequested = false;
     bool _apMode = false;

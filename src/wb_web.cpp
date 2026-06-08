@@ -2,6 +2,14 @@
 #include "wb_config.h"
 #include "wb_ble.h"
 #include "wb_log.h"
+#include "wb_version.h"
+#include "wb_health.h"
+#include "wb_ota_history.h"
+#include "wb_diag.h"
+#include "wb_watchdog.h"
+#include "wb_ws.h"
+#include "wb_mqtt.h"
+#include "_gen_settings_body_gz.h"  // build-time gzipped /settings body (task #75)
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -9,33 +17,106 @@
 #include <NimBLEDevice.h>
 #include <Update.h>
 #include <esp_ota_ops.h>
+#include <esp_task_wdt.h>
+#include <Preferences.h>
+#include <functional>  // 3.0 task #78: std::function for save-form getter
+
+// Forward declarations of the 3.0 #78 extracted helpers — defined
+// later in this TU but referenced by the sync handlers above their
+// definitions. Async server in wb_web_async.cpp also externs these.
+String wb_applySaveForm(std::function<String(const char*)> getArg);
+String wb_applyResetAndPage();
+struct ImportResult { int status; String body; bool reboot; };
+ImportResult wb_applyConfigImport(const String& jsonBody);
+String wb_buildConfigExportJson();
 WBWebServer webServer;
 
-static WebServer http(80);
+// 3.0 task #78 step J — port swap. The legacy sync server moves
+// from 80 to 81 in STA mode (fallback), while async takes over
+// port 80 in wb_web_async.cpp. In AP mode the async server is
+// never started (no STA WiFi for it to bind to) so the sync
+// server must keep port 80 — otherwise the captive portal can't
+// be reached. Port is therefore set at begin() time per mode,
+// not at construction.
+static WebServer http;
 static DNSServer dns;
 static const char* AP_SSID = "WallboxGW-Setup";
 static const char* AP_PASS = "wallbox123";
 
 // ========== CSRF Token ==========
-// Generated at boot, validated on all state-changing POST endpoints
-static String csrfToken;
-static void ensureCsrfToken() {
-    if (csrfToken.length() == 0) {
-        uint8_t mac[6]; WiFi.macAddress(mac);
-        uint32_t seed = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) |
-                        ((uint32_t)mac[4] << 8) | mac[5];
-        seed ^= millis() ^ ESP.getCycleCount();
-        randomSeed(seed);
-        csrfToken = "";
-        for (int i = 0; i < 16; i++) {
-            char c[3];
-            snprintf(c, 3, "%02x", (int)random(0, 256));
-            csrfToken += c;
-        }
+// Persisted in NVS so the token stays stable across reboots. A /info
+// page held open across an OTA used to silently 403 every state-
+// changing fetch because the in-memory token had rotated; persisting
+// means the browser's window.WB_CSRF is still valid post-reboot.
+// peter-mcc 2.5.0 follow-up.
+//
+// Threat model: random 128-bit hex per device, only readable from
+// an already-authenticated session via the rendered /info HTML.
+// Long-lived is fine — it's not a session secret, it's just a CSRF
+// double-submit token. Generated once, stored forever (until factory
+// reset, which explicitly wipes the "wbcsrf" namespace in handleReset).
+//
+// Once `csrfToken` is set during a boot, it MUST NOT be reassigned —
+// every rendered page caches it in window.WB_CSRF, and swapping it
+// mid-session would break every open tab.
+// 3.0 task #78: dropped `static` so wb_web_async.cpp can extern these
+// and validate CSRF tokens on the async port using the SAME secret.
+// Without sharing, async would need its own NVS namespace + token
+// rotation logic — wasted complexity for the migration window.
+String csrfToken;
+// Guard against simultaneous first-boot requests racing the NVS
+// generate/write step: without this two concurrent ensureCsrfToken()
+// calls could both see an empty NVS, both generate different tokens,
+// and end up with the second writer's value in RAM while the first
+// writer's value was the one persisted. Set to true once the token
+// is committed (either loaded or freshly written).
+bool csrfTokenReady = false;
+void ensureCsrfToken() {
+    if (csrfTokenReady) return;
+    Preferences p;
+    if (!p.begin("wbcsrf", false)) return;  // NVS unavailable — try again next call
+    csrfToken = p.getString("token", "");
+    if (csrfToken.length() == 32) {
+        p.end();
+        csrfTokenReady = true;
+        Log.println("[CSRF] Loaded persisted token from NVS");
+        return;
     }
+    // First boot (or corrupted entry) — generate a fresh one.
+    uint8_t mac[6]; WiFi.macAddress(mac);
+    uint32_t seed = ((uint32_t)mac[2] << 24) | ((uint32_t)mac[3] << 16) |
+                    ((uint32_t)mac[4] << 8) | mac[5];
+    seed ^= millis() ^ ESP.getCycleCount();
+    randomSeed(seed);
+    csrfToken = "";
+    for (int i = 0; i < 16; i++) {
+        char c[3];
+        snprintf(c, 3, "%02x", (int)random(0, 256));
+        csrfToken += c;
+    }
+    p.putString("token", csrfToken);
+    p.end();
+    csrfTokenReady = true;
+    Log.println("[CSRF] First boot — generated and persisted new token");
 }
 static bool checkCsrf() {
     ensureCsrfToken();
+    // AP-mode first-time setup: skip CSRF.
+    //
+    // The AP is WPA2-protected (only someone who knows the AP password
+    // is on the network at all), there's no existing browser session
+    // for an attacker to forge requests against, and there's no
+    // sensitive state to defend yet — the device is by definition
+    // unconfigured. With CSRF enabled the captive-portal flow breaks
+    // any time the gateway crash-reboots between form-load and
+    // form-submit: the new boot regenerates the token, the user's
+    // browser still holds the old one, and Save silently 403s. This
+    // gate uses "no WiFi configured" as the AP-mode proxy because
+    // it's the same condition that triggers webServer.beginAP() in
+    // setup() and survives partial config writes (mqtt set but WiFi
+    // not yet, etc.).
+    if (configMgr.get().wifiSSID.length() == 0) return true;
+
     String token = http.arg("csrf");
     if (token.length() == 0 || token != csrfToken) {
         http.send(403, "text/plain", "CSRF token mismatch");
@@ -45,8 +126,15 @@ static bool checkCsrf() {
 }
 
 // ========== Web Authentication ==========
-static uint32_t authFailCount = 0;
-static uint32_t authLockoutUntil = 0;
+//
+// 3.0 task #78: dropped `static` so wb_web_async.cpp can `extern`
+// these and share the same lockout window across both servers.
+// A brute-forcer alternating port 80 and port 8081 would otherwise
+// get double the attempts per lockout cycle. When the sync server
+// retires post-migration, these can be re-scoped to the surviving
+// TU.
+uint32_t authFailCount    = 0;
+uint32_t authLockoutUntil = 0;
 
 static bool checkAuth() {
     const WBConfig& cfg = configMgr.get();
@@ -76,9 +164,13 @@ static bool checkAuth() {
 }
 
 // ========== CSS ==========
-static void handleStyleCss() {
-    http.sendHeader("Cache-Control", "no-cache");
-    http.send(200, "text/css", R"CSS(
+// 3.0 task #78 hotfix: extracted CSS literal so both servers
+// can serve it from one source of truth. The async server was
+// the first to need this — when it took over port 80 in step J,
+// the dashboard started rendering unstyled because /style.css
+// had only been registered on sync (which now sits on port 81).
+const char* wb_getStyleCssLiteral() {
+    return R"CSS(
 :root{--bg:#0f1117;--surface:#1a1d28;--card:#1a1d28;--elevated:#232736;--primary:#3b82f6;--success:#22c55e;--danger:#ef4444;--warning:#f59e0b;--text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;--border:#2a2d3a;--accent:#4fc3f7}
 @media (prefers-color-scheme:light){:root:not([data-theme]){--bg:#f5f7fa;--surface:#ffffff;--card:#ffffff;--elevated:#eef2f7;--text:#1e293b;--text2:#475569;--text3:#64748b;--border:#d8dfe8;--accent:#1d4ed8}}
 :root[data-theme="light"]{--bg:#f5f7fa;--surface:#ffffff;--card:#ffffff;--elevated:#eef2f7;--text:#1e293b;--text2:#475569;--text3:#64748b;--border:#d8dfe8;--accent:#1d4ed8}
@@ -130,18 +222,25 @@ input[type=range]::-webkit-slider-runnable-track{border-radius:3px}
 .nav-item{flex:1 1 0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;text-decoration:none;color:var(--text3);font-size:.7em;font-weight:500;padding:6px 4px;transition:color .2s;min-width:0}
 .nav-item.active{color:var(--primary)}
 .nav-item svg{width:22px;height:22px;fill:currentColor}
-)CSS");
+)CSS";
+}
+
+static void handleStyleCss() {
+    // Aggressive caching is safe — URL carries ?v=<buildVer> so cache
+    // is naturally busted on upgrade. immutable tells the browser to
+    // skip revalidation entirely until the URL hash changes.
+    http.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+    http.send(200, "text/css", wb_getStyleCssLiteral());
 }
 
 // ========== JS (shared) ==========
-static void handleAppJs() {
-    http.sendHeader("Cache-Control", "no-cache");
-    http.send(200, "application/javascript", R"JS(
-function toast(msg,type){type=type||'info';var c=document.getElementById('toast-c');if(!c){c=document.createElement('div');c.id='toast-c';c.className='toast-container';document.body.appendChild(c)}var t=document.createElement('div');t.className='toast toast-'+type;t.textContent=msg;c.appendChild(t);setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove()},300)},3000)}
-function confirm2(msg,cb){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;display:flex;align-items:center;justify-content:center';o.innerHTML="<div style='background:#1a1d28;border:1px solid #2a2d3a;border-radius:14px;padding:24px;max-width:320px;text-align:center'><p style='margin:0 0 16px;color:#e2e8f0'>"+msg+"</p><div style='display:flex;gap:10px'><button style='flex:1;padding:12px;border-radius:8px;border:1px solid #2a2d3a;background:transparent;color:#94a3b8;cursor:pointer' onclick='this.closest(\"div[style]\").remove()'>Cancel</button><button style='flex:1;padding:12px;border-radius:8px;border:none;background:#ef4444;color:#fff;cursor:pointer' id='cf-ok'>Confirm</button></div></div>";document.body.appendChild(o);document.getElementById('cf-ok').onclick=function(){o.remove();cb()};o.onclick=function(e){if(e.target===o)o.remove()}}
-function selectDevice(addr){document.getElementById('ble_addr').value=addr;document.querySelectorAll('.scan-result').forEach(function(e){e.style.borderColor=''});event.currentTarget.style.borderColor='var(--primary)'}
+const char* wb_getAppJsLiteral() {
+    return R"JS(
+function toast(msg,type){type=type||'info';if(msg&&typeof msg==='object'){msg=msg.message||msg.error||(msg.code!=null?('Code '+msg.code):JSON.stringify(msg))}var c=document.getElementById('toast-c');if(!c){c=document.createElement('div');c.id='toast-c';c.className='toast-container';document.body.appendChild(c)}var t=document.createElement('div');t.className='toast toast-'+type;t.textContent=String(msg);c.appendChild(t);setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove()},300)},3000)}
+function confirm2(msg,cb){var o=document.createElement('div');o.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:300;display:flex;align-items:center;justify-content:center';o.innerHTML="<div style='background:#1a1d28;border:1px solid #2a2d3a;border-radius:14px;padding:24px;max-width:320px;text-align:center'><p style='margin:0 0 16px;color:#e2e8f0'>"+msg+"</p><div style='display:flex;gap:10px'><button id='cf-cancel' style='flex:1;padding:12px;border-radius:8px;border:1px solid #2a2d3a;background:transparent;color:#94a3b8;cursor:pointer'>Cancel</button><button id='cf-ok' style='flex:1;padding:12px;border-radius:8px;border:none;background:#ef4444;color:#fff;cursor:pointer'>Confirm</button></div></div>";document.body.appendChild(o);document.getElementById('cf-cancel').onclick=function(){o.remove()};document.getElementById('cf-ok').onclick=function(){o.remove();cb()};o.onclick=function(e){if(e.target===o)o.remove()}}
+function selectDevice(addr,ev){document.getElementById('ble_addr').value=addr;document.querySelectorAll('.scan-result').forEach(function(e){e.style.borderColor=''});if(ev&&ev.currentTarget)ev.currentTarget.style.borderColor='var(--primary)'}
 function formatMAC(i){var v=i.value.replace(/[^0-9a-fA-F]/g,'').toUpperCase(),f='';for(var j=0;j<v.length&&j<12;j++){if(j>0&&j%2===0)f+=':';f+=v[j]}i.value=f}
-function startScan(){var b=document.getElementById('scanBtn'),r=document.getElementById('scanResults');b.disabled=true;b.innerHTML="<span class='spinner'></span>Scanning...";r.innerHTML="<div style='text-align:center;padding:16px;color:var(--text3)'><span class='spinner'></span> Scanning...</div>";fetch('/api/ble-scan').then(function(x){return x.json()}).then(function(d){b.disabled=false;b.innerHTML='Scan for Chargers';if(!d.devices.length){r.innerHTML="<div style='text-align:center;padding:16px;color:var(--text3)'>No devices found</div>";return}var h='';d.devices.forEach(function(v){var c=v.is_wallbox?'scan-result wb':'scan-result';var bg=v.is_wallbox?"<span class='badge badge-success'>WALLBOX</span>":'';h+="<div class='"+c+"' onclick=\"selectDevice('"+v.addr+"')\"><div><span class='scan-name'>"+(v.name||'Unknown')+"</span>"+bg+"<br><span class='scan-addr'>"+v.addr+"</span></div><span class='scan-rssi'>"+v.rssi+" dBm</span></div>"});r.innerHTML=h}).catch(function(e){b.disabled=false;b.innerHTML='Scan for Chargers';r.innerHTML="<div style='color:var(--danger)'>"+e+"</div>"})}
+function startScan(){var b=document.getElementById('scanBtn'),r=document.getElementById('scanResults');b.disabled=true;b.innerHTML="<span class='spinner'></span>Scanning...";r.innerHTML="<div style='text-align:center;padding:16px;color:var(--text3)'><span class='spinner'></span> Scanning...</div>";fetch('/api/ble-scan').then(function(x){return x.json()}).then(function(d){b.disabled=false;b.innerHTML='Scan for Chargers';r.replaceChildren();if(!d.devices.length){var n=document.createElement('div');n.style.cssText='text-align:center;padding:16px;color:var(--text3)';n.textContent='No devices found';r.appendChild(n);return}/* SECURITY: build DOM nodes via createElement+textContent — BLE device name and address are attacker-controllable (any radio in range can advertise arbitrary strings) and previously flowed into innerHTML, an XSS sink that ran in admin auth context. */d.devices.forEach(function(v){var row=document.createElement('div');row.className=v.is_wallbox?'scan-result wb':'scan-result';row.addEventListener('click',function(ev){selectDevice(v.addr,ev)});var left=document.createElement('div');var name=document.createElement('span');name.className='scan-name';name.textContent=v.name||'Unknown';left.appendChild(name);if(v.is_wallbox){var bg=document.createElement('span');bg.className='badge badge-success';bg.textContent='WALLBOX';bg.style.marginLeft='8px';left.appendChild(bg)}left.appendChild(document.createElement('br'));var addr=document.createElement('span');addr.className='scan-addr';addr.textContent=v.addr;left.appendChild(addr);row.appendChild(left);var rssi=document.createElement('span');rssi.className='scan-rssi';rssi.textContent=v.rssi+' dBm';row.appendChild(rssi);r.appendChild(row)})}).catch(function(e){b.disabled=false;b.innerHTML='Scan for Chargers';r.replaceChildren();var er=document.createElement('div');er.style.color='var(--danger)';er.textContent=String(e);r.appendChild(er)})}
 function pickSsid(s){var i=document.getElementById('wifi_ssid');if(i)i.value=s;var r=document.getElementById('wifi-results');if(r)r.style.display='none';toast('Selected: '+s,'info')}
 function scanWifi(){
   var b=document.getElementById('wifiScanBtn');
@@ -152,16 +251,26 @@ function scanWifi(){
   r.innerHTML="<div style='padding:10px;text-align:center;color:var(--text3)'><span class='spinner'></span> Scanning WiFi...</div>";
   fetch('/api/wifi-scan',{signal:AbortSignal.timeout(20000)}).then(function(x){return x.json()}).then(function(d){
     b.disabled=false;b.innerHTML='Scan';
-    if(d.error){r.innerHTML="<div style='padding:10px;color:var(--danger)'>Scan error: "+d.error+"</div>";return}
-    if(!d.networks||!d.networks.length){r.innerHTML="<div style='padding:10px;text-align:center;color:var(--text3)'>No networks found</div>";return}
-    var o='';d.networks.sort(function(a,b){return b.rssi-a.rssi}).forEach(function(n){
-      var ss=n.ssid.replace(/'/g,"\\'");
-      o+="<div onclick=\"pickSsid('"+ss+"')\" style='padding:10px 12px;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center'>";
-      o+="<span style='font-weight:500'>"+n.ssid+"</span>";
-      o+="<span style='color:var(--text3);font-size:.8em'>"+n.rssi+" dBm</span>";
-      o+="</div>";
+    r.replaceChildren();
+    if(d.error){var er=document.createElement('div');er.style.cssText='padding:10px;color:var(--danger)';er.textContent='Scan error: '+d.error;r.appendChild(er);return}
+    if(!d.networks||!d.networks.length){var no=document.createElement('div');no.style.cssText='padding:10px;text-align:center;color:var(--text3)';no.textContent='No networks found';r.appendChild(no);return}
+    /* SECURITY: SSIDs are attacker-controllable (any AP can broadcast arbitrary
+       SSID strings); building via createElement+textContent prevents XSS that
+       would otherwise run in the WiFi-setup admin context. */
+    d.networks.sort(function(a,b){return b.rssi-a.rssi}).forEach(function(n){
+      var row=document.createElement('div');
+      row.style.cssText='padding:10px 12px;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center';
+      row.addEventListener('click',function(){pickSsid(n.ssid)});
+      var nameSpan=document.createElement('span');
+      nameSpan.style.fontWeight='500';
+      nameSpan.textContent=n.ssid;
+      row.appendChild(nameSpan);
+      var rssiSpan=document.createElement('span');
+      rssiSpan.style.cssText='color:var(--text3);font-size:.8em';
+      rssiSpan.textContent=n.rssi+' dBm';
+      row.appendChild(rssiSpan);
+      r.appendChild(row);
     });
-    r.innerHTML=o;
     toast('Found '+d.networks.length+' networks','success');
   }).catch(function(e){
     b.disabled=false;b.innerHTML='Scan';
@@ -170,16 +279,28 @@ function scanWifi(){
   });
 }
 function row(l,v){return "<div class='info-row'><span class='info-label'>"+l+"</span><span class='info-value'>"+v+"</span></div>"}
-)JS");
+)JS";
+}
+
+static void handleAppJs() {
+    // See handleStyleCss() — same caching rationale. ?v=<buildVer> in
+    // the URL is the cache-bust signal; immutable means no
+    // revalidation round-trip on subsequent navigations.
+    http.sendHeader("Cache-Control", "public, max-age=31536000, immutable");
+    http.send(200, "application/javascript", wb_getAppJsLiteral());
 }
 
 // ========== HTML helpers ==========
 
-// SVG icons for nav (inline, no external deps)
-#define SVG_DASHBOARD "<svg viewBox='0 0 24 24'><path d='M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z'/></svg>"
-#define SVG_SETTINGS  "<svg viewBox='0 0 24 24'><path d='M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z'/></svg>"
-#define SVG_CONFIG    "<svg viewBox='0 0 24 24'><path d='M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z'/></svg>"
-#define SVG_INFO      "<svg viewBox='0 0 24 24'><path d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z'/></svg>"
+// SVG icons for nav (inline, no external deps).
+// Explicit width/height attrs guarantee correct sizing even if
+// /style.css is slow / stale-cached on first paint. CSS can still
+// override these via the `.nav-item svg` rule.
+#define SVG_DASHBOARD "<svg width='22' height='22' viewBox='0 0 24 24'><path d='M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z'/></svg>"
+#define SVG_SETTINGS  "<svg width='22' height='22' viewBox='0 0 24 24'><path d='M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z'/></svg>"
+#define SVG_CONFIG    "<svg width='22' height='22' viewBox='0 0 24 24'><path d='M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z'/></svg>"
+#define SVG_INFO      "<svg width='22' height='22' viewBox='0 0 24 24'><path d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z'/></svg>"
+#define SVG_LOGS      "<svg width='22' height='22' viewBox='0 0 24 24'><path d='M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z'/></svg>"
 
 static String htmlHead(const char* title = "Wallbox Gateway") {
     bool bleOk = wallboxBLE.isConnected();
@@ -221,6 +342,28 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
         ".toast-error{background:#dc2626;color:#fff}"
         ".toast-info{background:#2563eb;color:#fff}"
         "@keyframes toastIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}"
+        // Boot overlay — covers the page while the gateway is still
+        // coming up (BLE handshake/init takes ~3–8s after a reboot).
+        // Prevents users from navigating, firing BAPI calls, or
+        // hammering refresh during the window where requests would
+        // return "BLE not connected" or queue against a busy mutex.
+        // Hidden as soon as WS pushes ble.state === 'connected'.
+        ".wb-overlay{position:fixed;inset:0;background:rgba(15,17,23,.94);"
+        "-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);"
+        "z-index:500;display:none;align-items:center;justify-content:center;padding:20px}"
+        ".wb-overlay.show{display:flex}"
+        ".wb-overlay-card{background:#1a1d28;border:1px solid #2a2d3a;border-radius:14px;"
+        "padding:24px 28px;max-width:380px;width:100%;text-align:center;"
+        "box-shadow:0 16px 48px rgba(0,0,0,.5)}"
+        ".wb-overlay-card h3{margin:0 0 6px;font-size:1.05em;color:#e2e8f0;font-weight:600}"
+        ".wb-overlay-card p{margin:4px 0;color:#94a3b8;font-size:.85em}"
+        ".wb-overlay-card .wb-overlay-hint{color:#64748b;font-size:.78em;margin-top:14px}"
+        ".wb-overlay-spin{width:36px;height:36px;border:3px solid #2a2d3a;"
+        "border-top-color:#3b82f6;border-radius:50%;animation:sp 1s linear infinite;margin:0 auto 14px}"
+        ".wb-overlay-bar-bg{width:100%;height:8px;background:#2a2d3a;border-radius:4px;"
+        "margin:14px 0 6px;overflow:hidden}"
+        ".wb-overlay-bar{height:100%;background:linear-gradient(90deg,#3b82f6,#4fc3f7);"
+        "width:5%;transition:width .4s ease;border-radius:4px}"
         "</style>";
     // Cache-bust CSS/JS with boot time (unique per firmware build + boot)
     static String buildVer;
@@ -229,16 +372,203 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
     }
     h += "<link rel='stylesheet' href='/style.css?v=" + buildVer + "'>"
         "<script src='/app.js?v=" + buildVer + "' defer></script>"
+        // Fetch limiter — ESP32's web server has very limited concurrent
+        // connection slots. Without this, pages that fire multiple
+        // overlapping fetches (loadGW + loadOtaHistory + loadBootReason
+        // + loadDiag + loadNotifs + updateBleHealth + the page's own
+        // BAPI calls + WebSocket) easily flood the server, causing
+        // ERR_EMPTY_RESPONSE, /app.js stalls, and eventually panic
+        // crashes. We cap concurrency at 2 in-flight requests at any
+        // time; the rest queue. Per-request latency stays unchanged on
+        // the happy path; under load the queue holds requests until
+        // a slot is free.
+        "<script>(function(){var maxC=1,inflight=0,q=[];var nf=window.fetch.bind(window);"
+          // Universal retry policy for /api/command:
+          //   - 429 (rate-limited) → respect Retry-After
+          //   - 503 (busy) → respect Retry-After (default 1.2s)
+          //   - 200 with {error} or null/missing r → backoff retry
+          //   Backoff: 800ms, 2.4s, 7.2s (3x). Max 3 attempts total.
+          //   Non-/api/command URLs are returned as-is (no body parse).
+          "function isCmd(u){return typeof u==='string'&&u.indexOf('/api/command')>=0}"
+          "function delayFor(t,fallback){return new Promise(function(r){setTimeout(r,t.attempt===0?800:t.attempt===1?2400:fallback||7200)})}"
+          "function pump(){while(inflight<maxC&&q.length){var t=q.shift();inflight++;"
+            "nf(t.url,t.opts).then(function(r){inflight--;"
+              "if(!isCmd(t.url)){t.res(r);pump();return}"
+              "var status=r.status;"
+              "if((status===429||status===503)&&t.attempt<2){"
+                "var ra=parseFloat(r.headers.get('Retry-After'));"
+                "var wait=isNaN(ra)?(t.attempt===0?800:2400):ra*1000;"
+                "t.attempt++;setTimeout(function(){q.push(t);pump()},wait);pump();return"
+              "}"
+              "if(status===200&&t.attempt<2){"
+                // peek at body via clone — if {r: null|undefined} or {error}
+                // signals a transient BAPI-side miss, retry with backoff.
+                // Pass the real Response through if body looks good or
+                // if we've exhausted retries.
+                "r.clone().json().then(function(d){"
+                  "var hasErr=d&&typeof d==='object'&&'error' in d;"
+                  "var nullR=d&&typeof d==='object'&&'r' in d&&(d.r===null||d.r===undefined);"
+                  "if(hasErr||nullR){t.attempt++;delayFor(t).then(function(){q.push(t);pump()});pump();return}"
+                  "t.res(r);pump()"
+                "}).catch(function(){t.res(r);pump()});"
+                "return"
+              "}"
+              "t.res(r);pump()"
+            "},function(e){inflight--;"
+              "if(isCmd(t.url)&&t.attempt<2){t.attempt++;delayFor(t).then(function(){q.push(t);pump()});return}"
+              "t.rej(e);pump()"
+            "})}}"
+          "window.fetch=function(url,opts){return new Promise(function(res,rej){"
+            "q.push({url:url,opts:opts,res:res,rej:rej,attempt:0});pump()})};"
+        "})();</script>"
+        // (Note: 429/503 retry-after-honoring logic now lives INSIDE the
+        // single-flight limiter above, courtesy of the reentrancy-fix
+        // patch. Dropped my separate wrapper that was here — it would
+        // double-wrap fetch() and double-count retries.)
         "<script>(function(){try{var t=localStorage.getItem('wb-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t)}catch(e){}})();</script>"
-        "<script>(function(){var handlers={};var sock=null;var rd=1000;var open=false;function connect(){try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.hostname+':81/');sock.onopen=function(){open=true;rd=1000;document.documentElement.setAttribute('data-ws','1')};sock.onmessage=function(e){try{var m=JSON.parse(e.data);var h=handlers[m.t];if(h)h(m.d,m)}catch(err){}};sock.onclose=function(){open=false;document.documentElement.removeAttribute('data-ws');sock=null;setTimeout(connect,rd);rd=Math.min(rd*2,30000)};sock.onerror=function(){}}catch(e){setTimeout(connect,rd)}}window.wbws={subscribe:function(t,fn){handlers[t]=fn},isOpen:function(){return open},send:function(s){if(sock&&open)sock.send(s)}};connect();})();</script>"
-        "<script>(function(){var _lastSt=null;function load(){var def={enabled:false,events:{started:true,complete:true,paused:false,error:true,plug_in:false,plug_out:false}};try{var s=JSON.parse(localStorage.getItem('wb-notif')||'null');if(!s)return def;if(!s.events)s.events=def.events;return s}catch(e){return def}}function fire(title,body){try{new Notification(title,{body:body,tag:'wb',silent:false})}catch(e){}}window.wbFireNotif=fire;window.wbCheckStatus=function(s){if(!s||typeof s.st!=='number')return;var st=s.st;if(_lastSt===null){_lastSt=st;return}if(st===_lastSt)return;var N=load();var was=_lastSt;_lastSt=st;if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted')return;var charging=[2,20,179],complete=[21],paused=[3,22,178,193],error=[6,14],ready=[0,7,16,161,189],connected=[1,13,17];function inG(v,g){return g.indexOf(v)>=0}if(inG(st,complete)&&N.events.complete)fire('Charging complete','Your car is ready to go.');else if(inG(st,charging)&&!inG(was,charging)&&N.events.started)fire('Charging started','Active.');else if(inG(st,paused)&&!inG(was,paused)&&N.events.paused)fire('Charging paused','See dashboard.');else if(inG(st,error)&&!inG(was,error)&&N.events.error)fire('Charger error','See dashboard.');else if(inG(st,connected)&&inG(was,ready)&&N.events.plug_in)fire('Plug connected','Ready to charge.');else if(inG(st,ready)&&!inG(was,ready)&&N.events.plug_out)fire('Plug disconnected','Charger idle.')};})();</script>"
-        "</head><body><div class='container'>"
-        "<div class='ble-bar'><span class='ble-dot'></span>BLE: ";
+        "<script>(function(){var handlers={};var sock=null;var rd=1000;var open=false;function connect(){try{sock=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');sock.onopen=function(){open=true;rd=1000;document.documentElement.setAttribute('data-ws','1')};sock.onmessage=function(e){try{var m=JSON.parse(e.data);var hs=handlers[m.t];if(hs){for(var i=0;i<hs.length;i++){try{hs[i](m.d,m)}catch(ee){}}}}catch(err){}};sock.onclose=function(){open=false;document.documentElement.removeAttribute('data-ws');sock=null;setTimeout(connect,rd);rd=Math.min(rd*2,30000)};sock.onerror=function(){}}catch(e){setTimeout(connect,rd)}}window.wbws={subscribe:function(t,fn){(handlers[t]=handlers[t]||[]).push(fn)},isOpen:function(){return open},send:function(s){if(sock&&open)sock.send(s)}};connect();})();</script>"
+        // Notification dispatcher: state-code groupings use the LOCAL
+        // BLE 0-18 enum (per jagheterfredrik/wallbox-ble + benvanmierloo
+        // PR #7). Older builds used the cloud status_id mapping which
+        // collided with the local enum at several codes — most painfully
+        // st=6 which means LOCKED locally but ERROR in the cloud table.
+        "<script>(function(){var _lastSt=null;function load(){var def={enabled:false,events:{started:true,complete:true,paused:false,error:true,plug_in:false,plug_out:false}};try{var s=JSON.parse(localStorage.getItem('wb-notif')||'null');if(!s)return def;if(!s.events)s.events=def.events;return s}catch(e){return def}}function fire(title,body){try{new Notification(title,{body:body,tag:'wb',silent:false})}catch(e){}}window.wbFireNotif=fire;window.wbCheckStatus=function(s){if(!s||typeof s.st!=='number')return;var st=s.st;if(_lastSt===null){_lastSt=st;return}if(st===_lastSt)return;var N=load();var was=_lastSt;_lastSt=st;if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted')return;var charging=[1],complete=[5],paused=[4],error=[7],ready=[0],connected=[2,3,8,10,12,13,18];function inG(v,g){return g.indexOf(v)>=0}if(inG(st,complete)&&N.events.complete)fire('Charging complete','Your car is ready to go.');else if(inG(st,charging)&&!inG(was,charging)&&N.events.started)fire('Charging started','Active.');else if(inG(st,paused)&&!inG(was,paused)&&N.events.paused)fire('Charging paused','See dashboard.');else if(inG(st,error)&&!inG(was,error)&&N.events.error)fire('Charger error','See dashboard.');else if(inG(st,connected)&&inG(was,ready)&&N.events.plug_in)fire('Plug connected','Ready to charge.');else if(inG(st,ready)&&!inG(was,ready)&&N.events.plug_out)fire('Plug disconnected','Charger idle.')};})();</script>"
+        "</head><body>";
+    // Boot overlay markup — only rendered when there's a BLE link we'd be
+    // waiting on. Three exclusion cases caught here:
+    //   1. AP / captive-portal mode (no STA WiFi yet) — BLE task never starts.
+    //   2. No charger address configured (STA up but bleAddr blank) — same.
+    //   3. We're serving /config or /ota in setup flow — even if BLE is
+    //      configured, the user is here to change config, don't gate them.
+    //
+    // peter-mcc hit case 1 on a fresh USB-flash of rc21 (#4): the AP-mode
+    // setup page rendered with the overlay's `show` class because BLE
+    // wasn't "connected", and there was no BLE task to push a `connected`
+    // event over WS to dismiss it — page appeared permanently stuck.
+    // Rendering the overlay HTML at all in setup mode means the JS that
+    // follows could still re-show it on a WS-drop watchdog tick. Cleanest
+    // fix: omit the overlay markup entirely when we know there's no BLE
+    // to wait for.
+    bool inSetupMode = webServer.isAPMode() || !configMgr.hasBLE();
+    bool bootReady = (bleState == "connected");
+    if (!inSetupMode) {
+        h += "<div id='wb-boot-overlay' class='wb-overlay";
+        h += bootReady ? "" : " show";
+        h += "'><div class='wb-overlay-card'>"
+             "<div class='wb-overlay-spin'></div>"
+             // Title and subtitle are both JS-controlled — they say
+             // "Wallbox Gateway is starting" only during an actual cold
+             // boot / BLE-disconnected state. Navigation transitions show
+             // "Loading…" and WS-drop reconnections show "Reconnecting…"
+             // so users don't see a misleading boot screen during a
+             // quick page change.
+             "<div id='wb-boot-title' style='font-size:1.05em;font-weight:600;color:#e2e8f0;margin:0 0 6px'>"
+             "Wallbox Gateway is starting</div>"
+             "<p id='wb-boot-stage'>Initializing</p>"
+             "<div class='wb-overlay-bar-bg'><div id='wb-boot-bar' class='wb-overlay-bar'></div></div>"
+             "<p id='wb-boot-hint' class='wb-overlay-hint'>This usually takes 5&ndash;15 seconds after a reboot.</p>"
+             "</div></div>";
+    }
+    h += "<div class='container'>"
+        "<div class='ble-bar'><span class='ble-dot'></span>BLE: <span id='ble-bar-state'>";
     h += bleState;
+    h += "</span>";
+    h += "<span id='ble-bar-rssi'>";
     if (bleOk && rssi > -127) {
         h += " (" + String(rssi) + " dBm)";
     }
-    h += "</div>";
+    h += "</span></div>";
+    // Keep the banner live — subscribe to the same 'ble' WS push the page
+    // bodies use, so banner + Gateway-card BLE Signal always agree.
+    // Also drive the boot overlay: state→progress map below mirrors the
+    // sequence in WallboxBLE::stateStr(). When connected, overlay fades
+    // out after a short delay so the user sees a 100% finish.
+    h += "<script>(function(){"
+         "var O=document.getElementById('wb-boot-overlay');"
+         "var B=document.getElementById('wb-boot-bar');"
+         "var S=document.getElementById('wb-boot-stage');"
+         "var T=document.getElementById('wb-boot-title');"
+         "var H=document.getElementById('wb-boot-hint');"
+         // Overlay has three independent modes; the active one decides
+         // what title/hint is shown. WS BLE pushes update the progress
+         // bar + stage text regardless, but title/hint are only
+         // touched in 'boot' mode so a click-nav 'Loading' or
+         // watchdog 'Reconnecting' isn't clobbered when the next ble
+         // event arrives.
+         "var mode='boot';"
+         "var M={'disconnected':{p:20,t:'Searching for charger\xE2\x80\xA6'},"
+                 "'connecting':{p:50,t:'Connecting to charger\xE2\x80\xA6'},"
+                 "'authenticating':{p:75,t:'Authenticating\xE2\x80\xA6'},"
+                 "'connected':{p:100,t:'Ready'},"
+                 "'error':{p:15,t:'Retrying\xE2\x80\xA6'},"
+                 "'unknown':{p:10,t:'Starting up\xE2\x80\xA6'}};"
+         "var BOOT_TITLE='Wallbox Gateway is starting';"
+         // 5–15 uses a JS Unicode escape (parsed by the browser)
+         // rather than the equivalent \xE2\x80\x93 C++ hex escape,
+         // which the compiler ate as one variable-length escape
+         // (\x9315) and produced garbage bytes in the binary.
+         "var BOOT_HINT='This usually takes 5\\u201315 seconds after a reboot.';"
+         "function show(){if(O)O.classList.add('show')}"
+         "function hide(){if(O)O.classList.remove('show')}"
+         "if(window.wbws){window.wbws.subscribe('ble',function(d){"
+             "var s=document.getElementById('ble-bar-state');if(s)s.textContent=d.state;"
+             "var r=document.getElementById('ble-bar-rssi');if(r)r.textContent=(d.state==='connected'&&d.rssi>-127)?(' ('+d.rssi+' dBm)'):'';"
+             "var m=M[d.state]||M['disconnected'];"
+             // bar + stage track real BLE state in all modes; the
+             // title/hint only follow BLE state in boot mode.
+             "if(B)B.style.width=m.p+'%';"
+             "if(mode==='boot'){"
+                 "if(S)S.textContent=m.t;"
+                 "if(T)T.textContent=BOOT_TITLE;"
+                 "if(H)H.textContent=BOOT_HINT;"
+             "}"
+             "if(d.state==='connected'){"
+                 // 100% then fade out — reset mode so the next time
+                 // the overlay reappears (e.g. after a reboot) it
+                 // starts fresh in boot mode.
+                 "setTimeout(function(){hide();mode='boot'},600)"
+             "}else if(mode==='boot'){show()}"
+         "});}"
+         // Watchdog: only fires after WS has been confirmed open at
+         // least once (wasOpen starts false). A genuine open→closed
+         // transition means the gateway disappeared — switch to
+         // 'reconnect' mode so subsequent BLE pushes don't reset the
+         // title back to 'Wallbox Gateway is starting'.
+         "var wasOpen=false;setInterval(function(){"
+             "var on=window.wbws&&window.wbws.isOpen();"
+             "if(on)wasOpen=true;"
+             "else if(wasOpen){"
+                 "mode='reconnect';"
+                 "if(T)T.textContent='Reconnecting to gateway';"
+                 "if(S)S.textContent='Please wait\xE2\x80\xA6';"
+                 "if(H)H.textContent='The gateway will return in a few seconds.';"
+                 "if(B)B.style.width='5%';"
+                 "show()"
+             "}"
+         "},1500);"
+         // Nav-click loading hint — switch into 'nav' mode so the WS
+         // 'ble' handler above won't overwrite the title back to the
+         // boot string. 150ms deferred show: fast page transitions
+         // (paint-hold or cache-hit nav) finish before the timer
+         // fires, so the user never sees a flash of overlay. Slow
+         // navs (cold-cache HTML download + parse) fire the overlay.
+         // The browser tearing down the page on navigation cancels
+         // pending setTimeout, so a successful fast nav guarantees
+         // the timer never runs.
+         "document.addEventListener('click',function(e){"
+             "var t=e.target;while(t&&t.nodeName!=='A')t=t.parentNode;"
+             "if(!t||!t.href||t.target||t.host!==location.host)return;"
+             "if(t.getAttribute('href').charAt(0)==='#')return;"
+             "setTimeout(function(){"
+                 "mode='nav';"
+                 "if(T)T.textContent='Loading';"
+                 "if(S)S.textContent='Opening page\xE2\x80\xA6';"
+                 "if(H)H.textContent='';"
+                 "if(B)B.style.width='40%';"
+                 "show();"
+             "},150);"
+         "});"
+         "})();</script>";
     return h;
 }
 
@@ -259,6 +589,7 @@ static String htmlFoot(const char* activePath) {
     navItem("/settings", SVG_SETTINGS, "Settings");
     navItem("/config", SVG_CONFIG, "Config");
     navItem("/info", SVG_INFO, "Info");
+    navItem("/logs", SVG_LOGS, "Logs");
     h += "</nav>"
          "<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(function(){});</script>"
          "<script>(function(){var r=function(){document.body.classList.add('ready')};if(document.readyState==='interactive'||document.readyState==='complete')r();else document.addEventListener('DOMContentLoaded',r)})();</script>"
@@ -268,18 +599,27 @@ static String htmlFoot(const char* activePath) {
 
 // ========== API endpoints ==========
 
-static void handleBleScan() {
-    // Don't scan if BLE is actively connecting — causes conflicts
+// 3.0 task #78: extracted BLE scan body. Both servers call this and
+// then ->send() the result.
+//
+// BLOCKS for ~8 seconds while the NimBLE scan runs. On sync server
+// that blocks the main loop. On async server that blocks the
+// AsyncTCP task (other async requests queue behind it). Acceptable
+// in both cases — BLE scan is a manual user action initiated from
+// the Config page during pairing.
+String wb_runBleScan() {
     if (wallboxBLE.state() == WallboxBLE::State::CONNECTING ||
         wallboxBLE.state() == WallboxBLE::State::AUTHENTICATING) {
-        http.send(200, "application/json", "{\"devices\":[],\"busy\":true}");
-        return;
+        Log.println("[BLE-Scan] requested via web UI, but BLE is busy — refused");
+        return "{\"devices\":[],\"busy\":true}";
     }
+    Log.println("[BLE-Scan] requested via web UI, starting 8s scan...");
     NimBLEScan* scan = NimBLEDevice::getScan();
     scan->setActiveScan(true);
     scan->setInterval(100);
     scan->setWindow(99);
     NimBLEScanResults results = scan->start(8, false);
+    Log.printf("[BLE-Scan] complete: %d device(s) seen\n", results.getCount());
     String json = "{\"devices\":[";
     bool first = true;
     for (int i = 0; i < results.getCount(); i++) {
@@ -288,25 +628,44 @@ static void handleBleScan() {
         String addr = dev.getAddress().toString().c_str();
         int rssi = dev.getRSSI();
         bool isWB = name.startsWith("WB") || name.indexOf("allbox") >= 0;
+        Log.printf("[BLE-Scan]   %s%s %s  RSSI:%d\n",
+                   isWB ? "* " : "  ",
+                   addr.c_str(),
+                   name.length() ? name.c_str() : "(no name)",
+                   rssi);
         if (!first) json += ",";
         first = false;
         json += "{\"addr\":\"" + addr + "\",\"name\":\"" + name + "\",\"rssi\":" + String(rssi) + ",\"is_wallbox\":" + (isWB ? "true" : "false") + "}";
     }
     json += "]}";
-    http.send(200, "application/json", json);
+    return json;
 }
 
-static void handleWifiScan() {
+static void handleBleScan() {
+    http.send(200, "application/json", wb_runBleScan());
+}
+
+// 3.0 task #78: extracted WiFi scan body. Auth check is the
+// caller's responsibility (the AP-vs-STA decision happens at the
+// route layer — async server runs in STA only so it always
+// auth-gates; sync server keeps the AP-mode bypass).
+//
+// Returns (status_code, body). Status is 200 on success, 500 on
+// scan failure. BLOCKS for ~5 s on the scan call.
+struct ScanResult { int status; String body; };
+ScanResult wb_runWifiScan() {
     // Ensure STA is enabled for scanning (AP-only mode can't scan)
     wifi_mode_t mode = WiFi.getMode();
     if (mode == WIFI_AP) WiFi.mode(WIFI_AP_STA);
     else if (mode == WIFI_OFF) WiFi.mode(WIFI_STA);
 
+    Log.println("[WiFi-Scan] requested via web UI, scanning...");
     int n = WiFi.scanNetworks(false, true, false, 400);
     if (n < 0) {
-        http.send(500, "application/json", "{\"error\":\"scan failed\",\"code\":" + String(n) + "}");
-        return;
+        Log.printf("[WiFi-Scan] failed (code %d)\n", n);
+        return { 500, "{\"error\":\"scan failed\",\"code\":" + String(n) + "}" };
     }
+    Log.printf("[WiFi-Scan] complete: %d network(s) found\n", n);
     String json = "{\"networks\":[";
     bool first = true;
     for (int i = 0; i < n && i < 20; i++) {
@@ -314,16 +673,28 @@ static void handleWifiScan() {
         if (ssid.length() == 0) continue;  // hidden networks
         if (!first) json += ",";
         first = false;
-        // Escape quotes in SSID
         String s = ssid; s.replace("\\", "\\\\"); s.replace("\"", "\\\"");
         json += "{\"ssid\":\"" + s + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
     }
     json += "]}";
     WiFi.scanDelete();
-    http.send(200, "application/json", json);
+    return { 200, json };
 }
 
-static void handleApiStatus() {
+static void handleWifiScan() {
+    // Auth not required in AP mode (otherwise users can't pick a WiFi
+    // during initial setup). When in STA mode (already connected),
+    // require auth to avoid leaking nearby SSIDs to anyone on the LAN.
+    if (WiFi.getMode() != WIFI_AP && !checkAuth()) return;
+    ScanResult r = wb_runWifiScan();
+    http.send(r.status, "application/json", r.body);
+}
+
+// 3.0 task #78: extracted body of handleApiStatus(). Non-static so the
+// async server in wb_web_async.cpp can extern it and serve the SAME
+// JSON shape on its port without duplicating the field list. The
+// sync handler below is now a one-line trampoline.
+String wb_buildStatusJson() {
     String json = "{";
     json += "\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") + "\"";
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
@@ -340,16 +711,44 @@ static void handleApiStatus() {
     json += ",\"dev_model\":\"" + wallboxBLE.deviceModel() + "\"";
     json += ",\"dev_fw\":\"" + wallboxBLE.deviceFirmware() + "\"";
     json += ",\"dev_name\":\"" + wallboxBLE.deviceName() + "\"";
+    json += ",\"chg_sn\":\"" + wallboxBLE.chargerSerial() + "\"";
+    json += ",\"chg_mac\":\"" + wallboxBLE.chargerMac() + "\"";
+    json += ",\"chg_grounding\":\"" + wallboxBLE.chargerGrounding() + "\"";
+    // chg_app_fw — charger application firmware (the version Wallbox app
+    // shows), distinct from dev_fw which is the BLE module firmware.
+    // chg_project — canonical model identifier (e.g. "prj15-pulsar-max").
+    json += ",\"chg_app_fw\":\"" + wallboxBLE.chargerAppFirmware() + "\"";
+    json += ",\"chg_project\":\"" + wallboxBLE.chargerProject() + "\"";
+    // Emit null instead of -1 when r_ses doesn't expose a usable count
+    // (Plus and some MAX firmwares don't fill in `last`). HA's
+    // `value_json.chg_sessions` template renders null as unavailable.
+    {
+        int32_t sc = wallboxBLE.chargerSessionCount();
+        json += sc >= 0 ? (",\"chg_sessions\":" + String((int)sc))
+                        : ",\"chg_sessions\":null";
+    }
+    json += ",\"chg_power_boost\":" + String((int)wallboxBLE.chargerPowerBoost());
+    json += ",\"chg_lock_state\":" + String((int)wallboxBLE.chargerLockState());
+    json += ",\"chg_net_ssid\":\"" + wallboxBLE.chargerNetworkSsid() + "\"";
+    json += ",\"chg_net_ip\":\"" + wallboxBLE.chargerNetworkIp() + "\"";
+    json += ",\"chg_net_signal\":" + String(wallboxBLE.chargerNetworkSignal());
+    json += ",\"chg_fw_changed\":" + String(wallboxBLE.firmwareChanged() ? "true" : "false");
+    json += ",\"chg_fw_prev\":\"" + wallboxBLE.previousFirmware() + "\"";
     json += ",\"ble_paused\":" + String(wallboxBLE.isPaused() ? "true" : "false");
     json += ",\"ble_pause_remaining\":" + String(wallboxBLE.pauseRemainingMs() / 1000);
     json += ",\"ble_last_activity_s\":" + String(wallboxBLE.lastActivityAge() / 1000);
     json += ",\"auth_enabled\":" + String(configMgr.get().authEnabled && configMgr.get().authPass.length() > 0 ? "true" : "false");
     json += ",\"sta_connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
     json += "}";
-    http.send(200, "application/json", json);
+    return json;
+}
+
+static void handleApiStatus() {
+    http.send(200, "application/json", wb_buildStatusJson());
 }
 
 static void handleBlePause() {
+    if (!checkAuth()) return;
     uint32_t ms = 5 * 60 * 1000;  // default 5 min
     if (http.hasArg("ms")) ms = (uint32_t) http.arg("ms").toInt();
     if (ms < 30000) ms = 30000;        // min 30s
@@ -369,13 +768,116 @@ void WBWebServer::updateCache(const String& status, const String& realtime) {
     _cacheTime = millis();
 }
 
-static void handleApiCharger() {
+// 3.0 task #78: same extraction pattern as wb_buildStatusJson —
+// non-static so the async server can call it.
+String wb_buildChargerJson() {
     // Always return cached data instantly — never block on BLE
-    String json = "{\"status\":" + _cachedStatus +
-                  ",\"realtime\":" + _cachedRealtime +
-                  ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"" +
-                  ",\"cache_age\":" + String((millis() - _cacheTime) / 1000) + "}";
-    http.send(200, "application/json", json);
+    return "{\"status\":" + _cachedStatus +
+           ",\"realtime\":" + _cachedRealtime +
+           ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"" +
+           ",\"cache_age\":" + String((millis() - _cacheTime) / 1000) + "}";
+}
+
+static void handleApiCharger() {
+    http.send(200, "application/json", wb_buildChargerJson());
+}
+
+// 3.0 task #78: builders extracted from /api/diag/runtime and
+// /api/boot/history inline lambdas. Same shape as the sync
+// handlers' bodies — the async server in wb_web_async.cpp calls
+// these to emit identical payloads.
+String wb_buildDiagRuntimeJson() {
+    String body = "{";
+    body += "\"heap_free\":" + String(ESP.getFreeHeap());
+    body += ",\"heap_min_ever\":" + String(ESP.getMinFreeHeap());
+    body += ",\"heap_max_alloc\":" + String(ESP.getMaxAllocHeap());
+    body += ",\"psram_free\":" + String(ESP.getFreePsram());
+    body += ",\"main_stack_hwm\":" + String(uxTaskGetStackHighWaterMark(NULL));
+    body += ",\"ble_stack_hwm\":";
+    TaskHandle_t ble = xTaskGetHandle("wb_ble");
+    body += ble ? String(uxTaskGetStackHighWaterMark(ble)) : String("null");
+    body += ",\"loop_stack_hwm\":";
+    TaskHandle_t arduinoLoop = xTaskGetHandle("loopTask");
+    body += arduinoLoop ? String(uxTaskGetStackHighWaterMark(arduinoLoop)) : String("null");
+    body += ",\"uptime_s\":" + String(millis() / 1000);
+    body += "}";
+    return body;
+}
+
+String wb_buildBootHistoryJson() {
+    return "{\"current\":\"" + String(wb_health::currentBootReasonStr())
+         + "\",\"current_fw\":\"" + String(WB_VERSION)
+         + "\",\"history\":" + wb_health::bootHistoryJson() + "}";
+}
+
+// Inflight counter for the `?sync=1` escape hatch only. Async
+// /api/command is bounded by the BLE request queue (depth 6 in
+// wb_ble.h); when full, enqueueRequest returns 0 and we 503. Sync
+// callers still run BAPI on the web handler's call stack, so a
+// stuck legacy caller could double up if we didn't gate — cap at 1
+// to keep sync strictly serial. The 2.6.x-era `MAX_API_CMD_INFLIGHT
+// = 2` constant retired in step 9: the async queue supersedes it
+// for the default path, and the sync gate is intentionally tighter
+// (1) than the old shared limit.
+static volatile int _apiCmdInflight = 0;
+
+// Re-entrancy tripwire for WBWebServer::loop(). Normally 0→1→0 per request;
+// if g_webMaxReentry ever latches >1, something pumped http.handleClient()
+// from inside a handler (the reentrancy class of bug — see onYield in
+// main.cpp). Surfaced on /api/health so we can prove over Wi-Fi, with no
+// serial console, that it stays at 1. Single-threaded handler → plain ints.
+volatile int g_webReentryDepth = 0;
+volatile int g_webMaxReentry   = 0;
+// Main-loop iteration gap tracker. Updated from main.cpp loop() — the
+// difference between consecutive entries tells us if the main task is
+// being blocked for long stretches. Any iteration > ~500 ms is
+// suspicious; a wedge (per peter-mcc #4 and the maintainer's HAR
+// capture) would show as a value in the multi-second range. The
+// counter latches at the worst gap observed since boot — cheap to
+// read, gives us hard evidence of CPU starvation without needing
+// serial console access.
+volatile uint32_t g_loopLastMs = 0;
+volatile uint32_t g_loopMaxMs  = 0;
+
+// Token bucket on the serialized BLE resource. /api/command ultimately issues
+// one BLE round-trip (~500 ms) behind _cmdMutex; this caps the *rate* so a
+// pathological client (tight curl loop, HA re-sync storm) gets a clean
+// 429 + Retry-After instead of piling up. Sizing: BAPI completes ~1 op / 500 ms,
+// so refill 2 tokens/sec; capacity 4 absorbs a legitimate burst (cold page
+// load, a couple of Saves). millis()-based lazy refill — no timer, ~0 heap.
+// This is rate; the BLE request queue (kBleReqQueueDepth) handles
+// concurrency for the async path, and _apiCmdInflight gates the
+// `?sync=1` escape hatch — three orthogonal admission guards.
+static const float TB_CAP    = 4.0f;   // burst capacity (tokens)
+static const float TB_REFILL = 2.0f;   // tokens per second
+static float       _tbTokens = TB_CAP;
+static uint32_t    _tbLastMs = 0;
+
+// 3.0 task #78: non-static so wb_web_async.cpp can call into the
+// same token bucket — sharing the rate limit between sync and async
+// servers keeps a flooder from doubling their throughput by
+// alternating ports.
+bool tbAllow() {
+    uint32_t now = millis();
+    if (_tbLastMs == 0) _tbLastMs = now;
+    _tbTokens += (now - _tbLastMs) * (TB_REFILL / 1000.0f);
+    if (_tbTokens > TB_CAP) _tbTokens = TB_CAP;
+    _tbLastMs = now;
+    if (_tbTokens < 1.0f) return false;
+    _tbTokens -= 1.0f;
+    return true;
+}
+
+// Read-only token bucket peek, for surfacing on /api/health and over MQTT
+// for HA-observable rate-limit pressure. Refresh-then-read without
+// consuming — so a single curl /api/health doesn't perturb the bucket.
+int wb_web_tokens_remaining() {
+    uint32_t now = millis();
+    if (_tbLastMs == 0) _tbLastMs = now;
+    _tbTokens += (now - _tbLastMs) * (TB_REFILL / 1000.0f);
+    if (_tbTokens > TB_CAP) _tbTokens = TB_CAP;
+    _tbLastMs = now;
+    return (int)_tbTokens;
 }
 
 static void handleApiCommand() {
@@ -384,25 +886,158 @@ static void handleApiCommand() {
         http.send(503, "application/json", "{\"error\":\"BLE not connected\"}");
         return;
     }
+    // Rate limit before touching the inflight counter so the bucket gates the
+    // true admission point. 429 = slow down (rate); distinct from 503 = busy
+    // (concurrency) below, so the two failure modes stay diagnosable.
+    if (!tbAllow()) {
+        http.sendHeader("Retry-After", "1");
+        http.send(429, "application/json", "{\"error\":\"rate_limited\",\"retry\":true}");
+        return;
+    }
+
+    // 2.7.0 step 9b — UI-contract preservation: bumped default
+    // wait from 800 → 5000 ms after live UI testing showed every
+    // existing GUI fetch (30+ sites) expects `d.r` populated
+    // synchronously. The pre-refactor `sendCommand` internal
+    // timeout was 5000 ms, so matching it here restores byte-for-
+    // byte JS compatibility. The async escape valve (202 on
+    // timeout) still kicks in for the genuinely slow ones, and
+    // upper clamp bumped to 15000 to cover settings/schedule reads
+    // that legitimately need 8-12 s on busy MAX firmware.
+    //
+    //   ?sync=1     — old blocking behavior + sync inflight cap
+    //   ?wait=N     — short-wait deadline in ms (0..8000, default 5000)
+    //   ?wait=0     — pure async: enqueue + 202 immediately
+    //
+    // Upper clamp tightened to 8000 ms (was 15000) so a single
+    // misbehaving caller can't latch loop_max_ms to a worrying
+    // 15-second value in /info → Connection Diagnostics. 8 s
+    // still covers the slowest real BAPI call we've measured
+    // (gupdc cloud roundtrip ~5-10 s). Callers asking for the
+    // pre-step-9 12-second wait — Q() and B() in the GUI — fall
+    // through this clamp gracefully: they get 8 s instead of 12 s,
+    // and on the rare gupdc that overshoots 8 s they get a 202
+    // (rendered as "loading" rather than a hard error).
+    bool useSync = http.arg("sync") == "1";
+    int waitMs = 5000;
+    if (http.hasArg("wait")) {
+        waitMs = http.arg("wait").toInt();
+        if (waitMs < 0) waitMs = 0;
+        if (waitMs > 8000) waitMs = 8000;
+    }
+
+    // Resolve action → met + par (shared by both paths).
     String action = http.arg("action");
-    String value = http.arg("value");
-    String resp;
-    if (action == "start") resp = wallboxBLE.sendCommand(bapi::MET_START_STOP, "1");
-    else if (action == "stop") resp = wallboxBLE.sendCommand(bapi::MET_START_STOP, "2");
-    else if (action == "lock") resp = wallboxBLE.sendCommand(bapi::MET_LOCK, "1");
-    else if (action == "unlock") resp = wallboxBLE.sendCommand(bapi::MET_LOCK, "0");
-    else if (action == "current") resp = wallboxBLE.sendCommand(bapi::MET_SET_CURRENT, value.c_str());
-    else if (action == "reboot") resp = wallboxBLE.sendCommand(bapi::MET_REBOOT, "null");
+    String value  = http.arg("value");
+    const char* met = nullptr;
+    String par;
+    if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
+    else if (action == "stop")    { met = bapi::MET_START_STOP;  par = "2"; }
+    else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
+    else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
+    else if (action == "current") { met = bapi::MET_SET_CURRENT; par = value; }
+    else if (action == "reboot")  { met = bapi::MET_REBOOT;      par = "null"; }
     else if (action == "bapi") {
-        String met = http.arg("met");
-        String par = http.arg("par");
+        static String s_met;  // outlives this scope via c_str() below
+        s_met = http.arg("met");
+        met = s_met.c_str();
+        par = http.arg("par");
         if (par.isEmpty()) par = "null";
-        resp = wallboxBLE.sendCommand(met.c_str(), par.c_str());
     } else {
         http.send(400, "application/json", "{\"error\":\"unknown action\"}");
         return;
     }
-    http.send(200, "application/json", resp.isEmpty() ? "{\"error\":\"timeout\"}" : resp);
+
+    // Sync escape hatch: preserves the pre-2.7.0 byte-for-byte
+    // response shape AND the inflight cap for callers that rely on
+    // either. Documented as deprecated, kept for two releases.
+    if (useSync) {
+        if (_apiCmdInflight >= 1) {
+            // Stricter inflight cap on sync (1 not 2) so a stuck
+            // legacy caller can't double up. Async path doesn't gate
+            // here — it gates via the enqueueRequest queue-full path.
+            http.sendHeader("Retry-After", "1");
+            http.send(503, "application/json", "{\"error\":\"busy\",\"retry\":true}");
+            return;
+        }
+        _apiCmdInflight++;
+        String resp = wallboxBLE.sendCommand(met, par.c_str());
+        _apiCmdInflight--;
+        http.send(200, "application/json",
+                  resp.isEmpty() ? "{\"error\":\"timeout\"}" : resp);
+        return;
+    }
+
+    // Async path. Enqueue with WAKE_AND_MQTT so that:
+    //   - If we wake within `waitMs`, we serve 200 + body inline.
+    //   - If we time out, the BLE task still publishes the eventual
+    //     response to wallbox/response/<met>, so the caller can pick
+    //     it up out-of-band (or via /api/command_status, step 7).
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    xTaskNotifyStateClear(self);
+    // Step 9d: thread the BAPI timeout through. Without this, the
+    // BLE task gives up at its own 5 s default even if the caller
+    // asked for ?wait=12000. We add a small headroom (250 ms) so the
+    // BAPI completion has time to land before the HTTP wait deadline.
+    //
+    // Step 9e fix: pure async (?wait=0) callers DON'T want a 250 ms
+    // BAPI timeout — that would kill the BAPI before it had a chance
+    // to complete, the response would be empty, and _storeResponse
+    // would skip it (it filters empty JSON), so /api/command_status
+    // would poll forever. Use 0 to mean "BLE task default" (5 s).
+    uint32_t bapiTimeout = (waitMs > 0) ? ((uint32_t)waitMs + 250) : 0;
+    uint32_t reqId = wallboxBLE.enqueueRequest(
+        met, par.c_str(),
+        WallboxBLE::ReplyMode::WAKE_AND_MQTT, self, bapiTimeout);
+    if (reqId == 0) {
+        // Queue full — exactly the "busy" condition the inflight cap
+        // used to signal, just enforced via the actual BLE backlog.
+        http.sendHeader("Retry-After", "1");
+        http.send(503, "application/json", "{\"error\":\"busy\",\"retry\":true}");
+        return;
+    }
+
+    if (waitMs == 0) {
+        // Pure async — return 202 immediately.
+        String body = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
+        http.send(202, "application/json", body);
+        return;
+    }
+
+    // Step 9c chunked-wait: pump MQTT + WS every 50 ms instead of a
+    // single long xTaskNotifyWait. Without this, a 5 s ?wait freezes
+    // PubSubClient and WebSocketsServer on the main task — observed
+    // symptoms were ERR_CONNECTION_RESET on WS handshake when the
+    // page raced our long BAPI wait, and HA seeing stale state for
+    // a multi-second blip after a heavy /sessions burst.
+    //
+    // The BLE task is unblocked the whole time (it's the one
+    // processing our request), so pumping main-task-only subsystems
+    // here is free: they're idle waiting for their main-loop slot.
+    // PubSubClient handlers post-Step-8 only call enqueueRequest, so
+    // no re-entrancy into sendCommand. WebSocketsServer is purely
+    // I/O-driven, no app-code re-entry. Safe.
+    const uint32_t TICK_MS = 50;
+    bool got = false;
+    String resp;
+    for (uint32_t elapsed = 0; elapsed < (uint32_t)waitMs && !got; elapsed += TICK_MS) {
+        uint32_t notified = 0;
+        if (xTaskNotifyWait(0, ULONG_MAX, &notified, pdMS_TO_TICKS(TICK_MS)) == pdTRUE) {
+            got = wallboxBLE.tryFetchResponse(reqId, resp) && resp.length();
+            break;
+        }
+        wallboxMQTT.loop();
+        wbws::loop();
+    }
+    if (got) {
+        http.send(200, "application/json", resp);
+        return;
+    }
+    // Deadline elapsed. The BLE task will still complete the request
+    // and publish to wallbox/response/<met>; the caller can poll
+    // /api/command_status?id=N (step 7) or subscribe MQTT.
+    String body = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
+    http.send(202, "application/json", body);
 }
 
 static String normalizeMAC(const String& raw) {
@@ -422,17 +1057,36 @@ static String normalizeMAC(const String& raw) {
 }
 
 // ========== PAGE 1: Dashboard (/) ==========
-static void handleDashboard() {
+// 3.0 task #78: extracted body of handleDashboard(). Non-static so
+// the async server can call it. Sync handler trampolines through.
+String wb_buildDashboardPage() {
     String page = htmlHead("Dashboard");
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Dashboard...</div>
 <div id='pg' style='display:none'>
 <h1>&#x26A1; Wallbox</h1>
 <div id='auth-warn' style='display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#f59e0b'>&#x26A0; No web password set — anyone on your WiFi can control this charger. <a href='/config' style='color:#f59e0b;text-decoration:underline'>Set one</a></div>
-<div id='pin-warn' style='display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#f59e0b'>&#x26A0; No BLE PIN set — anyone nearby can control your charger. <a href='/settings' style='color:#f59e0b;text-decoration:underline'>Set a PIN</a></div>
+<div id='pin-warn' style='display:none;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#f59e0b'>&#x26A0; No Bluetooth Passcode set on the charger — anyone nearby could pair to it. Set one in the Wallbox app, then copy it into the gateway's <a href='/config' style='color:#f59e0b;text-decoration:underline'>config page</a>.</div>
 <div id='ble-health' style='display:none;border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em'></div>
 <div id='notif-bar' style='display:none;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#ef4444;cursor:pointer' onclick='showNotifs()'>&#x1F514; <span id='notif-count'></span> charger notification(s) — tap to view</div>
 <div id='notif-modal' style='display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:300;align-items:center;justify-content:center;padding:16px' onclick='if(event.target===this)this.style.display=\"none\"'><div id='notif-modal-inner' style='background:var(--card);border-radius:12px;max-width:480px;width:100%;max-height:80vh;overflow:auto;padding:16px'></div></div>
+
+<div class='card'>
+  <div class='card-header'><span class='card-icon'>&#x26A1;</span><h2 style='margin:0;font-size:1em'>Power Flow</h2></div>
+  <svg viewBox='0 0 360 130' style='display:block;width:100%;max-width:360px;margin:0 auto' role='img' aria-label='Live power flow Grid Charger Vehicle'>
+    <defs><marker id='pf-arrow' viewBox='0 0 6 6' refX='5' refY='3' markerWidth='5' markerHeight='5' orient='auto'><path d='M0,0 L6,3 L0,6 z' fill='var(--accent)'/></marker></defs>
+    <line x1='75' y1='70' x2='145' y2='70' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
+    <line x1='215' y1='70' x2='285' y2='70' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
+    <line id='pf-line1' x1='75' y1='70' x2='145' y2='70' stroke='var(--success)' stroke-width='2.5' stroke-dasharray='8 5' stroke-dashoffset='0' marker-end='url(#pf-arrow)' style='opacity:0;transition:opacity .25s'/>
+    <line id='pf-line2' x1='215' y1='70' x2='285' y2='70' stroke='var(--success)' stroke-width='2.5' stroke-dasharray='8 5' stroke-dashoffset='0' marker-end='url(#pf-arrow)' style='opacity:0;transition:opacity .25s'/>
+    <g><circle cx='45' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><text x='45' y='78' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x1F50C;</text><text x='45' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Grid</text><text id='pf-grid-kw' x='45' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
+    <g><rect x='150' y='40' width='60' height='60' rx='12' fill='var(--surface)' stroke='var(--primary)' stroke-width='1.5'/><text x='180' y='80' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x26A1;</text><text x='180' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Charger</text></g>
+    <g><circle cx='315' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><g transform='translate(295,62)' fill='none' stroke='var(--text)' stroke-width='1.6' stroke-linejoin='round' stroke-linecap='round'><path d='M2 12 Q3 7 7 7 L11 3 Q14 1 19 1 L28 1 Q33 1 36 5 L40 7 L41 12 L41 13 L2 13 Z' fill='var(--surface)'/><circle cx='11' cy='13' r='2.6' fill='var(--elevated)'/><circle cx='34' cy='13' r='2.6' fill='var(--elevated)'/></g><g id='pf-battery' transform='translate(303,82)'><rect x='0' y='0' width='22' height='7' rx='1.2' fill='var(--surface)' stroke='var(--text3)' stroke-width='.7'/><rect x='22' y='2' width='1.6' height='3' fill='var(--text3)'/><rect id='pf-batt-1' x='1.6' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-2' x='8.4' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-3' x='15.2' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/></g><text x='315' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Vehicle</text><text id='pf-veh-kw' x='315' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
+  </svg>
+  <div style='display:flex;justify-content:space-between;font-size:.85em;padding:10px 14px 4px;border-top:1px solid var(--border);margin-top:8px'>
+    <span style='color:var(--text2)'>Since plugged in</span><span id='pf-session' style='font-weight:600;font-variant-numeric:tabular-nums'>--</span>
+  </div>
+</div>
 
 <div class='card'>
   <div id='sg' style='display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px'>
@@ -466,16 +1120,90 @@ static void handleDashboard() {
 </div>
 
 <script>
-var SN={0:'Disconnected',1:'Connected',2:'Charging',3:'Paused',4:'Scheduled',5:'Discharging',6:'Error',7:'Disconnected',8:'Locked',9:'Updating',10:'Queue (Power)',13:'Waiting for Car',14:'Error',16:'Ready',17:'Connected',18:'Waiting for Schedule',19:'Scheduled',20:'Charging',21:'Charge Complete',22:'Paused by User',23:'Queue (Power Share)',24:'Queue (Eco Smart)',25:'Waiting for Schedule',26:'Discharging',161:'Ready',178:'Paused',179:'Charging',180:'Scheduled',189:'Ready',193:'Paused',194:'Locked',209:'Reserved (OCPP)',210:'Updating'};
+// Local BLE 0-18 status enum (per jagheterfredrik/wallbox-ble +
+// benvanmierloo PR #7). Confirmed on both Pulsar MAX and Pulsar Plus
+// — there's no MAX-specific cloud-code variant, the older
+// model-aware split was incorrect.
+var SN={0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',4:'Paused',5:'Charge Complete',6:'Locked',7:'Error',8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)'};
 var CHARGER_TZ='UTC';try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
 fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function _setText(id,txt){var el=document.getElementById(id);if(el)el.textContent=txt}
 function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;var el=document.getElementById(id);if(!el)return;el.textContent=(fmt?fmt(val):val)+(suffix||'')}
-function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];if(!n&&rt&&typeof rt.charger_status==='number')n=SN[rt.charger_status];_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
-function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
-function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null')return;var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){applyMeterData(d.r)}).catch(function(){})}
+// Power Flow card: Grid -> Charger -> Vehicle live kW + animated flow.
+// State is built up from two BAPI sources so we cache last-seen values
+// here (status pushes cp + en; meter pushes the house-power reading).
+// Solar / "Green" branch is intentionally not rendered yet — needs a
+// solar-inverter integration that doesn't exist today. Adding it later
+// is a 30-line follow-up.
+var _pfState={cp:null,en:null,house:null};
+// Flowing-dash animation: scrolls the stroke-dashoffset negatively so
+// dashes appear to march Grid->Charger->Vehicle. Speed scales with
+// the actual charging power so visually-faster = more kW. Capped so
+// even at 11 kW the animation is still readable, not strobing. Uses
+// Web Animations API (well-supported in Chrome 83+, the head-unit
+// WebView floor noted in [[feedback_webview_compat]]).
+function _pfAnimate(el,on,kw){
+  if(!el)return;
+  if(on){
+    var dur=Math.max(500,1400-(kw||0)*100);  // 1.4s @ idle .. 500ms @ ~9kW
+    if(el._anim){
+      // Just retune duration if speed changed materially
+      if(Math.abs((el._animDur||0)-dur)>50){el._anim.cancel();el._anim=null}
+    }
+    if(!el._anim){
+      el._anim=el.animate([{strokeDashoffset:0},{strokeDashoffset:-26}],{duration:dur,iterations:Infinity});
+      el._animDur=dur;
+    }
+  } else if(el._anim){
+    el._anim.cancel();el._anim=null;el._animDur=0;
+  }
+}
+// Battery-fill cycling: 3 cells fade in then reset, giving the vehicle
+// a "receiving charge" pulse. Frame-loop kept lightweight (~4 fps) so
+// the head-unit WebView doesn't burn CPU on the dashboard.
+var _pfBattTimer=null,_pfBattFrame=0;
+function _pfBatteryAnimate(on){
+  var cells=[document.getElementById('pf-batt-1'),document.getElementById('pf-batt-2'),document.getElementById('pf-batt-3')];
+  if(!on){
+    if(_pfBattTimer){clearInterval(_pfBattTimer);_pfBattTimer=null}
+    cells.forEach(function(c){if(c)c.style.opacity='0'});
+    return;
+  }
+  if(_pfBattTimer)return;  // already running
+  _pfBattFrame=0;
+  _pfBattTimer=setInterval(function(){
+    // Frames 0..3: progressively light cells; frame 3 = all on; then reset.
+    var f=_pfBattFrame%4;
+    cells.forEach(function(c,i){if(c)c.style.opacity=(i<f)?'1':'0'});
+    _pfBattFrame++;
+  },260);
+}
+function _pfRender(){
+  var cp=_pfState.cp,h=_pfState.house;
+  if(typeof cp==='number'){_setText('pf-veh-kw',cp.toFixed(2)+' kW')}
+  if(typeof h==='number'){_setText('pf-grid-kw',(h/1000).toFixed(2)+' kW')}
+  if(typeof _pfState.en==='number'){_setText('pf-session',(_pfState.en/100).toFixed(2)+' kWh')}
+  var charging=(typeof cp==='number'&&cp>0.05);
+  var l1=document.getElementById('pf-line1'),l2=document.getElementById('pf-line2');
+  if(l1)l1.style.opacity=charging?'1':'0';
+  if(l2)l2.style.opacity=charging?'1':'0';
+  _pfAnimate(l1,charging,cp);_pfAnimate(l2,charging,cp);
+  _pfBatteryAnimate(charging);
+}
+// 3.0: when BLE drops, clear all live-data spans + the power-flow
+// state so the dashboard reflects "no signal" instead of frozen stale
+// values from the last poll. localStorage is also cleared so a page
+// reload doesn't rehydrate the corpse.
+function _clearLive(){
+  ['v-st','v-pw','v-cr','v-en','v-mc','v-lk','v-oc','v-vt','v-gp','pf-veh-kw','pf-grid-kw','pf-session'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent='--'});
+  _pfState.cp=null;_pfState.en=null;_pfState.house=null;_pfRender();
+  try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
+}
+function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
+function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
+function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null'){/* BLE not delivering charger status — reset power flow + session cache so the animation can't outlive a BLE drop on stale localStorage values */_pfState.cp=null;_pfState.en=null;_pfRender();return}var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(!d||!d.r){_pfState.house=null;_pfRender();return}applyMeterData(d.r)}).catch(function(){_pfState.house=null;_pfRender()})}
 // Hook WS push handlers
-if(window.wbws){window.wbws.subscribe('status',function(d){var s=d&&d.r?d.r:d;applyStatusData(s,null);if(window.wbCheckStatus)window.wbCheckStatus(s)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});}
+if(window.wbws){window.wbws.subscribe('status',function(d){var s=d&&d.r?d.r:d;applyStatusData(s,null);if(window.wbCheckStatus)window.wbCheckStatus(s)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});window.wbws.subscribe('ble',function(d){if(d&&d.state&&d.state!=='connected')_clearLive()});}
 // Render cached values immediately (no spinners)
 try{var c=JSON.parse(localStorage.getItem('wb-last-status')||'null');if(c)applyStatusData(c.s,c.rt)}catch(e){}
 try{var cm=JSON.parse(localStorage.getItem('wb-last-meter')||'null');if(cm)applyMeterData(cm.d)}catch(e){}
@@ -489,20 +1217,82 @@ fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return 
 var _notifs=[];
 function loadNotifs(){fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.ble!=='connected')return;return fetch('/api/command?action=bapi&met=r_not&par=null',{signal:AbortSignal.timeout(10000)}).then(function(r){return r.json()}).then(function(d){var v=d.r;if(!Array.isArray(v))return;_notifs=v;var bar=document.getElementById('notif-bar');if(!bar)return;if(v.length>0){document.getElementById('notif-count').textContent=v.length;bar.style.display='block'}else{bar.style.display='none'}})}).catch(function(){})}
 function showNotifs(){var m=document.getElementById('notif-modal');var inner=document.getElementById('notif-modal-inner');var html="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0'>&#x1F514; Notifications</h3><button onclick='document.getElementById(\"notif-modal\").style.display=\"none\"' style='background:transparent;border:none;color:var(--text2);font-size:1.6em;cursor:pointer;line-height:1'>×</button></div>";if(!_notifs.length){html+="<div style='color:var(--text3)'>No notifications</div>"}else{_notifs.forEach(function(n,i){var msg=n.message||n.msg||n.text||JSON.stringify(n);var ts=(n.timestamp||n.ts)?new Date((n.timestamp||n.ts)*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ}):'';html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='font-weight:500;font-size:.9em'>#"+(i+1)+" "+msg+"</div>"+(ts?"<div style='font-size:.78em;color:var(--text3);margin-top:4px'>"+ts+"</div>":'')+"</div>"})}inner.innerHTML=html;m.style.display='flex'}
-function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
+function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
 loadNotifs();setInterval(loadNotifs,60000);
 updateBleHealth();setInterval(updateBleHealth,15000);
 </script>
 </div>
 )HTML";
     page += htmlFoot("/");
-    http.send(200, "text/html", page);
+    return page;
+}
+
+static void handleDashboard() {
+    http.send(200, "text/html", wb_buildDashboardPage());
 }
 
 // ========== PAGE 2: Settings (/settings) ==========
-static void handleSettings() {
+// 3.0 task #78: extracted into a builder so both servers share the
+// shell HTML. The big body is fetched by the browser separately
+// from /settings/body.gz (task #75 — pre-gzipped PROGMEM blob).
+String wb_buildSettingsPage() {
     String page = htmlHead("Settings");
     page += R"HTML(
+<div id='ld-stub' class='loading'><div class='ld-spin'></div>Loading Settings...</div>
+<div id='settings-body'></div>
+<script>
+(function(){
+  // The body content has its own id='ld' loading state and id='pg'
+  // content container, plus a bootstrap script at the end that
+  // toggles them. We use distinct id='ld-stub' / id='settings-body'
+  // here so they don't collide; we remove ld-stub after injection
+  // and let the body's own ld/pg toggle take over.
+  fetch('/settings/body.gz',{cache:'no-store'}).then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.text();
+  }).then(function(html){
+    var t=document.getElementById('settings-body');
+    t.innerHTML=html;
+    // innerHTML doesn't execute injected <script> tags. Re-create
+    // each one so the browser fires it. Preserves order, handles
+    // both inline and src= scripts.
+    t.querySelectorAll('script').forEach(function(orig){
+      var s=document.createElement('script');
+      if(orig.src)s.src=orig.src;else s.textContent=orig.textContent;
+      orig.parentNode.replaceChild(s,orig);
+    });
+    var stub=document.getElementById('ld-stub');
+    if(stub)stub.remove();
+  }).catch(function(e){
+    var stub=document.getElementById('ld-stub');
+    if(stub)stub.innerHTML='<span style="color:#ef4444">Failed to load settings: '+(e.message||e)+'</span>';
+  });
+})();
+</script>
+)HTML";
+    page += htmlFoot("/settings");
+    return page;
+}
+
+static void handleSettings() {
+    // Sync server keeps the chunked encoding it had pre-#78. Async
+    // path builds the same string and sends it via beginResponse.
+    http.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    http.send(200, "text/html", "");
+    http.sendContent(wb_buildSettingsPage());
+    http.sendContent("");  // final empty chunk terminates chunked encoding
+    return;
+
+#if 0
+    // PRECOMPRESS_SETTINGS_BODY_BEGIN
+    // ---- source-of-truth for the page body ----
+    // The literal below NEVER executes — the early `return` above
+    // skips it and the `#if 0` excludes it from compilation. It
+    // exists so scripts/precompress_settings.py can read it as
+    // text and gzip the contents into _gen_settings_body_gz.h.
+    // Edit this literal to change the page; rebuild regenerates
+    // the gzipped header.
+    http.sendContent(R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Settings...</div>
 <div id='pg' style='display:none'>
 <h1>&#x2699; Settings</h1>
@@ -604,11 +1394,13 @@ static void handleSettings() {
   <div class='card'>
     <div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'>
       <button class='btn btn-outline' style='padding:12px' onclick='E("tz")'>&#x1F30D; Timezone</button>
-      <button class='btn btn-outline' style='padding:12px' onclick='Q("gwsta","WiFi Status")'>&#x1F4F6; WiFi Status</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='showWiFi()'>&#x1F4F6; WiFi Status</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("halo")'>&#x1F4A1; Halo LED</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("theme")'>&#x1F3A8; Theme</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("cost")'>&#x1F4B0; Charging Cost</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("notif")'>&#x1F514; Notifications</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='E("pin")'>&#x1F511; Bluetooth Passcode</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='E("ota")'>&#x1F4E6; Firmware Update</button>
       <button id='ble-pause-btn' class='btn btn-outline' style='padding:12px' onclick='pauseBle()'>&#x1F4F4; Release BLE for App</button>
       <button class='btn btn-outline' style='padding:12px' onclick='confirm2("Reboot the charger?",function(){fetch("/api/command?action=reboot").then(function(){toast("Reboot sent","success")})})' style='background:rgba(239,68,68,.08);border-color:var(--danger);color:var(--danger)'>&#x1F504; Reboot</button>
     </div>
@@ -622,13 +1414,82 @@ var DAYS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 var CHARGER_TZ='UTC';
 try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
 var tzReady=fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
-function utcToLocal(hhmm){var h=parseInt(hhmm.slice(0,2)),m=parseInt(hhmm.slice(2));try{var now=new Date();return new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),now.getUTCDate(),h,m)).toLocaleTimeString('en-AU',{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){var d=new Date();d.setUTCHours(h,m,0,0);return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)}}
-function localToUtc(hhmm){var p=hhmm.split(':');try{var now=new Date();var d=new Date(now.getFullYear(),now.getMonth(),now.getDate(),parseInt(p[0]),parseInt(p[1]));var utc=new Date(d.toLocaleString('en-US',{timeZone:'UTC'}));var local=new Date(d.toLocaleString('en-US',{timeZone:CHARGER_TZ}));var diff=local-utc;var ud=new Date(d.getTime()-diff);return ('0'+ud.getUTCHours()).slice(-2)+('0'+ud.getUTCMinutes()).slice(-2)}catch(e){var d2=new Date();d2.setHours(parseInt(p[0]),parseInt(p[1]),0,0);return ('0'+d2.getUTCHours()).slice(-2)+('0'+d2.getUTCMinutes()).slice(-2)}}
+// Get charger-tz minutes-offset from UTC (e.g. AEST = +600). Computed
+// from the browser's Intl support so it handles DST correctly across
+// the year. The old approach used Date.toLocaleString round-trips
+// which silently mis-applied the offset when the browser tz differed
+// from CHARGER_TZ, shifting Save times by hours.
+function tzOffsetMinutes(tz){
+  try{
+    var d=new Date();
+    var fmt=new Intl.DateTimeFormat('en-US',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+    var p={};fmt.formatToParts(d).forEach(function(x){p[x.type]=x.value});
+    // Compose the "wall-clock in tz" as if it were UTC, then diff vs the real UTC.
+    var walled=Date.UTC(+p.year,+p.month-1,+p.day,+p.hour=='24'?0:+p.hour,+p.minute,+p.second);
+    return Math.round((walled-d.getTime())/60000);
+  }catch(e){return 0}
+}
+function utcToLocal(hhmm){
+  var h=parseInt(hhmm.slice(0,2)),m=parseInt(hhmm.slice(2));
+  var off=tzOffsetMinutes(CHARGER_TZ||'UTC');  // minutes east of UTC
+  var total=h*60+m+off;
+  total=((total%1440)+1440)%1440;  // wrap to 0..23:59
+  var lh=Math.floor(total/60),lm=total%60;
+  return ('0'+lh).slice(-2)+':'+('0'+lm).slice(-2);
+}
+function localToUtc(hhmm){
+  var p=hhmm.split(':');
+  var h=parseInt(p[0]),m=parseInt(p[1]);
+  var off=tzOffsetMinutes(CHARGER_TZ||'UTC');
+  var total=h*60+m-off;
+  total=((total%1440)+1440)%1440;
+  var uh=Math.floor(total/60),um=total%60;
+  return ('0'+uh).slice(-2)+('0'+um).slice(-2);
+}
 function Q(m,l){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)r=document.getElementById('qr');if(!r){toast('No result panel found','error');return}r.style.display='block';r.innerHTML="<span class='spinner'></span>"+l+"...";var doFetch=function(){fetch('/api/command?action=bapi&met='+m+'&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){if(d.error){r.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}r.innerHTML=F(m,l,d.r||d)}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'})};if(m==='r_schs'&&tzReady){tzReady.then(doFetch)}else{doFetch()}}
 function F(m,l,r){var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var s={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi',s[r]||'Code '+r)}else if(m==='r_ses'){h+=row('Last Session',r.last);h+=row('Total Sessions',r.size)}else if(m==='r_schs'){var sc=r.schedules||r;if(!Array.isArray(sc)){h+=row('Schedules','None');return h}sc.forEach(function(s,i){var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS[b]+' ';h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'><div style='display:flex;justify-content:space-between'><b>Schedule "+(i+1)+"</b><span class='badge "+(s.enabled?'badge-success':'badge-warning')+"'>"+(s.enabled?'Active':'Off')+"</span></div>";h+=row('Time',utcToLocal(s.start)+' - '+utcToLocal(s.stop));h+=row('Days',ds.trim()||'None');h+=row('Power Limit',(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A');if(s.target&&s.target.type==1)h+=row('Energy Limit',(s.target.value/1000)+' kWh');else h+=row('Energy Limit','No limit');h+="</div>"});if(!sc.length)h+=row('Schedules','None')}else if(m==='r_dca'){if(typeof r==='object'){h+=row('Voltage L1',r.v1+' V');if(r.v2)h+=row('Voltage L2',r.v2+' V');if(r.v3)h+=row('Voltage L3',r.v3+' V');h+=row('Power L1',r.p1+' W');if(r.p2)h+=row('Power L2',r.p2+' W');if(r.p3)h+=row('Power L3',r.p3+' W');h+=row('Current L1',(r.c1/10).toFixed(1)+' A');if(r.c2)h+=row('Current L2',(r.c2/10).toFixed(1)+' A');if(r.c3)h+=row('Current L3',(r.c3/10).toFixed(1)+' A');h+=row('Total Energy',(r.e/1000).toFixed(1)+' kWh')}else{h+=row('Energy Meter',''+r)}}else if(m==='g_alo'){if(typeof r==='object'){h+=row('Auto Lock',r.enabled?'Enabled':'Disabled');if(r.time)h+=row('Lock After',r.time+' seconds')}else{h+=row('Auto Lock',r?'Enabled':'Disabled')}}else if(m==='g_ecos'){var em={0:'Disabled',1:'Full Green (Solar Only)',2:'Eco Smart (Solar + Grid)'};if(typeof r==='object'){h+=row('Status',r.ese?'Active':'Inactive');h+=row('Mode',em[r.esm]||'Mode '+r.esm);h+=row('Solar Power Target',r.esp+'%')}else{h+=row('Eco Smart',em[r]||''+r)}}else if(m==='g_phsw'){if(typeof r==='object'){h+=row('Phase Switch',r.enabled?'Enabled':'Disabled')}else{h+=row('Phase Switch',r?'Enabled':'Disabled')}}else if(m==='read_pin'){if(typeof r==='object'){h+=row('BLE PIN',r.pin||'Not set');h+=row('PIN Version',r.version||'None')}else{h+=row('BLE PIN',''+r)}}else if(m==='r_hsh'){h+=row('ICP Max Current',r+'A')}else if(m==='g_psh'){if(typeof r==='object'){h+=row('Dynamic Power Sharing',r.dyps?'Enabled':'Disabled');h+=row('Max Power Per Charger',r.mcpp?r.mcpp+'W':'Unlimited');h+=row('Min Current',r.minI+'A');h+=row('Chargers in Group',r.nchg)}else{var ps={0:'Disabled',1:'Enabled',2:'Active'};h+=row('Power Sharing',ps[r]||''+r)}}else if(m==='g_tzn'){h+=row('Timezone',r.timezone||r)}else{h+="<pre style='margin:0;white-space:pre-wrap;font-size:.82em'>"+JSON.stringify(r,null,2)+"</pre>"}return h}
 function showTimezone(){E('tz')}
 function saveTz(){var tz=document.getElementById('tz-select').value;var p=JSON.stringify({timezone:tz});toast('Saving timezone...','info');fetch('/api/command?action=bapi&met=s_tzn&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(d.error){toast(d.error,'error')}else{CHARGER_TZ=tz;toast('Timezone set to '+tz,'success')}}).catch(function(e){toast('Error: '+e.message,'error')})}
-function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;r.style.display='block';var h='';if(type==='autolock'){h="<h2>&#x1F510; Auto Lock</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_alo&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn’t read Auto Lock state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("autolock")\'>Retry</button></div>';return}var o=d.r;var en=o.enabled?true:false;var tm=(typeof o.time==='number')?o.time:60;r.innerHTML="<h2>&#x1F510; Auto Lock</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='al-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><label>Lock After (seconds)</label><input type='number' id='al-time' value='"+tm+"' min='10' max='600'><div class='row' style='margin-top:10px'><button class='btn btn-success' onclick='saveAutoLock()'>Save</button></div><div id='al-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='ocpp'){h="<h2>&#x1F517; OCPP</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ocpp&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read OCPP state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("ocpp")\'>Retry</button></div>';return}var o=d.r;r.innerHTML="<h2>&#x1F517; OCPP Configuration</h2><label>Server URL</label><input id='ocpp-url' value='"+(o.u||'')+"' placeholder='ws://server:9000'><div class='row'><div><label>Charger ID</label><input id='ocpp-id' value='"+(o.chid||'')+"'></div><div><label>Password</label><input id='ocpp-pw' type='password' value='"+(o.pw||'')+"'></div></div><label>Enabled</label><select id='ocpp-en'><option value='0'"+(o.e?'':' selected')+">Disabled</option><option value='1'"+(o.e?' selected':'')+">Enabled</option></select><button class='btn btn-success' style='margin-top:10px' onclick='saveOcpp()'>Save OCPP</button><div id='ocpp-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='eco'){h="<h2>&#x2600; Eco Smart</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ecos&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read current Eco Smart state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("eco")\'>Retry</button></div>';return}var o=d.r;var esm=(typeof o.esm==='number')?o.esm:0;var esp=(typeof o.esp==='number')?o.esp:50;var ese=o.ese?true:false;var modes=[{v:0,t:'Disabled'},{v:1,t:'Full Green (Solar Only)'},{v:2,t:'Eco Smart (Solar + Grid)'}];var opts='';modes.forEach(function(m){opts+="<option value='"+m.v+"'"+(m.v===esm?' selected':'')+">"+m.t+"</option>"});r.innerHTML="<h2>&#x2600; Eco Smart</h2>"+row('Current state',ese?'Active':'Inactive')+"<label style='margin-top:12px'>Mode</label><select id='eco-mode'>"+opts+"</select><label>Solar Power Target (%)</label><input type='number' id='eco-esp' value='"+esp+"' min='0' max='100'><p class='help'>Eco Smart uses solar surplus. Full Green only charges from solar.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveEco()'>Save</button><div id='eco-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='tz'){h="<h2>&#x1F30D; Timezone</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'||!d.r.timezone){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read timezone. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("tz")\'>Retry</button></div>';return}var tz=d.r.timezone;CHARGER_TZ=tz;var opts='';var zones=['Australia/Sydney','Australia/Melbourne','Australia/Brisbane','Australia/Adelaide','Australia/Perth','Australia/Darwin','Australia/Hobart','Asia/Tokyo','Asia/Shanghai','Asia/Singapore','Asia/Kolkata','Asia/Dubai','Europe/London','Europe/Paris','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','America/Toronto','Pacific/Auckland','UTC'];zones.forEach(function(z){opts+="<option value='"+z+"'"+(z===tz?' selected':'')+">"+z.replace('_',' ')+"</option>"});r.innerHTML="<h2>&#x1F30D; Timezone</h2>"+row('Current',tz)+"<label style='margin-top:12px'>Change To</label><select id='tz-select'>"+opts+"</select><button class='btn btn-success' style='margin-top:10px' onclick='saveTz()'>Save</button><div id='tz-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='phasesw'){h="<h2>&#x1F504; Phase Switch</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_phsw&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read Phase Switch state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("phasesw")\'>Retry</button></div>';return}var en=d.r.enabled?true:false;r.innerHTML="<h2>&#x1F504; Phase Switch</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='phsw-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><p class='help'>Auto-switches between 1 and 3 phase based on solar surplus.</p><button class='btn btn-success' style='margin-top:10px' onclick='savePhaseSw()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='halo'){h="<h2>&#x1F4A1; Halo LED</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_halocfg&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read Halo state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("halo")\'>Retry</button></div>';return}var o=d.r;var bright=(typeof o.bright==='number')?o.bright:100;var mode=(typeof o.mode==='number')?o.mode:1;var ts=(typeof o.time_s==='number')?o.time_s:10;r.innerHTML="<h2>&#x1F4A1; Halo LED</h2>"+row('Current',(mode?'Standby on':'Standby off')+' \u00B7 '+bright+'%')+"<label style='margin-top:12px'>Standby</label><select id='halo-m'><option value='1'"+(mode===1?' selected':'')+">On (dim when idle)</option><option value='0'"+(mode===0?' selected':'')+">Off (always bright)</option></select><label>Brightness (%)</label><input type='range' id='halo-b' min='0' max='100' value='"+bright+"' oninput=\"document.getElementById('halo-bv').textContent=this.value+'%'\"><div id='halo-bv' style='text-align:center;margin-top:-4px;color:var(--text3);font-size:.85em'>"+bright+"%</div><label>Standby Timeout (seconds)</label><input type='number' id='halo-t' value='"+ts+"' min='0' max='3600'><p class='help'>How long to wait before dimming when standby is on.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveHalo()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='theme'){var cur='auto';try{cur=localStorage.getItem('wb-theme')||'auto'}catch(e){}var opts='';[{v:'auto',t:'Auto (follow system)'},{v:'dark',t:'Dark'},{v:'light',t:'Light'}].forEach(function(o){opts+="<option value='"+o.v+"'"+(o.v===cur?' selected':'')+">"+o.t+"</option>"});r.innerHTML="<h2>&#x1F3A8; Theme</h2><label>Appearance</label><select id='theme-sel' onchange='applyTheme(this.value)'>"+opts+"</select><p class='help'>Auto follows your OS or browser preference.</p>";return}else if(type==='cost'){
+function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;r.style.display='block';var h='';if(type==='autolock'){h="<h2>&#x1F510; Auto Lock</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_alo&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){
+/* The Pulsar MAX returns r as a plain number (0=disabled, non-zero=enabled
+   minutes-until-lock). Newer firmware returns {enabled, time}. Handle both. */
+var en,tm,simple=false;
+if(d.r&&typeof d.r==='object'){en=d.r.enabled?true:false;tm=(typeof d.r.time==='number')?d.r.time:60;}
+else if(typeof d.r==='number'){simple=true;en=d.r>0;tm=d.r>0?d.r:60;}
+else{r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn’t read Auto Lock state. <button class="btn btn-outline" style="padding:4px 10px;margin-top:6px" onclick=\'E("autolock")\'>Retry</button></div>';return}
+r.innerHTML="<h2>&#x1F510; Auto Lock</h2>"+row('Current state',en?'Enabled':'Disabled')+(simple?"<p class='help'>Older firmware: a single value is sent (minutes; 0 = off).</p>":"")+"<label style='margin-top:12px'>Enabled</label><select id='al-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><label>Lock After "+(simple?'(minutes)':'(seconds)')+"</label><input type='number' id='al-time' value='"+tm+"' min='1' max='600'><input type='hidden' id='al-simple' value='"+(simple?'1':'0')+"'><div class='row' style='margin-top:10px'><button class='btn btn-success' onclick='saveAutoLock()'>Save</button></div><div id='al-result' style='display:none;margin-top:10px'></div>"
+}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='ocpp'){h="<h2>&#x1F517; OCPP</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ocpp&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read OCPP state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("ocpp")\'>Retry</button></div>';return}var o=d.r;r.innerHTML="<h2>&#x1F517; OCPP Configuration</h2><label>Server URL</label><input id='ocpp-url' value='"+(o.u||'')+"' placeholder='ws://server:9000'><div class='row'><div><label>Charger ID</label><input id='ocpp-id' value='"+(o.chid||'')+"'></div><div><label>Password</label><input id='ocpp-pw' type='password' value='"+(o.pw||'')+"'></div></div><label>Enabled</label><select id='ocpp-en'><option value='0'"+(o.e?'':' selected')+">Disabled</option><option value='1'"+(o.e?' selected':'')+">Enabled</option></select><button class='btn btn-success' style='margin-top:10px' onclick='saveOcpp()'>Save OCPP</button><div id='ocpp-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='eco'){h="<h2>&#x2600; Eco Smart</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_ecos&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read current Eco Smart state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("eco")\'>Retry</button></div>';return}var o=d.r;var esm=(typeof o.esm==='number')?o.esm:0;var esp=(typeof o.esp==='number')?o.esp:50;var ese=o.ese?true:false;var modes=[{v:0,t:'Disabled'},{v:1,t:'Full Green (Solar Only)'},{v:2,t:'Eco Smart (Solar + Grid)'}];var opts='';modes.forEach(function(m){opts+="<option value='"+m.v+"'"+(m.v===esm?' selected':'')+">"+m.t+"</option>"});r.innerHTML="<h2>&#x2600; Eco Smart</h2>"+row('Current state',ese?'Active':'Inactive')+"<label style='margin-top:12px'>Mode</label><select id='eco-mode'>"+opts+"</select><label>Solar Power Target (%)</label><input type='number' id='eco-esp' value='"+esp+"' min='0' max='100'><p class='help'>Eco Smart uses solar surplus. Full Green only charges from solar.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveEco()'>Save</button><div id='eco-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='tz'){h="<h2>&#x1F30D; Timezone</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'||!d.r.timezone){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read timezone. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("tz")\'>Retry</button></div>';return}var tz=d.r.timezone;CHARGER_TZ=tz;var opts='';var zones=['Australia/Sydney','Australia/Melbourne','Australia/Brisbane','Australia/Adelaide','Australia/Perth','Australia/Darwin','Australia/Hobart','Asia/Tokyo','Asia/Shanghai','Asia/Singapore','Asia/Kolkata','Asia/Dubai','Europe/London','Europe/Paris','Europe/Berlin','America/New_York','America/Chicago','America/Los_Angeles','America/Toronto','Pacific/Auckland','UTC'];zones.forEach(function(z){opts+="<option value='"+z+"'"+(z===tz?' selected':'')+">"+z.replace('_',' ')+"</option>"});r.innerHTML="<h2>&#x1F30D; Timezone</h2>"+row('Current',tz)+"<label style='margin-top:12px'>Change To</label><select id='tz-select'>"+opts+"</select><button class='btn btn-success' style='margin-top:10px' onclick='saveTz()'>Save</button><div id='tz-result' style='display:none;margin-top:10px'></div>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='phasesw'){h="<h2>&#x1F504; Phase Switch</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_phsw&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read Phase Switch state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("phasesw")\'>Retry</button></div>';return}var en=d.r.enabled?true:false;r.innerHTML="<h2>&#x1F504; Phase Switch</h2>"+row('Current state',en?'Enabled':'Disabled')+"<label style='margin-top:12px'>Enabled</label><select id='phsw-en'><option value='0'"+(en?'':' selected')+">Disabled</option><option value='1'"+(en?' selected':'')+">Enabled</option></select><p class='help'>Auto-switches between 1 and 3 phase based on solar surplus.</p><button class='btn btn-success' style='margin-top:10px' onclick='savePhaseSw()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='halo'){h="<h2>&#x1F4A1; Halo LED</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_halocfg&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(!d.r||typeof d.r!=='object'){r.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t read Halo state. <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'E("halo")\'>Retry</button></div>';return}var o=d.r;var bright=(typeof o.bright==='number')?o.bright:100;var mode=(typeof o.mode==='number')?o.mode:1;var ts=(typeof o.time_s==='number')?o.time_s:10;r.innerHTML="<h2>&#x1F4A1; Halo LED</h2>"+row('Current',(mode?'Standby on':'Standby off')+' \u00B7 '+bright+'%')+"<label style='margin-top:12px'>Standby</label><select id='halo-m'><option value='1'"+(mode===1?' selected':'')+">On (dim when idle)</option><option value='0'"+(mode===0?' selected':'')+">Off (always bright)</option></select><label>Brightness (%)</label><input type='range' id='halo-b' min='0' max='100' value='"+bright+"' oninput=\"document.getElementById('halo-bv').textContent=this.value+'%'\"><div id='halo-bv' style='text-align:center;margin-top:-4px;color:var(--text3);font-size:.85em'>"+bright+"%</div><label>Standby Timeout (seconds)</label><input type='number' id='halo-t' value='"+ts+"' min='0' max='3600'><p class='help'>How long to wait before dimming when standby is on.</p><button class='btn btn-success' style='margin-top:10px' onclick='saveHalo()'>Save</button>"}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'});return}else if(type==='pin'){
+  /* Bluetooth Passcode — two independent facts surfaced here:
+       1. Gateway-stored value (cfg.blePin, masked via /api/status):
+          what WE send when pairing.
+       2. Charger-expected value (read_pin BAPI): what the CHARGER
+          requires on the next pair attempt.
+     They should match. When they don't, the user sees that here and
+     knows which side to fix. Our save updates only side (1) — the
+     charger-side passcode is created in the official Wallbox app. */
+  r.innerHTML="<h2>&#x1F511; Bluetooth Passcode</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";
+  Promise.all([
+    fetch('/api/status').then(function(x){return x.json()}).catch(function(){return{}}),
+    fetch('/api/command?action=bapi&met=read_pin&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).catch(function(){return{}})
+  ]).then(function(results){
+    var s=results[0]||{};
+    var bapi=results[1]||{};
+    var gwHas=s.ble_pin==='***';
+    var chgPin=(bapi.r&&typeof bapi.r==='object')?bapi.r.pin:undefined;
+    var chgHas=(chgPin!==null&&chgPin!==undefined&&chgPin!=='');
+    var chgUnknown=(bapi.r===undefined||(typeof bapi.r==='object'&&!('pin' in bapi.r))||bapi.error);
+    var gwTxt=gwHas?"<span style='color:#22c55e'>&#x2713; Configured</span>":"<span style='color:#f59e0b'>&#x26A0; Not set</span>";
+    var chgTxt=chgUnknown?"<span style='color:var(--text3)'>Unknown (charger didn’t answer)</span>":chgHas?"<span style='color:#22c55e'>&#x2713; Required (charger expects a passcode)</span>":"<span style='color:#94a3b8'>Not required</span>";
+    var mismatch='';
+    if(!chgUnknown){
+      if(gwHas&&!chgHas)mismatch="<div style='background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);border-radius:8px;padding:10px;margin:8px 0;font-size:.85em;color:#f59e0b'>&#x26A0; Gateway has a stored passcode but the charger no longer requires one. Save with the field blank to clear.</div>";
+      else if(!gwHas&&chgHas)mismatch="<div style='background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:8px;padding:10px;margin:8px 0;font-size:.85em;color:#ef4444'>&#x26A0; Charger requires a passcode but the gateway has none stored. BLE pair will fail until you enter it below.</div>";
+    }
+    r.innerHTML="<h2>&#x1F511; Bluetooth Passcode</h2>"+row('Gateway has stored',gwTxt)+row('Charger expects',chgTxt)+mismatch+"<label style='margin-top:12px'>New Passcode</label><input type='text' id='pin-new' value='' placeholder='8 digits from the Wallbox app' maxlength='16' autocomplete='off' inputmode='numeric'><p class='help'>Open the Wallbox app \xE2\x86\x92 your charger \xE2\x86\x92 Settings \xE2\x86\x92 <b>Bluetooth Passcode</b>. Copy the 8-digit code here. Leave blank to clear the gateway’s stored value. Saving reboots the gateway so the new value takes effect on the next pair.</p><button class='btn btn-success' style='margin-top:10px' onclick='savePin()'>Save &amp; Reboot</button><div id='pin-result' style='display:none;margin-top:10px'></div>";
+  }).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'});
+  return
+}else if(type==='ota'){location.href='/ota';return
+}else if(type==='theme'){var cur='auto';try{cur=localStorage.getItem('wb-theme')||'auto'}catch(e){}var opts='';[{v:'auto',t:'Auto (follow system)'},{v:'dark',t:'Dark'},{v:'light',t:'Light'}].forEach(function(o){opts+="<option value='"+o.v+"'"+(o.v===cur?' selected':'')+">"+o.t+"</option>"});r.innerHTML="<h2>&#x1F3A8; Theme</h2><label>Appearance</label><select id='theme-sel' onchange='applyTheme(this.value)'>"+opts+"</select><p class='help'>Auto follows your OS or browser preference.</p>";return}else if(type==='cost'){
   var T;try{T=JSON.parse(localStorage.getItem('wb-tariff')||'null')}catch(e){T=null}
   if(!T)T={enabled:false,currency:'$',baseRate:0.30,greenRate:0,tiers:[]};
   window._editTariff=T;
@@ -696,12 +1557,12 @@ function watchStatusForNotif(s){
   var N=loadNotifSettings();
   if(!N.enabled||typeof Notification==='undefined'||Notification.permission!=='granted'){_lastSt=st;return}
   // Status code groups
-  var charging=[2,20,179];
-  var complete=[21];
-  var paused=[3,22,178,193];
-  var error=[6,14];
-  var ready=[0,7,16,161,189];
-  var connected=[1,13,17];
+  var charging=[1];
+  var complete=[5];
+  var paused=[4];
+  var error=[7];
+  var ready=[0];
+  var connected=[2,3,8,10,12,13,18];
   var was=_lastSt;
   function inGroup(s,g){return g.indexOf(s)>=0}
   if(inGroup(st,complete)&&N.events.complete)fireNotif('Charging complete','Your car is ready to go.');
@@ -712,11 +1573,78 @@ function watchStatusForNotif(s){
   else if(inGroup(st,ready)&&!inGroup(was,ready)&&N.events.plug_out)fireNotif('Plug disconnected','Charger is now idle.');
   _lastSt=st;
 }
-function saveAutoLock(){var p=JSON.stringify({enabled:parseInt(document.getElementById('al-en').value),time:parseInt(document.getElementById('al-time').value)});toast('Saving auto lock...','info');fetch('/api/command?action=bapi&met=s_alo&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Auto lock saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
-function saveEco(){var mode=parseInt(document.getElementById('eco-mode').value);var espEl=document.getElementById('eco-esp');var esp=espEl?parseInt(espEl.value)||0:50;var p=JSON.stringify({mode:mode,esp:esp});toast('Saving eco smart...','info');fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
+function saveAutoLock(){
+  /* On charger fw 6.11.x, s_alo expects a bare integer (minutes until
+     lock, 0 = disabled). The {enabled, time} object shape that some
+     older firmware accepted is silently rejected with "Unexpected Error"
+     on the current firmware, so we always send the integer form. */
+  var en=parseInt(document.getElementById('al-en').value);
+  var t=parseInt(document.getElementById('al-time').value);
+  var p=String(en?t:0);
+  toast('Saving auto lock...','info');
+  fetch('/api/command?action=bapi&met=s_alo&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Auto lock saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})
+}
+function saveEco(){
+  /* s_ecos needs all three fields: ese (master enable), esm (mode), esp
+     (percentage). The form only carries mode + percentage; ese is
+     derived (1 when any mode is active, 0 when disabled). The old code
+     was sending {mode, esp} which is silently rejected on fw 6.11.x:
+       - field name was wrong ("mode" instead of "esm")
+       - missing ese field
+     Both fixed here so the save actually persists. */
+  var mode=parseInt(document.getElementById('eco-mode').value);
+  var espEl=document.getElementById('eco-esp');
+  var esp=espEl?parseInt(espEl.value)||0:50;
+  var p=JSON.stringify({ese:(mode>0?1:0),esm:mode,esp:esp});
+  toast('Saving eco smart...','info');
+  fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})
+}
 function saveOcpp(){var p=JSON.stringify({u:document.getElementById('ocpp-url').value,chid:document.getElementById('ocpp-id').value,pw:document.getElementById('ocpp-pw').value,e:parseInt(document.getElementById('ocpp-en').value)});toast('Saving OCPP...','info');fetch('/api/command?action=bapi&met=s_ocpp&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'OCPP config saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function savePhaseSw(){var en=parseInt(document.getElementById('phsw-en').value);var p=JSON.stringify({enabled:en});toast('Saving phase switch...','info');fetch('/api/command?action=bapi&met=s_phsw&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Phase switch saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function saveHalo(){var b=parseInt(document.getElementById('halo-b').value);var m=parseInt(document.getElementById('halo-m').value);var t=parseInt(document.getElementById('halo-t').value)||0;var p=JSON.stringify({bright:b,mode:m,time_s:t});toast('Saving halo...','info');fetch('/api/command?action=bapi&met=s_halocfg&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Halo saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
+function savePin(){
+  /* Local gateway setting — does NOT call s_pin on the charger.
+     Updates cfg.blePin in NVS so the next BLE pair uses the new value,
+     then reboots. Reboot is required because NimBLE has already
+     established a session under the old credentials. */
+  var v=document.getElementById('pin-new').value.trim();
+  if(v.length>0&&!/^[0-9]+$/.test(v)){toast('Passcode must be digits only','error');return}
+  var res=document.getElementById('pin-result');
+  toast('Saving passcode...','info');
+  fetch('/api/pin?csrf='+window.WB_CSRF+'&pin='+encodeURIComponent(v),{method:'POST'}).then(function(x){return x.json()}).then(function(d){
+    if(d.error){toast(d.error,'error');return}
+    if(res){res.style.display='block';res.style.color='var(--success)';res.textContent='Saved \xE2\x80\x94 rebooting...'}
+    toast('Passcode saved — gateway is rebooting','success');
+  }).catch(function(e){toast('Error: '+e.message,'error')})
+}
+function showWiFi(){
+  /* Gateway-side WiFi status (from /api/status, no BAPI hop). Shows
+     SSID, IP, RSSI w/ visual strength bars, uptime — all the things
+     you actually want to see when 'WiFi Status' was previously just
+     a single 'Connected' word from the charger's gwsta. */
+  var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;
+  r.style.display='block';
+  r.innerHTML="<h2>&#x1F4F6; WiFi Status</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";
+  fetch('/api/status').then(function(x){return x.json()}).then(function(s){
+    var h="<h2>&#x1F4F6; WiFi Status</h2>";
+    var sBadge=s.wifi==='connected'?"<span class='badge badge-success'>Connected</span>":"<span class='badge badge-warning'>"+(s.wifi||'Unknown')+"</span>";
+    h+=row('Status',sBadge);
+    if(s.ssid)h+=row('Network',s.ssid);
+    if(s.ip)h+=row('IP Address',s.ip);
+    if(typeof s.wifi_rssi==='number'){
+      var bars=s.wifi_rssi>-50?'████':s.wifi_rssi>-60?'███░':s.wifi_rssi>-70?'██░░':s.wifi_rssi>-80?'█░░░':'░░░░';
+      var col=s.wifi_rssi>-60?'#22c55e':s.wifi_rssi>-70?'#f59e0b':'#ef4444';
+      h+=row('Signal',"<span style='font-family:monospace;color:"+col+";letter-spacing:2px'>"+bars+"</span> "+s.wifi_rssi+" dBm");
+    }
+    if(typeof s.uptime==='number'){
+      var u=s.uptime,hr=Math.floor(u/3600),mn=Math.floor((u%3600)/60);
+      h+=row('Gateway uptime',hr>0?hr+'h '+mn+'m':mn+'m');
+    }
+    if(s.dev_mfg||s.dev_model)h+=row('BLE module',(s.dev_mfg||'?')+' '+(s.dev_model||''));
+    if(s.dev_fw)h+=row('BLE module FW',s.dev_fw);
+    r.innerHTML=h;
+  }).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'})
+}
 var allSchedules=[];
 var editingSid=null;
 var DAYS_M=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
@@ -858,16 +1786,27 @@ function buildScheduleTimeline(schedules){
   legend.innerHTML=lg||'<span style=\"color:var(--text3)\">All schedules disabled</span>';
   wrap.style.display='block';
 }
-function loadSchedules(){
+function loadSchedules(_retry){
+  // _retry: undefined = first attempt, true = the auto-retry. We retry
+  // once after a brief settle when the BAPI call times out or the
+  // gateway returns null (typically because the BLE mutex was busy
+  // with another command \u2014 common right after page load when the
+  // BLE init sequence overlaps the schedule fetch).
   var l=document.getElementById('sch-list');
   if(!l)return;
-  l.innerHTML="<span class='spinner'></span> Loading...";
-  fetch('/api/command?action=bapi&met=r_schs&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){
-    if(d.error){l.innerHTML='<span style="color:var(--danger)">'+d.error+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>';return}
+  l.innerHTML=_retry?"<span class='spinner'></span> Retrying...":"<span class='spinner'></span> Loading...";
+  fetch('/api/command?action=bapi&met=r_schs&par=null',{signal:AbortSignal.timeout(_retry?20000:15000)}).then(function(x){return x.json()}).then(function(d){
+    if(d.error){
+      if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+      l.innerHTML='<span style="color:var(--danger)">'+d.error+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>';return
+    }
     var sc=null;
     if(d.r&&Array.isArray(d.r.schedules))sc=d.r.schedules;
     else if(Array.isArray(d.r))sc=d.r;
-    if(sc===null){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return}
+    if(sc===null){
+      if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+      l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return
+    }
     allSchedules=sc;
     try{buildScheduleTimeline(sc)}catch(e){console.error('timeline failed',e)}
     if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules yet. Tap + Add New to create one.</div>';return}
@@ -878,10 +1817,17 @@ function loadSchedules(){
       var lim=(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A';
       var ek=(s.target&&s.target.type==1)?(s.target.value/1000)+' kWh':'';
       var badge=s.enabled?'<span class=\"badge badge-success\">On</span>':'<span class=\"badge badge-warning\">Off</span>';
-      html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" \u2013 "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" \u00B7 "+lim+(ek?' \u00B7 '+ek:'')+" \u00B7 #"+s.sid+"</div></div><div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>\u270E</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>\u2716</button></div></div></div>";
+      // Toggle icon: pause when On (one tap to disable), play when Off
+      var togIcon=s.enabled?'\u23F8':'\u25B6';
+      var togColor=s.enabled?'var(--warning)':'var(--success)';
+      var togTitle=s.enabled?'Pause this schedule':'Resume this schedule';
+      html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" \u2013 "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" \u00B7 "+lim+(ek?' \u00B7 '+ek:'')+" \u00B7 #"+s.sid+"</div></div><div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' title='"+togTitle+"' style='padding:6px 10px;font-size:.85em;color:"+togColor+"' onclick='toggleSchedule("+s.sid+")'>"+togIcon+"</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>\u270E</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>\u2716</button></div></div></div>";
     });
     l.innerHTML=html;
-  }).catch(function(e){l.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'});
+  }).catch(function(e){
+    if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+    l.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>'
+  });
 }
 function newSchedule(){
   editingSid=null;
@@ -894,6 +1840,23 @@ function newSchedule(){
   document.getElementById('sn').value='1';
   document.getElementById('sched-edit').style.display='block';
   document.getElementById('sched-edit').scrollIntoView({behavior:'smooth',block:'start'});
+}
+// One-tap toggle for a schedule's enabled flag (the ⏸/▶ button in
+// the row). Builds the same s_sch payload saveSch would but only
+// flips the `enabled` bit and re-uses the existing times / days /
+// limits so the user doesn't have to open the edit form.
+function toggleSchedule(sid){
+  var s=allSchedules.find(function(x){return x.sid===sid});
+  if(!s){toast('Schedule not found','error');return}
+  var newEn=s.enabled?0:1;
+  var entry=buildSchEntry(sid,s.start,s.stop,s.days,newEn,s.mcr,s.type||0,s.target,s.repeat||1);
+  var verb=newEn?'resumed':'paused';
+  toast(newEn?'Resuming...':'Pausing...','info');
+  fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(JSON.stringify({schedules:[entry]})),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+    if(r&&r.error){toast(r.error,'error');return}
+    toast('Schedule #'+sid+' '+verb,'success');
+    loadSchedules();
+  }).catch(function(e){toast('Error: '+(e.message||e),'error')});
 }
 function editSchedule(sid){
   var s=allSchedules.find(function(x){return x.sid===sid});
@@ -913,6 +1876,22 @@ function cancelEdit(){
   document.getElementById('sched-edit').style.display='none';
   editingSid=null;
 }
+// Convert bitmask integer (bit 0=Mon..bit 6=Sun) to bit-array
+// [Mon,Tue,Wed,Thu,Fri,Sat,Sun]. The BAPI READ returns days as a
+// bitmask integer for backwards compat, but the s_sch WRITE expects
+// an array, observed via the live charger response shape.
+function daysToArray(d){var a=[];for(var i=0;i<7;i++)a.push((d>>i)&1);return a}
+function timeToInt(s){return parseInt(String(s).replace(':',''),10)||0}
+// Build one schedule entry in the EXACT shape s_sch expects (decoded
+// from official-app BLE capture): sid/mcr/enabled all integers,
+// start/stop INTEGERS (NOT strings — that was the silent-fail
+// root cause), days BIT-ARRAY, no name/uid/created_at.
+function buildSchEntry(sid,start,stop,days,enabled,mcr,type,target,repeat){
+  return {sid:sid|0,start:timeToInt(start),stop:timeToInt(stop),
+          days:Array.isArray(days)?days:daysToArray(days|0),
+          mcr:mcr|0,type:type|0,enabled:enabled|0,
+          target:target||{type:0,value:0},repeat:(repeat===undefined?1:repeat|0)}
+}
 function saveSch(){
   var st=localToUtc(document.getElementById('ss').value);
   var sp=localToUtc(document.getElementById('se').value);
@@ -921,15 +1900,28 @@ function saveSch(){
   var mcr=parseInt(document.getElementById('sc').value);
   var ekwh=parseInt(document.getElementById('se2').value)||0;
   var tgt=ekwh>0?{type:1,value:ekwh*1000}:{type:0,value:0};
+  var en=parseInt(document.getElementById('sn').value);
+  // s_sch (advanced schedule write) replaces the existing schedule
+  // at the given sid OR inserts new. NO clr_sch round-trip needed
+  // — the charger fw handles both insert + update via the same
+  // method, distinguished by whether sid already exists.
   var sid;
-  if(editingSid!==null){sid=editingSid}else{var maxSid=allSchedules.length?Math.max.apply(null,allSchedules.map(function(s){return s.sid})):-1;sid=maxSid+1}
-  var p=JSON.stringify({sid:sid,start:st,stop:sp,days:d,enabled:parseInt(document.getElementById('sn').value),mcr:mcr,repeat:1,type:0,name:'',target:tgt});
+  if(editingSid!==null){
+    sid=editingSid;
+  } else {
+    var maxSid=allSchedules.length?Math.max.apply(null,allSchedules.map(function(s){return s.sid})):-1;
+    sid=maxSid+1;
+  }
+  var entry=buildSchEntry(sid,st,sp,d,en,mcr,0,tgt,1);
+  var p=JSON.stringify({schedules:[entry]});
+  var verb=(editingSid!==null)?'updated':'added';
   toast('Saving...','info');
-  fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){
-    if(d.error){toast(d.error,'error');return}
-    toast(editingSid!==null?'Schedule #'+sid+' updated':'Schedule added','success');
+  fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+    if(r&&r.error){toast(r.error,'error');return}
+    toast('Schedule #'+sid+' '+verb,'success');
     cancelEdit();
-    loadSchedules();  }).catch(function(e){toast('Error: '+e.message,'error')});
+    loadSchedules();
+  }).catch(function(e){toast('Error: '+(e.message||e),'error')});
 }
 function deleteSchedule(sid){
   confirm2('Delete schedule #'+sid+'?',function(){doDeleteSchedule(sid)});
@@ -937,13 +1929,22 @@ function deleteSchedule(sid){
 function doDeleteSchedule(sid){
   var keep=allSchedules.filter(function(s){return s.sid!==sid});
   toast('Deleting schedule #'+sid+'...','info');
-  fetch('/api/command?action=bapi&met=clr_sch&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(){
+  fetch('/api/command?action=bapi&met=clr_sch&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(c){
+    // Abort if clr_sch errored — if the clear succeeded but the
+    // restore writes fail, user loses all schedules.
+    if(c&&c.error){toast(c.error,'error');loadSchedules();return}
     var i=0;
     function next(){
       if(i>=keep.length){toast('Deleted','success');loadSchedules();return}
       var s=keep[i++];
-      var p=JSON.stringify({sid:i-1,start:s.start,stop:s.stop,days:s.days,enabled:s.enabled,mcr:s.mcr,repeat:s.repeat||1,type:s.type||0,name:s.name||'',target:s.target||{type:0,value:0}});
-      fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(next).catch(next);
+      // s_sch on fw 6.11.x expects integer start/stop, a bit-array
+      // for days, and the par.schedules[] wrapper (see buildSchEntry).
+      var entry=buildSchEntry(i-1,s.start,s.stop,s.days,s.enabled,s.mcr,s.type||0,s.target,s.repeat||1);
+      var p=JSON.stringify({schedules:[entry]});
+      fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+        if(r&&r.error){toast(r.error,'error');loadSchedules();return}
+        next();
+      }).catch(function(e){toast('Error: '+(e.message||e),'error');loadSchedules()});
     }
     next();
   }).catch(function(e){toast('Error: '+e.message,'error');loadSchedules()});
@@ -978,20 +1979,420 @@ function pauseBle(){
     }).catch(function(e){toast('Error: '+e.message,'error');if(btn){btn.disabled=false;btn.innerHTML='\u{1F4F4} Release BLE for App'}});
   });
 }
-// On page load, sync UI with actual pause state
-fetch('/api/status').then(function(x){return x.json()}).then(function(d){
-  if(d.ble_paused&&d.ble_pause_remaining>0)startPauseUI(d.ble_pause_remaining);
-}).catch(function(){});
-loadSchedules();
+// Defer the on-load fetches until window.onload fires (i.e. AFTER
+// /app.js + /style.css + /manifest.json have all finished loading).
+// Was firing at script-parse time, which ran the heavy r_schs BAPI
+// call in parallel with the static-asset GETs. Concurrent ESP32
+// HTTP responses each allocate ~10–20 KB of heap; min-heap was
+// dipping into the malloc-failure / panic zone (~30–60 KB free).
+// Deferring trades ~200 ms of perceived load time for reliable
+// no-panic page loads.
+// 2.8.0 task #75: when /settings/body.gz is injected via innerHTML
+// after page load, window.load has already fired and a listener
+// registered now would never run. Use readyState to decide whether
+// to run immediately or wait. Same effect either way.
+(function(){
+  var init=function(){
+    fetch('/api/status').then(function(x){return x.json()}).then(function(d){
+      if(d.ble_paused&&d.ble_pause_remaining>0)startPauseUI(d.ble_pause_remaining);
+    }).catch(function(){});
+    loadSchedules();
+  };
+  if(document.readyState==='complete')init();
+  else window.addEventListener('load',init);
+})();
 </script>
 </div>
-)HTML";
-    page += htmlFoot("/settings");
-    http.send(200, "text/html", page);
+)HTML");
+    // PRECOMPRESS_SETTINGS_BODY_END
+#endif  // legacy source-of-truth literal
 }
 
 // ========== PAGE 3: Config (/config) ==========
-static void handleConfig() {
+// 3.0 task #78: extracted body so the async server can call it.
+// ========== Setup Wizard (/setup) ==========
+// 3.0: first-time onboarding wizard. Linear 4-step flow that walks the
+// user through WiFi -> MQTT -> Charger BLE -> Web Security with a
+// progress indicator, Skip-per-step, and a single Save at the end.
+// Submits to the same /save endpoint as /config so there's only one
+// server-side persistence path to maintain.
+//
+// Pre-fills from current configMgr — if a user re-runs the wizard after
+// initial setup the fields show their current values; Skip means "leave
+// this step alone, take what's already there." First-time use sees the
+// defaults from ConfigManager::load() (chg_model=max, ha_prefix=
+// "homeassistant", auth disabled, etc.).
+// 3.0: human-readable mapping of esp-wifi disconnect reason codes for
+// the captive-portal "your last attempt failed" banner. Reason codes
+// come from wifi_err_reason_t in esp_wifi_types.h. Only the cases a
+// home-user will plausibly hit are spelled out; everything else falls
+// through to a generic "code N" message so the user has SOMETHING
+// concrete to share when asking for help.
+static String _wifiReasonExplain(uint8_t r) {
+    switch (r) {
+        case 2:    // AUTH_EXPIRE
+        case 15:   // 4WAY_HANDSHAKE_TIMEOUT
+        case 202:  // AUTH_FAIL
+        case 204:  // HANDSHAKE_TIMEOUT
+            return "The Wi-Fi password looks wrong. Double-check it (case-sensitive). "
+                   "If your router's name has spaces or special characters, type the SSID by hand instead of using Scan.";
+        case 201:  // NO_AP_FOUND
+            return "Could not find your network. Either the SSID was mistyped, "
+                   "or your router is on the 5 GHz band only — the gateway only sees 2.4 GHz networks.";
+        case 5:    // ASSOC_TOOMANY
+            return "Your router refused the connection (too many clients, or this MAC may be on a deny list).";
+        case 13:   // INVALID_PMKID / IE_INVALID
+        case 14:   // CHALLENGE_FAIL
+            return "Authentication negotiation failed. If your router uses WPA3-only, switch it to WPA2/WPA3 mixed mode — the gateway is WPA2.";
+        case 1:    // UNSPECIFIED (or our synthetic "never got there")
+            return "The gateway couldn't reach your network. Likely causes: SSID mistyped, router on 5 GHz only, or out of range.";
+        default:
+            return "Connection failed for an uncommon reason. See the per-boot diagnostics in /info for the full picture.";
+    }
+}
+
+String wb_buildSetupPage() {
+    const WBConfig& cfg = configMgr.get();
+    String page = htmlHead("Setup");
+    ensureCsrfToken();
+
+    page += R"HTML(
+<style>
+.wiz-wrap{max-width:520px;margin:0 auto;padding:8px 8px 24px}
+.wiz-progress{display:flex;gap:10px;justify-content:center;margin:14px 0 22px}
+.wiz-dot{width:30px;height:6px;border-radius:3px;background:var(--border);transition:background .2s}
+.wiz-dot.active{background:var(--primary)}
+.wiz-dot.done{background:var(--success)}
+.wiz-title{font-size:1.25em;font-weight:600;margin:0 0 4px}
+.wiz-help{color:var(--text2);font-size:.9em;margin:0 0 18px;line-height:1.45}
+.wiz-step{display:none}
+.wiz-step.active{display:block}
+.wiz-nav{display:flex;gap:10px;margin-top:22px;justify-content:flex-end;align-items:center;flex-wrap:wrap}
+.wiz-nav .btn{padding:11px 18px;font-size:.95em}
+.wiz-nav .spacer{flex:1}
+.wiz-skip{color:var(--text3);background:transparent;border:none;cursor:pointer;font-size:.88em;padding:11px 12px;text-decoration:underline}
+.wiz-skip:hover{color:var(--text2)}
+.wiz-section{margin-top:10px}
+.wiz-section label{display:block;color:var(--text2);font-size:.85em;margin:10px 0 4px}
+.wiz-section input,.wiz-section select{width:100%;padding:11px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:1em;font-family:inherit;box-sizing:border-box}
+.wiz-section .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.wiz-banner{background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:8px;padding:10px 12px;color:#93c5fd;font-size:.85em;margin-bottom:14px;line-height:1.4}
+.wiz-warn{background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.30);color:#f59e0b}
+.scan-result{padding:10px;border-radius:8px;border:1px solid var(--border);margin-bottom:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;background:var(--bg)}
+.scan-result:hover{background:var(--elevated)}
+.scan-result.wb{border-color:var(--success);background:rgba(34,197,94,.04)}
+.scan-name{font-weight:600;color:var(--text)}
+.scan-addr{color:var(--text3);font-size:.78em;font-family:monospace}
+.scan-rssi{color:var(--text2);font-size:.85em;font-family:monospace}
+</style>
+<div class='wiz-wrap'>
+  <h1 style='text-align:center;margin:6px 0 2px;font-size:1.4em'>Wallbox BLE Gateway</h1>
+  <p style='text-align:center;color:var(--text3);margin:0;font-size:.85em'>Setup wizard</p>
+  <div class='wiz-progress'>
+    <div class='wiz-dot active' data-dot='0'></div>
+    <div class='wiz-dot' data-dot='1'></div>
+    <div class='wiz-dot' data-dot='2'></div>
+    <div class='wiz-dot' data-dot='3'></div>
+  </div>
+  <h2 class='wiz-title' id='wiz-step-title'>Step 1 of 4 - WiFi</h2>
+  <p class='wiz-help' id='wiz-step-help'>Required so your gateway can join your home network. Once connected, every other setting can be edited from the dashboard.</p>
+)HTML";
+
+    // 3.0: surface the prior boot's WiFi failure (if any) as a banner
+    // at the top of the wizard so the user knows what went wrong on
+    // the LAST attempt before they retype credentials.
+    {
+        uint8_t failReason = configMgr.lastWifiFailReason();
+        if (failReason > 0) {
+            String failSsid = configMgr.lastWifiFailSsid();
+            page += "<div style='background:rgba(239,68,68,.10);border:1px solid rgba(239,68,68,.30);border-radius:10px;padding:12px 14px;margin-bottom:18px;color:#fca5a5;font-size:.88em;line-height:1.5'>";
+            page += "<div style='font-weight:600;color:#ef4444;margin-bottom:4px'>&#x26A0; Last attempt failed</div>";
+            page += "<div style='color:var(--text2);margin-bottom:6px'>Tried to join <b>";
+            page += (failSsid.length() ? failSsid : String("(unknown)"));
+            page += "</b> &mdash; ";
+            page += _wifiReasonExplain(failReason);
+            page += "</div>";
+            page += "<div style='color:var(--text3);font-size:.78em'>Reason code ";
+            page += String((unsigned)failReason);
+            page += " &middot; this notice will clear automatically once the gateway joins a network successfully.</div>";
+            page += "</div>";
+        }
+    }
+
+    // -------------- Form --------------
+    page += "<form id='wizForm' method='POST' action='/save'>";
+    page += "<input type='hidden' name='csrf' value='" + csrfToken + "'>";
+
+    // ---------- Step 1: WiFi ----------
+    page += R"HTML(
+<div class='wiz-step active' data-step='0'>
+  <div class='wiz-section'>
+    <label>SSID</label>
+    <div style='display:flex;gap:8px;align-items:stretch'>
+      <input id='wifi_ssid' name='wifi_ssid' value=')HTML";
+    page += cfg.wifiSSID;
+    page += R"HTML(' placeholder='Type or scan' style='flex:1;margin:0'>
+      <button type='button' id='wifiScanBtn' class='btn btn-outline' style='width:80px;padding:0;margin:0' onclick='scanWifi()'>Scan</button>
+    </div>
+    <div id='wifi-results' style='display:none;background:var(--elevated);border-radius:8px;padding:6px;margin-top:6px;max-height:200px;overflow-y:auto'></div>
+    <label>Password</label>
+    <input type='password' name='wifi_pass' value=')HTML";
+    page += cfg.wifiPass;
+    page += R"HTML(' autocomplete='off'>
+  </div>
+</div>
+)HTML";
+
+    // ---------- Step 2: MQTT ----------
+    page += R"HTML(
+<div class='wiz-step' data-step='1'>
+  <div class='wiz-banner'>
+    Skip this step if you don't use Home Assistant or if you'll set up MQTT later from the dashboard.
+  </div>
+  <div class='wiz-section'>
+    <label>Broker host / IP</label>
+    <input name='mqtt_host' value=')HTML";
+    page += cfg.mqttHost;
+    page += R"HTML(' placeholder='192.168.x.x or homeassistant.local'>
+    <div class='row'>
+      <div><label>Port</label><input name='mqtt_port' type='number' value=')HTML";
+    page += String(cfg.mqttPort);
+    page += R"HTML('></div>
+      <div><label>Client ID</label><input name='mqtt_cid' value=')HTML";
+    page += cfg.mqttClientId;
+    page += R"HTML('></div>
+    </div>
+    <label>Username (optional)</label>
+    <input name='mqtt_user' value=')HTML";
+    page += cfg.mqttUser;
+    page += R"HTML(' placeholder='Leave blank for anonymous brokers'>
+    <label>Password (optional)</label>
+    <input type='password' name='mqtt_pass' value=')HTML";
+    page += cfg.mqttPass;
+    page += R"HTML(' autocomplete='off'>
+  </div>
+</div>
+)HTML";
+
+    // ---------- Step 3: Charger BLE ----------
+    page += R"HTML(
+<div class='wiz-step' data-step='2'>
+  <div class='wiz-banner'>
+    Tap Scan to find your charger by Bluetooth, or type its MAC address manually. The gateway auto-detects whether your charger uses the single-char (MAX) or dual-char (Plus / Copper SB / Quasar) protocol on first connect.
+  </div>
+  <div class='wiz-section'>
+    <button type='button' id='scanBtn' class='btn btn-outline' style='margin-bottom:10px;width:100%' onclick='startScan()'>Scan for Chargers</button>
+    <div id='scanResults' style='margin-bottom:10px'></div>
+    <label>BLE Address</label>
+    <input id='ble_addr' name='ble_addr' value=')HTML";
+    page += cfg.bleAddr;
+    page += R"HTML(' placeholder='6C:1D:EB:30:98:08 (with or without colons)' oninput='formatMAC(this)'>
+    <label>Charger model</label>
+    <select name='chg_model'>
+)HTML";
+    page += String("<option value='max'") + (cfg.chargerModel == "max" ? " selected" : "") + ">Auto-detect / Pulsar MAX</option>";
+    page += String("<option value='plus'") + (cfg.chargerModel == "plus" ? " selected" : "") + ">Pulsar Plus</option>";
+    page += String("<option value='copper'") + (cfg.chargerModel == "copper" ? " selected" : "") + ">Copper SB (experimental)</option>";
+    page += String("<option value='quasar'") + (cfg.chargerModel == "quasar" ? " selected" : "") + ">Quasar (experimental)</option>";
+    page += String("<option value='quasar2'") + (cfg.chargerModel == "quasar2" ? " selected" : "") + ">Quasar 2 / V2H (experimental)</option>";
+    page += R"HTML(
+    </select>
+    <p style='color:var(--text3);font-size:.78em;margin:6px 0 0'><b>Auto-detect</b> stores as MAX and lets the gateway switch to Plus protocol on first connect if the charger advertises the dual-char service (Pulsar MAX 6.11.26+).</p>
+    <label>Bluetooth Passcode (optional)</label>
+    <input name='ble_pin' value=')HTML";
+    page += cfg.blePin;
+    page += R"HTML(' placeholder='Leave blank unless the Wallbox app shows one'>
+    <p style='color:var(--text3);font-size:.78em;margin:6px 0 0'>For Pulsar Plus or Pulsar MAX firmware 6.11+ the Wallbox app shows an 8-digit Bluetooth Passcode under your charger's Settings. Copy it here.</p>
+  </div>
+</div>
+)HTML";
+
+    // ---------- Step 4: Web Security ----------
+    page += R"HTML(
+<div class='wiz-step' data-step='3'>
+  <div class='wiz-banner wiz-warn'>
+    Without a password, anyone on your local network can change your charger settings via this dashboard. Highly recommended to set one.
+  </div>
+  <div class='wiz-section'>
+    <label>Require login</label>
+    <select name='auth_en' id='auth_en' onchange='wizToggleAuth()'>
+)HTML";
+    page += String("<option value='0'") + (cfg.authEnabled ? "" : " selected") + ">No (open network)</option>";
+    page += String("<option value='1'") + (cfg.authEnabled ? " selected" : "") + ">Yes</option>";
+    page += R"HTML(
+    </select>
+    <div id='auth-fields' style='display:none;margin-top:10px'>
+      <label>Username</label>
+      <input name='auth_user' value=')HTML";
+    page += cfg.authUser;
+    page += R"HTML(' autocomplete='username'>
+      <label>Password</label>
+      <input type='password' name='auth_pass' id='auth_pass' value=')HTML";
+    page += cfg.authPass;
+    page += R"HTML(' autocomplete='new-password'>
+      <label>Confirm password</label>
+      <input type='password' id='auth_pass_confirm' value=')HTML";
+    page += cfg.authPass;
+    page += R"HTML(' autocomplete='new-password'>
+      <p style='color:var(--text3);font-size:.78em;margin:6px 0 0'>Lost the password? A factory reset clears it.</p>
+    </div>
+  </div>
+</div>
+)HTML";
+
+    // ---------- Hidden fields for advanced config not in wizard ----------
+    // Carry forward existing values so /save doesn't blank them.
+    page += "<input type='hidden' name='ble_svc' value='" + cfg.bleService + "'>";
+    page += "<input type='hidden' name='ble_chr' value='" + cfg.bleChar + "'>";
+    page += "<input type='hidden' name='ble_txchr' value='" + cfg.bleTxChar + "'>";
+    page += "<input type='hidden' name='poll_status' value='" + String(cfg.statusPollMs) + "'>";
+    page += "<input type='hidden' name='poll_rt' value='" + String(cfg.realtimePollMs) + "'>";
+    page += "<input type='hidden' name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'>";
+    page += "<input type='hidden' name='ha_devid' value='" + cfg.haDeviceId + "'>";
+
+    // ---------- Nav buttons ----------
+    page += R"HTML(
+<div class='wiz-nav'>
+  <button type='button' class='btn btn-outline' id='wiz-back' onclick='wizBack()' style='visibility:hidden'>&larr; Back</button>
+  <div class='spacer'></div>
+  <button type='button' class='wiz-skip' id='wiz-skip' onclick='wizNext()' style='display:none'>Skip</button>
+  <button type='button' class='btn btn-success' id='wiz-next' onclick='wizValidateAndNext()'>Next &rarr;</button>
+  <button type='submit' class='btn btn-success' id='wiz-save' style='display:none' onclick='return wizFinalValidate()'>&#x1F4BE; Save &amp; Reboot</button>
+</div>
+</form>
+</div>
+)HTML";
+
+    // ---------- JS: nav, scan, helpers ----------
+    page += R"HTML(
+<script>
+var _wizStep=0;
+var _titles=['Step 1 of 4 - WiFi','Step 2 of 4 - Home Assistant MQTT','Step 3 of 4 - Charger BLE','Step 4 of 4 - Web Security'];
+var _helps=[
+  'Required so your gateway can join your home network. Once connected, every other setting can be edited from the dashboard.',
+  'Optional. Skip if you don\'t use Home Assistant. The dashboard can be re-opened to configure this later.',
+  'Recommended. Without a paired charger the gateway can still serve the dashboard but cannot read or control your wallbox.',
+  'Recommended. Lock down dashboard access so a guest on your network cannot toggle the charger.'
+];
+function wizShow(n){
+  if(n<0||n>3)return;
+  document.querySelectorAll('.wiz-step').forEach(function(s,i){s.classList.toggle('active',i===n)});
+  document.querySelectorAll('.wiz-dot').forEach(function(d,i){d.classList.toggle('active',i===n);d.classList.toggle('done',i<n)});
+  document.getElementById('wiz-step-title').textContent=_titles[n];
+  document.getElementById('wiz-step-help').textContent=_helps[n];
+  document.getElementById('wiz-back').style.visibility=n>0?'visible':'hidden';
+  document.getElementById('wiz-skip').style.display=n>0&&n<3?'inline-block':'none';
+  document.getElementById('wiz-next').style.display=n<3?'inline-block':'none';
+  document.getElementById('wiz-save').style.display=n===3?'inline-block':'none';
+  _wizStep=n;
+  if(n===3)wizToggleAuth();
+  window.scrollTo(0,0);
+}
+function wizNext(){wizShow(_wizStep+1)}
+function wizBack(){wizShow(_wizStep-1)}
+function wizValidateAndNext(){
+  if(_wizStep===0){
+    var ssid=document.getElementById('wifi_ssid').value.trim();
+    if(!ssid){toast('SSID is required','error');return}
+  }
+  wizNext();
+}
+function wizFinalValidate(){
+  // password confirmation only if auth enabled and password non-empty
+  var en=document.getElementById('auth_en').value;
+  if(en==='1'){
+    var p1=document.getElementById('auth_pass').value;
+    var p2=document.getElementById('auth_pass_confirm').value;
+    if(p1!==p2){toast('Passwords do not match','error');return false}
+    if(!p1){if(!confirm('Login required but password is empty. Continue without a password?'))return false}
+  }
+  return true;
+}
+function wizToggleAuth(){
+  var en=document.getElementById('auth_en').value;
+  document.getElementById('auth-fields').style.display=en==='1'?'block':'none';
+}
+function toast(msg,kind){
+  var t=document.createElement('div');
+  t.textContent=msg;
+  t.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:'+(kind==='error'?'#ef4444':'#22c55e')+';color:white;padding:10px 18px;border-radius:8px;font-size:.9em;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.3)';
+  document.body.appendChild(t);
+  setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove()},300)},2500);
+}
+function formatMAC(el){
+  var v=el.value.replace(/[^0-9a-fA-F]/g,'').toUpperCase();
+  if(v.length>12)v=v.substr(0,12);
+  var out='';
+  for(var i=0;i<v.length;i++){if(i>0&&i%2===0)out+=':';out+=v[i]}
+  el.value=out;
+}
+function scanWifi(){
+  var b=document.getElementById('wifiScanBtn');
+  var r=document.getElementById('wifi-results');
+  b.disabled=true;b.textContent='...';
+  r.style.display='block';
+  r.innerHTML='<div style="padding:10px;text-align:center;color:var(--text3)">Scanning WiFi...</div>';
+  fetch('/api/wifi-scan',{signal:AbortSignal.timeout(20000)}).then(function(x){return x.json()}).then(function(d){
+    b.disabled=false;b.textContent='Scan';
+    r.replaceChildren();
+    if(d.error){r.innerHTML='<div style="color:var(--danger);padding:8px">'+d.error+'</div>';return}
+    if(!d.networks||!d.networks.length){r.innerHTML='<div style="color:var(--text3);padding:8px;text-align:center">No networks found</div>';return}
+    d.networks.forEach(function(n){
+      var row=document.createElement('div');
+      row.className='scan-result';
+      row.addEventListener('click',function(){document.getElementById('wifi_ssid').value=n.ssid;r.style.display='none';toast('Selected: '+n.ssid)});
+      var name=document.createElement('span');name.className='scan-name';name.textContent=n.ssid;
+      var rssi=document.createElement('span');rssi.className='scan-rssi';rssi.textContent=n.rssi+' dBm';
+      row.appendChild(name);row.appendChild(rssi);
+      r.appendChild(row);
+    });
+  }).catch(function(e){
+    b.disabled=false;b.textContent='Scan';
+    r.innerHTML='<div style="color:var(--danger);padding:8px">'+(e.message||e)+'</div>';
+  });
+}
+function startScan(){
+  var b=document.getElementById('scanBtn');
+  var r=document.getElementById('scanResults');
+  b.disabled=true;b.innerHTML='Scanning...';
+  r.innerHTML='<div style="padding:10px;text-align:center;color:var(--text3)">Scanning for chargers (8s)...</div>';
+  fetch('/api/ble-scan',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){
+    b.disabled=false;b.innerHTML='Scan for Chargers';
+    r.replaceChildren();
+    if(!d.devices||!d.devices.length){r.innerHTML='<div style="color:var(--text3);padding:8px;text-align:center">No devices found - try moving the gateway closer to the charger and wake the charger keypad first.</div>';return}
+    d.devices.forEach(function(v){
+      var row=document.createElement('div');
+      row.className=v.is_wallbox?'scan-result wb':'scan-result';
+      row.addEventListener('click',function(){document.getElementById('ble_addr').value=v.addr.toUpperCase();toast('Selected: '+v.addr)});
+      var left=document.createElement('div');
+      var name=document.createElement('span');name.className='scan-name';name.textContent=v.name||'(no name)';left.appendChild(name);
+      if(v.is_wallbox){left.appendChild(document.createTextNode(' '));var bg=document.createElement('span');bg.style.cssText='background:rgba(34,197,94,.2);color:#22c55e;padding:1px 6px;border-radius:4px;font-size:.7em;font-weight:600';bg.textContent='WALLBOX';left.appendChild(bg)}
+      left.appendChild(document.createElement('br'));
+      var addr=document.createElement('span');addr.className='scan-addr';addr.textContent=v.addr;left.appendChild(addr);
+      row.appendChild(left);
+      var rssi=document.createElement('span');rssi.className='scan-rssi';rssi.textContent=v.rssi+' dBm';
+      row.appendChild(rssi);
+      r.appendChild(row);
+    });
+  }).catch(function(e){
+    b.disabled=false;b.innerHTML='Scan for Chargers';
+    r.innerHTML='<div style="color:var(--danger);padding:8px">'+(e.message||e)+'</div>';
+  });
+}
+wizShow(0);
+</script>
+)HTML";
+
+    page += htmlFoot("/setup");
+    return page;
+}
+
+static void handleSetup() {
+    if (!checkAuth()) return;
+    http.send(200, "text/html", wb_buildSetupPage());
+}
+
+String wb_buildConfigPage() {
     const WBConfig& cfg = configMgr.get();
     String page = htmlHead("Config");
 
@@ -1004,36 +2405,61 @@ static void handleConfig() {
     page += "<span class='status-item'><span class='status-dot " + String(bleOk ? "dot-green" : "dot-yellow") + "'></span>BLE: " + String(wallboxBLE.stateStr()) + "</span>";
     page += "</div>";
 
+    // Tab styles: mirrors /settings page idiom — overflow-x scroll on
+    // narrow viewports, sticky underline on the active tab.
+    page += R"HTML(
+<style>
+.cfg-tabs{display:flex;gap:0;border-bottom:2px solid var(--border);margin:14px 0 0;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.cfg-tabs::-webkit-scrollbar{display:none}
+.cfg-tab{flex:0 0 auto;padding:10px 14px;color:var(--text2);background:transparent;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;cursor:pointer;font-size:.92em;font-family:inherit;white-space:nowrap;transition:color .15s,border-color .15s}
+.cfg-tab.active{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+.cfg-tab:hover:not(.active){color:var(--text)}
+.cfg-panel{display:none;padding-top:16px}
+.cfg-panel.active{display:block}
+</style>
+<div class='cfg-tabs'>
+  <button type='button' class='cfg-tab active' data-panel='0' onclick='cfgTab(0)'>&#x1F4F6; WiFi</button>
+  <button type='button' class='cfg-tab' data-panel='1' onclick='cfgTab(1)'>&#x1F3E0; MQTT</button>
+  <button type='button' class='cfg-tab' data-panel='2' onclick='cfgTab(2)'>&#x1F50B; Charger BLE</button>
+  <button type='button' class='cfg-tab' data-panel='3' onclick='cfgTab(3)'>&#x1F512; Security</button>
+  <button type='button' class='cfg-tab' data-panel='4' onclick='cfgTab(4)'>&#x2699; Advanced</button>
+</div>
+)HTML";
+
     ensureCsrfToken();
     page += "<form method='POST' action='/save'>";
     page += "<input type='hidden' name='csrf' value='" + csrfToken + "'>";
 
-    // WiFi
-    page += "<div class='card'><div class='card-header'><span class='card-icon'>&#x1F4F6;</span><h2>WiFi</h2></div>";
+    // ---------- Panel 0: WiFi ----------
+    page += "<div class='cfg-panel active' data-panel='0'><div class='card'>";
     page += "<label>SSID</label><div style='display:flex;gap:8px;align-items:stretch'>";
     page += "<input id='wifi_ssid' name='wifi_ssid' value='" + cfg.wifiSSID + "' placeholder='Type SSID or scan' style='flex:1;margin:0'>";
     page += "<button type='button' id='wifiScanBtn' class='btn btn-outline' style='width:80px;padding:0;margin:0' onclick='scanWifi()'>Scan</button></div>";
     page += "<div id='wifi-results' style='display:none;background:var(--elevated);border-radius:8px;padding:6px;margin-top:-6px;margin-bottom:14px;max-height:200px;overflow-y:auto'></div>";
-    page += "<label>Password</label><input type='password' name='wifi_pass' value='" + cfg.wifiPass + "'></div>";
+    page += "<label>Password</label><input type='password' name='wifi_pass' value='" + cfg.wifiPass + "' autocomplete='off'>";
+    page += "</div></div>";
 
-    // MQTT
-    page += "<div class='card'><div class='card-header'><span class='card-icon'>&#x1F3E0;</span><h2>MQTT</h2></div>";
+    // ---------- Panel 1: MQTT ----------
+    page += "<div class='cfg-panel' data-panel='1'><div class='card'>";
     page += "<label>Host</label><input name='mqtt_host' value='" + cfg.mqttHost + "' placeholder='homeassistant.local'>";
     page += "<div class='row'><div><label>Port</label><input name='mqtt_port' type='number' value='" + String(cfg.mqttPort) + "'></div>";
     page += "<div><label>Client ID</label><input name='mqtt_cid' value='" + cfg.mqttClientId + "'></div></div>";
     page += "<label>Username</label><input name='mqtt_user' value='" + cfg.mqttUser + "' placeholder='optional'>";
-    page += "<label>Password</label><input type='password' name='mqtt_pass' value='" + cfg.mqttPass + "' placeholder='optional'></div>";
+    page += "<label>Password</label><input type='password' name='mqtt_pass' value='" + cfg.mqttPass + "' placeholder='optional' autocomplete='off'>";
+    page += "</div></div>";
 
-    // BLE
-    page += "<div class='card'><div class='card-header'><span class='card-icon'>&#x1F50B;</span><h2>Charger BLE</h2></div>";
+    // ---------- Panel 2: Charger BLE ----------
+    page += "<div class='cfg-panel' data-panel='2'><div class='card'>";
     page += "<button type='button' id='scanBtn' class='btn btn-outline' style='margin-bottom:12px' onclick='startScan()'>Scan for Chargers</button>";
     page += "<div id='scanResults'></div>";
     page += "<label>BLE Address</label><input id='ble_addr' name='ble_addr' value='" + cfg.bleAddr + "' placeholder='6C1DEB309808' oninput='formatMAC(this)'>";
     page += "<p class='help'>With or without colons</p>";
-    page += "<label>BLE PIN</label><input name='ble_pin' value='" + cfg.blePin + "' placeholder='Empty = no PIN'></div>";
+    page += "<label>Bluetooth Passcode <span style='color:var(--text3);font-weight:400'>(also called \"BLE PIN\")</span></label><input name='ble_pin' value='" + cfg.blePin + "' placeholder='Leave blank if your firmware has no passcode'>";
+    page += "<p class='help'>For Pulsar Plus / newer Pulsar MAX firmware (6.11+): open the Wallbox app, go to your charger &rarr; Settings, and look for <b>Bluetooth Passcode</b>. Copy that 8-digit code here. On older firmware leave blank.</p>";
+    page += "</div></div>";
 
-    // Security
-    page += "<div class='card'><div class='card-header'><span class='card-icon'>&#x1F512;</span><h2>Web Security</h2></div>";
+    // ---------- Panel 3: Web Security ----------
+    page += "<div class='cfg-panel' data-panel='3'><div class='card'>";
     if (!cfg.authEnabled || cfg.authPass.length() == 0) {
         page += "<div style='background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.30);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.85em;color:#f59e0b'>";
         page += "&#x26A0; <b>No password set.</b> Anyone on your local network can control the charger via this UI. ";
@@ -1044,35 +2470,109 @@ static void handleConfig() {
     page += "<select name='auth_en'><option value='0'" + String(cfg.authEnabled ? "" : " selected") + ">Disabled</option><option value='1'" + String(cfg.authEnabled ? " selected" : "") + ">Enabled</option></select>";
     page += "<div class='row'>";
     page += "<div><label>Username</label><input name='auth_user' value='" + cfg.authUser + "'></div>";
-    page += "<div><label>Password <span style='color:var(--text3);font-weight:400'>(recommended)</span></label><input type='password' name='auth_pass' value='" + cfg.authPass + "' placeholder='Leave blank to skip — local network only'></div>";
+    page += "<div><label>Password <span style='color:var(--text3);font-weight:400'>(recommended)</span></label><input type='password' name='auth_pass' value='" + cfg.authPass + "' placeholder='Leave blank to skip - local network only' autocomplete='new-password'></div>";
     page += "</div>";
-    page += "<p class='help'>When enabled, all control actions and OTA require login. Dashboard viewing remains open. If you set a password and leave auth disabled, we'll enable it for you.</p></div>";
+    page += "<p class='help'>When enabled, all control actions and OTA require login. Dashboard viewing remains open. If you set a password and leave auth disabled, we'll enable it for you.</p>";
+    page += "</div></div>";
 
-    // Advanced
-    page += "<details><summary style='color:var(--text3);cursor:pointer;padding:6px 0;font-size:.85em'>Advanced</summary><div class='card'>";
+    // ---------- Panel 4: Advanced ----------
+    page += "<div class='cfg-panel' data-panel='4'><div class='card'>";
+    page += "<label>Charger model</label><select name='chg_model'>";
+    page += String("<option value='max'") + (cfg.chargerModel == "max" ? " selected" : "") + ">Pulsar MAX (single-char)</option>";
+    page += String("<option value='plus'") + (cfg.chargerModel == "plus" ? " selected" : "") + ">Pulsar Plus (dual-char)</option>";
+    page += String("<option value='copper'") + (cfg.chargerModel == "copper" ? " selected" : "") + ">Copper SB (Plus protocol &mdash; experimental)</option>";
+    page += String("<option value='quasar'") + (cfg.chargerModel == "quasar" ? " selected" : "") + ">Quasar (Plus protocol &mdash; experimental)</option>";
+    page += String("<option value='quasar2'") + (cfg.chargerModel == "quasar2" ? " selected" : "") + ">Quasar 2 / V2H (Plus protocol &mdash; experimental)</option>";
+    page += String("<option value='custom'") + (cfg.chargerModel == "custom" ? " selected" : "") + ">Custom (set UUIDs below)</option>";
+    page += "</select>";
+    page += "<p class='help'>Picking <b>Pulsar Plus</b> auto-fills the Nordic UART UUIDs on save. Use <b>Custom</b> if you know better.</p>";
     page += "<label>Service UUID</label><input name='ble_svc' value='" + cfg.bleService + "' style='font-size:12px;font-family:monospace'>";
-    page += "<label>Char UUID</label><input name='ble_chr' value='" + cfg.bleChar + "' style='font-size:12px;font-family:monospace'>";
+    page += "<label>Char UUID (write &mdash; also notify in single-char mode)</label><input name='ble_chr' value='" + cfg.bleChar + "' style='font-size:12px;font-family:monospace'>";
+    page += "<label>TX/Notify Char UUID (optional &mdash; leave blank for single-char Pulsar MAX)</label><input name='ble_txchr' value='" + cfg.bleTxChar + "' placeholder='Required for Pulsar Plus' style='font-size:12px;font-family:monospace'>";
     page += "<div class='row'><div><label>Status Poll (ms)</label><input name='poll_status' type='number' value='" + String(cfg.statusPollMs) + "'></div>";
     page += "<div><label>Realtime Poll (ms)</label><input name='poll_rt' type='number' value='" + String(cfg.realtimePollMs) + "'></div></div>";
     page += "<div class='row'><div><label>HA Prefix</label><input name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'></div>";
-    page += "<div><label>Device ID</label><input name='ha_devid' value='" + cfg.haDeviceId + "'></div></div></div></details>";
+    page += "<div><label>Device ID</label><input name='ha_devid' value='" + cfg.haDeviceId + "'></div></div>";
+    page += "</div></div>";
 
+    // ---------- Save button (outside panels so always visible) ----------
     page += "<button type='submit' class='btn btn-success' style='margin-top:12px'>&#x1F4BE; Save &amp; Reboot</button></form>";
-    page += "<a href='/ota' class='btn btn-outline' style='margin-top:10px'>&#x1F4E6; Firmware Update</a>";
+    page += "<a href='/ota' class='btn btn-outline' style='margin-top:10px'>&#x1F4E6; Firmware Update</a> ";
+    page += "<a href='/setup' class='btn btn-outline' style='margin-top:10px;margin-left:6px'>&#x1F9ED; Run setup wizard</a>";
+
+    // Tab nav JS (kept simple — toggle .active on tabs + panels).
+    page += R"HTML(
+<script>
+function cfgTab(n){
+  document.querySelectorAll('.cfg-tab').forEach(function(t,i){t.classList.toggle('active',i===n)});
+  document.querySelectorAll('.cfg-panel').forEach(function(p,i){p.classList.toggle('active',i===n)});
+  // Persist last-opened tab so the user lands back in the same place
+  // after a save+reboot (cosmetic, not security-sensitive).
+  try{localStorage.setItem('wb-cfg-tab',String(n))}catch(e){}
+}
+try{var n=parseInt(localStorage.getItem('wb-cfg-tab')||'0',10);if(n>=0&&n<5)cfgTab(n)}catch(e){}
+</script>
+)HTML";
+
+    // Backup & Restore — passwords/PINs are masked in the export, so the
+    // download is safe to share. Restore preserves the existing secrets
+    // when a field is "***" in the upload.
+    page += "<div class='card' style='margin-top:14px'><div class='card-header'><span class='card-icon'>&#x1F4BE;</span><h2>Backup &amp; Restore</h2></div>";
+    page += "<p class='help' style='margin-bottom:10px'>Download saves the current config as JSON (passwords masked). Restore applies a previously saved config and reboots.</p>";
+    page += "<a href='/api/config/export' download='wallbox-config.json' class='btn btn-outline' style='margin-right:8px;text-decoration:none'>&#x2B07; Download config</a>";
+    page += "<label style='margin-top:14px'>Restore from file</label>";
+    page += "<input type='file' id='cfg-file' accept='.json,application/json' style='margin-bottom:10px'>";
+    page += "<button type='button' class='btn btn-outline' onclick='doRestore()'>&#x2B06; Restore &amp; Reboot</button>";
+    page += "<p id='restore-status' style='font-size:.82em;color:var(--text3);margin-top:8px'></p>";
+    page += "<script>function doRestore(){var f=document.getElementById('cfg-file').files[0];var st=document.getElementById('restore-status');if(!f){st.textContent='Pick a file first.';st.style.color='var(--warning)';return}var r=new FileReader();r.onload=function(){fetch('/api/config/import?csrf=" + csrfToken + "',{method:'POST',headers:{'Content-Type':'application/json'},body:r.result}).then(function(resp){return resp.json()}).then(function(d){if(d.ok){st.textContent='Imported — rebooting...';st.style.color='var(--success)'}else{st.textContent='Failed: '+(d.error||'unknown');st.style.color='var(--danger)'}}).catch(function(e){st.textContent='Error: '+e;st.style.color='var(--danger)'})};r.readAsText(f)}</script>";
+    page += "</div>";
+
+    // Reboot (keeps config) — useful for capturing a fresh boot trace
+    page += "<button type='button' class='btn btn-outline' style='margin-top:10px' onclick='confirm2(\"Reboot the gateway? Config is preserved.\",function(){fetch(\"/api/reboot?csrf=" + csrfToken + "\",{method:\"POST\"}).then(function(){location.href=\"/logs\"}).catch(function(){})})'>&#x21BB; Reboot Gateway</button>";
+
     page += "<button type='button' class='btn btn-danger' style='margin-top:10px' onclick='confirm2(\"Erase all settings and reboot into setup mode?\",function(){var f=document.createElement(\"form\");f.method=\"POST\";f.action=\"/reset\";var i=document.createElement(\"input\");i.type=\"hidden\";i.name=\"csrf\";i.value=\"" + csrfToken + "\";f.appendChild(i);document.body.appendChild(f);f.submit()})'>&#x1F5D1; Factory Reset</button>";
 
     page += htmlFoot("/config");
-    http.send(200, "text/html", page);
+    return page;
+}
+
+static void handleConfig() {
+    http.send(200, "text/html", wb_buildConfigPage());
 }
 
 // ========== PAGE 4: Info (/info) ==========
-static void handleInfo() {
+// 3.0 task #78: extracted body so the async server can call it.
+String wb_buildInfoPage() {
     String page = htmlHead("Info");
+    // CSRF token needed by interactive JS (e.g. clearDiag) — injected
+    // here so the page-body raw string can stay static.
+    page += "<script>window.WB_CSRF='" + csrfToken + "';</script>";
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Info...</div>
 <div id='pg' style='display:none'>
 <h1>&#x2139; Gateway Info</h1>
 
+<div id='fw-changed-banner' style='display:none;background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.30);border-radius:8px;padding:10px;margin-bottom:12px;font-size:.88em;color:#f59e0b'>
+  &#x1F535; <b>Charger firmware changed.</b> <span id='fw-changed-detail'></span>
+  Behaviour may have shifted — keep an eye on the dashboard. <a href='#' onclick='dismissFwBanner();return false' style='color:#f59e0b;text-decoration:underline'>Dismiss</a>
+</div>
+
+<style>
+.info-tabs{display:flex;gap:0;border-bottom:2px solid var(--border);margin:0 0 14px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.info-tabs::-webkit-scrollbar{display:none}
+.info-tab{flex:0 0 auto;padding:10px 14px;color:var(--text2);background:transparent;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;cursor:pointer;font-size:.92em;font-family:inherit;white-space:nowrap;transition:color .15s,border-color .15s}
+.info-tab.active{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+.info-tab:hover:not(.active){color:var(--text)}
+.info-panel{display:none}
+.info-panel.active{display:block}
+</style>
+<div class='info-tabs'>
+  <button type='button' class='info-tab active' onclick='infoTab(0)'>&#x2139; Overview</button>
+  <button type='button' class='info-tab' onclick='infoTab(1)'>&#x1F4C8; Diagnostics</button>
+  <button type='button' class='info-tab' onclick='infoTab(2)'>&#x1F527; Tools</button>
+</div>
+
+<div class='info-panel active' data-panel='0'>
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F4E1;</span><h2>Gateway</h2></div>
   <div id='gw'>Loading...</div>
@@ -1082,7 +2582,27 @@ static void handleInfo() {
   <div class='card-header'><span class='card-icon'>&#x1F50C;</span><h2>Charger Details</h2></div>
   <div id='chg'>Loading...</div>
 </div>
+</div>
 
+<div class='info-panel' data-panel='1'>
+<div class='card'>
+  <div class='card-header'><span class='card-icon'>&#x1F4C8;</span><h2>Connection Diagnostics</h2></div>
+  <div id='diag-rows' style='font-size:.88em'>Loading...</div>
+  <button class='btn btn-outline' style='padding:6px 12px;font-size:.82em;margin-top:8px' onclick='clearDiag()'>Clear counters</button>
+</div>
+
+<div class='card'>
+  <div class='card-header'><span class='card-icon'>&#x1F4E6;</span><h2>Firmware</h2></div>
+  <a href='/ota' class='btn btn-outline' style='text-decoration:none;display:block;margin-bottom:8px'>&#x1F4E6; Upload firmware (OTA)</a>
+  <div id='boot-reason' style='font-size:.82em;color:var(--text3);margin-top:6px;margin-bottom:6px'></div>
+  <div id='ota-history' style='display:none;margin-top:8px'>
+    <div style='font-size:.82em;color:var(--text2);margin-bottom:6px'>Recent OTA attempts:</div>
+    <div id='ota-history-rows' style='font-size:.78em;font-family:monospace'></div>
+  </div>
+</div>
+</div>
+
+<div class='info-panel' data-panel='2'>
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F517;</span><h2>Charger Info</h2></div>
   <div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'>
@@ -1136,45 +2656,230 @@ static void handleInfo() {
   <p class='help' style='margin-top:4px'>Select a command and press Send to query the charger directly</p>
   <pre id='br' style='background:var(--bg);border-radius:8px;padding:10px;margin-top:10px;white-space:pre-wrap;max-height:250px;overflow:auto;display:none;font-size:.82em'></pre>
 </div>
-
-<div class='card'>
-  <a href='/ota' class='btn btn-outline' style='text-decoration:none;display:block'>&#x1F4E6; Firmware Update</a>
 </div>
-<p style='text-align:center;color:var(--text3);font-size:.75em;margin-top:16px'>Wallbox BLE Gateway v1.0</p>
 
 <script>
-function loadGW(){fetch('/api/status').then(function(r){return r.json()}).then(function(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi Signal',d.wifi_rssi+' dBm');h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h;var c='';if(d.dev_name)c+=row('Name',d.dev_name);if(d.dev_mfg)c+=row('Manufacturer',d.dev_mfg);if(d.dev_model)c+=row('Model',d.dev_model);if(d.dev_fw)c+=row('BLE Module FW',d.dev_fw);document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>'})}
+function infoTab(n){
+  document.querySelectorAll('.info-tab').forEach(function(t,i){t.classList.toggle('active',i===n)});
+  document.querySelectorAll('.info-panel').forEach(function(p,i){p.classList.toggle('active',i===n)});
+  try{localStorage.setItem('wb-info-tab',String(n))}catch(e){}
+}
+try{var n=parseInt(localStorage.getItem('wb-info-tab')||'0',10);if(n>=0&&n<3)infoTab(n)}catch(e){}
+</script>
+<p style='text-align:center;color:var(--text3);font-size:.75em;margin-top:16px'>Wallbox BLE Gateway )HTML" WB_VERSION R"HTML(</p>
+
+<script>
+function _sect(title){return "<div style='margin-top:10px;color:var(--text3);font-size:.72em;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border);padding-bottom:3px;margin-bottom:4px;font-weight:600'>"+title+"</div>"}
+function loadGW(){return fetch('/api/status').then(function(r){return r.json()}).then(function(d){
+  window._lastStatus=d;renderGW(d);
+  // /info Charger Details card — grouped into sections for readability.
+  // Each section is hidden if none of its rows have data, so an
+  // unconfigured / un-paired charger doesn't show empty headers.
+  var c='', s='';
+  // Identity
+  s='';
+  if(d.dev_name)s+=row('Name',d.dev_name);
+  if(d.chg_sn)s+=row('Serial Number',d.chg_sn);
+  if(d.chg_mac)s+=row('MAC',d.chg_mac);
+  if(s){c+=_sect('Identity')+s}
+  // Firmware
+  s='';
+  if(d.chg_app_fw)s+=row('Charger',d.chg_app_fw);
+  if(d.chg_project)s+=row('Project',d.chg_project);
+  if(s){c+=_sect('Firmware')+s}
+  // Operation
+  s='';
+  if(d.chg_sessions>=0)s+=row('Total Sessions',d.chg_sessions);
+  if(d.chg_power_boost>=0)s+=row('Power Boost',d.chg_power_boost+' A');
+  if(d.chg_lock_state>=0)s+=row('Lock',d.chg_lock_state===1?'Locked':'Unlocked');
+  if(d.chg_grounding)s+=row('Grounding',d.chg_grounding);
+  if(s){c+=_sect('Operation')+s}
+  // Charger Network (the charger's own WiFi link, not our gateway's)
+  s='';
+  if(d.chg_net_ssid)s+=row('WiFi',d.chg_net_ssid);
+  if(d.chg_net_ip)s+=row('IP',d.chg_net_ip);
+  if(typeof d.chg_net_signal==='number'&&d.chg_net_signal>0)s+=row('Signal',d.chg_net_signal+' %');
+  if(s){c+=_sect('Charger Network')+s}
+  // BLE Module
+  s='';
+  if(d.dev_mfg)s+=row('Manufacturer',d.dev_mfg);
+  if(d.dev_model)s+=row('Model',d.dev_model);
+  if(d.dev_fw)s+=row('Firmware',d.dev_fw);
+  if(s){c+=_sect('BLE Module')+s}
+  // Gateway WiFi — the ESP32's link to the user's network. Many users
+  // care more about this signal than the charger's own WiFi.
+  s='';
+  if(d.ssid)s+=row('WiFi',d.ssid);
+  if(d.ip)s+=row('IP',d.ip);
+  if(typeof d.wifi_rssi==='number')s+=row('Signal',d.wifi_rssi+' dBm');
+  if(s){c+=_sect('Gateway WiFi')+s}
+  document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>';
+  if(d.chg_fw_changed){var b=document.getElementById('fw-changed-banner');var det=document.getElementById('fw-changed-detail');if(b){b.style.display='block';if(det&&d.chg_fw_prev&&d.dev_fw)det.textContent='Was '+d.chg_fw_prev+', now '+d.dev_fw+'.';}}
+}).catch(function(){})}
+function dismissFwBanner(){fetch('/api/fw/dismiss',{method:'POST'}).then(function(){var b=document.getElementById('fw-changed-banner');if(b)b.style.display='none'}).catch(function(){})}
+function loadOtaHistory(){return fetch('/api/ota/history').then(function(r){return r.json()}).then(function(arr){if(!Array.isArray(arr)||!arr.length)return;var c=document.getElementById('ota-history');var rows=document.getElementById('ota-history-rows');var h='';arr.forEach(function(e){
+  // Two entry kinds: 'boot' (a firmware version reached healthy state)
+  // and 'ota' (an upload event recorded by the *previous* firmware).
+  // Older entries pre-2.5.0 don't carry a `kind` field — those are
+  // implicitly 'ota'. peter-mcc 2.4.2 follow-up.
+  var dot=e.ok?'<span style="color:#22c55e">&#x25CF;</span>':'<span style="color:#ef4444">&#x25CF;</span>';
+  var ver=e.version||e.from||'unknown';
+  if(e.kind==='boot'){
+    // "booted v… ok" — distinct icon + neutral colour.
+    h+='<div style="margin:3px 0;color:var(--text2)"><span style="color:#3b82f6">&#x2192;</span> booted '+ver+'</div>';
+  }else{
+    var sz=e.bytes?(' '+Math.round(e.bytes/1024)+'KB'):'';
+    var rsn=e.ok?'':(' — '+(e.reason||'failed'));
+    h+='<div style="margin:3px 0">'+dot+' '+ver+sz+rsn+'</div>';
+  }
+});rows.innerHTML=h;c.style.display='block'}).catch(function(){})}
+function loadBootReason(){return fetch('/api/boot/history').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('boot-reason');if(!el)return;var cur=d.current||'unknown';var curFw=d.current_fw||'';var isBad=function(r){r=r||'';return r.indexOf('panic')>=0||r.indexOf('watchdog')>=0||r.indexOf('brownout')>=0};var bad=isBad(cur);var col=bad?'#ef4444':'var(--text3)';var prefix=bad?'&#x26A0; ':'';el.innerHTML='<span style=\"color:'+col+'\">'+prefix+'Last boot: '+cur+'</span>';if(d.history&&d.history.length>1){var thisFw=d.history.filter(function(e){return isBad(e.reason)&&e.fw===curFw});var olderFw=d.history.filter(function(e){return isBad(e.reason)&&e.fw!==curFw});if(thisFw.length){el.innerHTML+=' <span style=\"color:var(--danger);font-size:.92em\">('+thisFw.length+' bad boot'+(thisFw.length>1?'s':'')+' on this firmware)</span>'}else if(olderFw.length){el.innerHTML+=' <span style=\"color:var(--text3);font-size:.85em;opacity:.7\">('+olderFw.length+' from older firmware)</span>'}}}).catch(function(){})}
+// Chain /info fetches sequentially instead of firing 4-6 in parallel —
+// ESP32's WebServer has very limited concurrent connection slots, and
+// flooding it under load was causing /app.js to stall and (under worse
+// load) full panic crashes. Each fetch is small (<10 KB) so sequential
+// total time is still <2s on a healthy gateway, much better than
+// "looks fast then explodes".
+function loadInfoChained(){loadGW().then(loadBootReason).then(loadOtaHistory).then(loadDiag).catch(function(){})}
+loadInfoChained();setInterval(function(){loadGW().then(loadDiag).catch(function(){})},15000);
+function fmtUptime(s){if(!s)return 'never';var d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60);return (d?d+'d ':'')+(h?h+'h ':'')+m+'m'}
+function fmtDur(s){if(s<60)return s+'s';if(s<3600)return Math.round(s/60)+'m '+(s%60)+'s';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m'}
+function loadDiag(){
+  // Fetch /api/diag/disconnects AND /api/health in parallel — disconnect
+  // counters plus runtime-health tripwires (loop_max_ms, max_reentry,
+  // tokens, heap_free) in a single Diagnostics card. The latter were
+  // previously only visible via curl; now they're on /info so wedge /
+  // reentrancy regressions are spotable without a shell.
+  return Promise.all([
+    fetch('/api/diag/disconnects').then(function(r){return r.json()}).catch(function(){return{}}),
+    fetch('/api/health').then(function(r){return r.json()}).catch(function(){return{}})
+  ]).then(function(results){
+    var d=results[0]||{}, h2=results[1]||{};
+    var rows=document.getElementById('diag-rows');if(!rows)return;
+    var curUp=d.uptime_s||h2.uptime||0;
+    var h='';
+    // Runtime health section — the wedge / reentrancy tripwires.
+    if(typeof h2.max_reentry==='number'||typeof h2.loop_max_ms==='number'){
+      h+=_sect('Runtime Health');
+      if(typeof h2.max_reentry==='number'){
+        var rcol = h2.max_reentry > 1 ? '#ef4444' : 'var(--text)';
+        h+=row('Max reentry depth',"<span style='color:"+rcol+"'>"+h2.max_reentry+(h2.max_reentry>1?' &#x26A0;':'')+"</span>");
+      }
+      if(typeof h2.loop_max_ms==='number'){
+        // Step 9h: thresholds reflect post-2.7.0 reality. The ?wait
+        // default is 5000 ms, the upper clamp is 8000 ms, and the
+        // chunked-wait pump keeps MQTT/WS alive throughout. So a
+        // 5 s latched value is *expected* under normal load, not a
+        // warning sign. Red + ⚠ only fire above 8 s (the clamp),
+        // which would indicate something genuinely abnormal.
+        // (Pre-9h had a broken ternary: `>500 ? amber : (>2000 ? red ...)`
+        // — left-to-right eval meant the red branch was unreachable.)
+        var v = h2.loop_max_ms;
+        var lcol = v > 8000 ? '#ef4444' : (v > 2000 ? '#f59e0b' : 'var(--text)');
+        var warn = v > 8000 ? ' &#x26A0;' : '';
+        h+=row('Longest loop iteration',"<span style='color:"+lcol+"'>"+v+' ms'+warn+"</span>");
+      }
+      if(typeof h2.tokens==='number')h+=row('Rate-limit tokens',h2.tokens+' / 4');
+      if(typeof h2.heap_free==='number')h+=row('Heap free',(h2.heap_free/1024).toFixed(1)+' KB');
+    }
+    // Existing disconnect counters / events.
+    h+=_sect('Reconnect counters');
+    h+=row('BLE reconnects (this boot)',d.ble_reconnects+(d.ble_longest_s?' (longest '+fmtDur(d.ble_longest_s)+')':''));
+    h+=row('MQTT reconnects (this boot)',d.mqtt_reconnects+(d.mqtt_longest_s?' (longest '+fmtDur(d.mqtt_longest_s)+')':''));
+    if(typeof d.wifi_reconnects==='number')h+=row('WiFi reconnects (this boot)',d.wifi_reconnects+(d.wifi_longest_s?' (longest '+fmtDur(d.wifi_longest_s)+')':''));
+    if(d.ble_last_at_s)h+=row('Last BLE reconnect',fmtUptime(d.ble_last_at_s)+' after boot');
+    if(d.mqtt_last_at_s)h+=row('Last MQTT reconnect',fmtUptime(d.mqtt_last_at_s)+' after boot');
+    if(d.wifi_last_at_s)h+=row('Last WiFi reconnect',fmtUptime(d.wifi_last_at_s)+' after boot');
+    if(d.events&&d.events.length){
+      var thisBoot=d.events.filter(function(e){return e.start<=curUp});
+      var prior=d.events.filter(function(e){return e.start>curUp});
+      if(thisBoot.length){
+        h+='<div style="margin-top:8px;font-size:.82em;color:var(--text2)">Events this boot:</div>';
+        thisBoot.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':(e.kind==='wifi'?'#34d399':'#22d3ee');h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+', down '+fmtDur(e.dur)+'</div>'});
+      }
+      if(prior.length){
+        h+='<div style="margin-top:8px;font-size:.82em;color:var(--text3)">From prior boots (NVS-persisted):</div>';
+        prior.slice(0,8).forEach(function(e){var kc=e.kind==='ble'?'#a78bfa':(e.kind==='wifi'?'#34d399':'#22d3ee');h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0;opacity:.55"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+' of that boot, down '+fmtDur(e.dur)+'</div>'});
+      }
+    }
+    // Smart tripwire: recent loop_max spikes with timestamps.
+    // Lets users distinguish "one outlier overnight" from a
+    // recurring pattern without trusting the latched scalar alone.
+    if(d.loop_events&&d.loop_events.length){
+      h+='<div style="margin-top:8px;font-size:.82em;color:var(--text2)">Recent long loop iterations (≥1 s):</div>';
+      d.loop_events.slice(0,8).forEach(function(e){var ms=e.dur_ms;var col=ms>8000?'#ef4444':(ms>2000?'#f59e0b':'#a3a3a3');h+='<div style="font-family:monospace;font-size:.78em;margin:2px 0"><span style="color:'+col+'">LOOP</span> at +'+fmtUptime(e.start)+' for '+ms+' ms</div>'});
+    }
+    rows.innerHTML=h||'<div style="color:var(--text3)">No diagnostics logged yet.</div>';
+  }).catch(function(){})
+}
+function clearDiag(){if(!confirm('Reset disconnect counters and clear event history?'))return;fetch('/api/diag/clear?csrf='+window.WB_CSRF,{method:'POST'}).then(function(){loadDiag()}).catch(function(){})}
+function renderGW(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi Signal',d.wifi_rssi+' dBm');h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h}
+// Live-update the Gateway card off the same WS push the top banner uses,
+// so BLE Signal here can't drift away from the banner's value.
+if(window.wbws){window.wbws.subscribe('ble',function(d){if(!window._lastStatus)return;window._lastStatus.ble=d.state;window._lastStatus.rssi=d.rssi;renderGW(window._lastStatus)});}
 var OCPP_LABELS={chid:'Charger ID',e:'Enabled',pw:'Password',u:'Server URL',ws:'WebSocket',id:'Identity',status:'Status',connected:'Connected',protocol:'Protocol',interval:'Heartbeat (s)',auth:'Auth Type'};
 var NET_LABELS={channel:'WiFi Channel',dns1:'DNS Primary',dns2:'DNS Secondary',gateway:'Gateway',ip:'IP Address',netmask:'Subnet Mask',mac:'MAC Address',ssid:'Network Name',rssi:'Signal (dBm)',signal:'Signal',status:'Status',type:'Connection Type'};
-function Q(m,l){var r=document.getElementById('qr');r.style.display='block';r.innerHTML="<span class='spinner'></span>"+l+"...";fetch('/api/command?action=bapi&met='+m+'&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){if(d.error){r.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}var v=d.r||d;var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var ws={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi Status',typeof v==='number'?(ws[v]||'Code '+v):''+v)}else if(m==='r_not'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');else v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('#'+(i+1),n.message||n.msg||JSON.stringify(n));h+="</div>"})}else{h+=row('Notifications',typeof v==='number'?(v===0?'None':''+v):''+v)}}else if(m==='g_ocpp'){var lb=OCPP_LABELS;if(typeof v==='object'){for(var k in v){var lbl=lb[k]||k;var val=v[k];if(val===null||val===undefined||val==='')val='<span style="color:var(--text3)">Not set</span>';else if(typeof val==='number'&&(k==='e'||k==='connected'))val=val?'Yes':'No';h+=row(lbl,val)}}else{h+=row('OCPP',v===1?'Connected':v===0?'Not configured':'Code '+v)}}else if(m==='gnsta'){if(Array.isArray(v)&&v.length>0){var n=v[0];var lb=NET_LABELS;for(var k in n){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=n[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else if(typeof v==='object'&&!Array.isArray(v)){var lb=NET_LABELS;for(var k in v){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else{h+=row('Network',''+v)}}else if(m==='gupdc'){if(typeof v==='object'){if(v.update)h+=row('Update Available','<span style="color:var(--success)">Yes</span>');else h+=row('Update Available','No');if(v.version||v.current)h+=row('Current Version',v.version||v.current||'Unknown');if(v.latest||v.new_version)h+=row('Latest Version',v.latest||v.new_version||'Unknown')}else{h+=row('Firmware',typeof v==='number'?(v===0?'Up to date':'Update available ('+v+')'):''+v)}}else if(m==='r_not'){if(typeof v==='object'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('Notification '+(i+1),n.message||n.msg||n.text||JSON.stringify(n));if(n.timestamp||n.ts)h+=row('Time',new Date((n.timestamp||n.ts)*1000).toLocaleString());h+="</div>"})}else{for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});h+=row(lbl,typeof v[k]==='object'?JSON.stringify(v[k]):v[k])}}}else{h+=row('Notifications',v===0?'None':''+v)}}else if(typeof v==='object'){for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(typeof val==='boolean')val=val?'Yes':'No';else if(typeof val==='object')val=JSON.stringify(val);h+=row(lbl,val)}}else{h+=row(l,v)}r.innerHTML=h}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'})}
-function B(){var m=document.getElementById('bm').value,r=document.getElementById('br');r.style.display='block';r.textContent='Sending '+m+'...';fetch('/api/command?action=bapi&met='+encodeURIComponent(m)+'&par=null',{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){r.textContent=JSON.stringify(d,null,2)}).catch(function(e){r.textContent='Error: '+e.message})}
+function Q(m,l){var r=document.getElementById('qr');r.style.display='block';r.innerHTML="<span class='spinner'></span>"+l+"...";fetch('/api/command?action=bapi&met='+m+'&par=null&wait=12000',{signal:AbortSignal.timeout(13000)}).then(function(x){return x.json()}).then(function(d){if(d.error){r.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}var v=d.r||d;var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var ws={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi Status',typeof v==='number'?(ws[v]||'Code '+v):''+v)}else if(m==='r_not'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');else v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('#'+(i+1),n.message||n.msg||JSON.stringify(n));h+="</div>"})}else{h+=row('Notifications',typeof v==='number'?(v===0?'None':''+v):''+v)}}else if(m==='g_ocpp'){var lb=OCPP_LABELS;if(typeof v==='object'){for(var k in v){var lbl=lb[k]||k;var val=v[k];if(val===null||val===undefined||val==='')val='<span style="color:var(--text3)">Not set</span>';else if(typeof val==='number'&&(k==='e'||k==='connected'))val=val?'Yes':'No';h+=row(lbl,val)}}else{h+=row('OCPP',v===1?'Connected':v===0?'Not configured':'Code '+v)}}else if(m==='gnsta'){if(Array.isArray(v)&&v.length>0){var n=v[0];var lb=NET_LABELS;for(var k in n){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=n[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else if(typeof v==='object'&&!Array.isArray(v)){var lb=NET_LABELS;for(var k in v){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else{h+=row('Network',''+v)}}else if(m==='gupdc'){if(typeof v==='object'){if(v.update)h+=row('Update Available','<span style="color:var(--success)">Yes</span>');else h+=row('Update Available','No');if(v.version||v.current)h+=row('Current Version',v.version||v.current||'Unknown');if(v.latest||v.new_version)h+=row('Latest Version',v.latest||v.new_version||'Unknown')}else{h+=row('Firmware',typeof v==='number'?(v===0?'Up to date':'Update available ('+v+')'):''+v)}}else if(m==='r_not'){if(typeof v==='object'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('Notification '+(i+1),n.message||n.msg||n.text||JSON.stringify(n));if(n.timestamp||n.ts)h+=row('Time',new Date((n.timestamp||n.ts)*1000).toLocaleString());h+="</div>"})}else{for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});h+=row(lbl,typeof v[k]==='object'?JSON.stringify(v[k]):v[k])}}}else{h+=row('Notifications',v===0?'None':''+v)}}else if(typeof v==='object'){for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(typeof val==='boolean')val=val?'Yes':'No';else if(typeof val==='object')val=JSON.stringify(val);h+=row(lbl,val)}}else{h+=row(l,v)}r.innerHTML=h}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'})}
+function B(){var m=document.getElementById('bm').value,r=document.getElementById('br');r.style.display='block';r.textContent='Sending '+m+'...';fetch('/api/command?action=bapi&met='+encodeURIComponent(m)+'&par=null&wait=12000',{signal:AbortSignal.timeout(13000)}).then(function(x){return x.json()}).then(function(d){r.textContent=JSON.stringify(d,null,2)}).catch(function(e){r.textContent='Error: '+e.message})}
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
-loadGW();setInterval(loadGW,15000);
 </script>
 </div>
 )HTML";
     page += htmlFoot("/info");
-    http.send(200, "text/html", page);
+    return page;
+}
+
+static void handleInfo() {
+    http.send(200, "text/html", wb_buildInfoPage());
 }
 
 // ========== Save / Reset ==========
 static void handleSave() {
     if (!checkAuth()) return;
     if (!checkCsrf()) return;
+    String page = wb_applySaveForm([](const char* k) {
+        return http.arg(k);
+    });
+    http.send(200, "text/html", page);
+    webServer.requestReboot();
+}
+
+// 3.0 task #78: extracted handleSave body so the async server can
+// reuse the field-assignment logic without copying ~20 lines of
+// http.arg() calls. Takes a getter callable so each server can
+// hand in its own arg-reader (http.arg vs req->getParam).
+//
+// Caller is responsible for auth + CSRF; this helper does NOT check
+// either, only writes config + saves.
+//
+// Returns the "Saved!" HTML response page. Caller sends it and then
+// invokes webServer.requestReboot().
+String wb_applySaveForm(std::function<String(const char*)> getArg) {
     WBConfig& cfg = configMgr.mut();
-    cfg.wifiSSID = http.arg("wifi_ssid"); cfg.wifiPass = http.arg("wifi_pass");
-    cfg.mqttHost = http.arg("mqtt_host"); cfg.mqttPort = http.arg("mqtt_port").toInt();
-    cfg.mqttUser = http.arg("mqtt_user"); cfg.mqttPass = http.arg("mqtt_pass");
-    cfg.mqttClientId = http.arg("mqtt_cid");
-    cfg.authEnabled = http.arg("auth_en") == "1";
-    cfg.authUser = http.arg("auth_user"); cfg.authPass = http.arg("auth_pass");
-    // Convenience: if the user typed a password but didn't flip the toggle, turn auth on for them.
+    cfg.wifiSSID = getArg("wifi_ssid"); cfg.wifiPass = getArg("wifi_pass");
+    cfg.mqttHost = getArg("mqtt_host"); cfg.mqttPort = getArg("mqtt_port").toInt();
+    cfg.mqttUser = getArg("mqtt_user"); cfg.mqttPass = getArg("mqtt_pass");
+    cfg.mqttClientId = getArg("mqtt_cid");
+    cfg.authEnabled = getArg("auth_en") == "1";
+    cfg.authUser = getArg("auth_user"); cfg.authPass = getArg("auth_pass");
     if (!cfg.authEnabled && cfg.authPass.length() > 0) cfg.authEnabled = true;
-    cfg.bleAddr = normalizeMAC(http.arg("ble_addr")); cfg.blePin = http.arg("ble_pin");
-    cfg.bleService = http.arg("ble_svc"); cfg.bleChar = http.arg("ble_chr");
-    cfg.statusPollMs = http.arg("poll_status").toInt();
-    cfg.realtimePollMs = http.arg("poll_rt").toInt();
-    cfg.haDiscoveryPrefix = http.arg("ha_prefix"); cfg.haDeviceId = http.arg("ha_devid");
+    cfg.bleAddr = normalizeMAC(getArg("ble_addr")); cfg.blePin = getArg("ble_pin");
+    cfg.bleService = getArg("ble_svc"); cfg.bleChar = getArg("ble_chr");
+    cfg.bleTxChar = getArg("ble_txchr");
+    cfg.chargerModel = getArg("chg_model");
+    if (cfg.chargerModel == "max") {
+        cfg.bleService = "2456e1b9-26e2-8f83-e744-f34f01e9d701";
+        cfg.bleChar    = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
+        cfg.bleTxChar  = "";
+    } else if (cfg.chargerModel == "plus" || cfg.chargerModel == "copper"
+            || cfg.chargerModel == "quasar" || cfg.chargerModel == "quasar2") {
+        cfg.bleService = "331a36f5-2459-45ea-9d95-6142f0c4b307";
+        cfg.bleChar    = "a9da6040-0823-4995-94ec-9ce41ca28833";
+        cfg.bleTxChar  = "a73e9a10-628f-4494-a099-12efaf72258f";
+    }
+    cfg.statusPollMs = getArg("poll_status").toInt();
+    cfg.realtimePollMs = getArg("poll_rt").toInt();
+    cfg.haDiscoveryPrefix = getArg("ha_prefix"); cfg.haDeviceId = getArg("ha_devid");
     if (cfg.mqttPort == 0) cfg.mqttPort = 1883;
     if (cfg.statusPollMs < 1000) cfg.statusPollMs = 10000;
     if (cfg.realtimePollMs < 1000) cfg.realtimePollMs = 30000;
@@ -1182,21 +2887,132 @@ static void handleSave() {
 
     String page = htmlHead("Saved");
     page += "<div class='card' style='text-align:center'><h2 style='color:var(--success)'>&#x2705; Saved!</h2>";
-    page += "<p style='color:var(--text2);margin-top:10px'>Rebooting...</p><div class='spinner' style='margin:16px auto'></div></div>";
-    page += "</div></body></html>";
-    http.send(200, "text/html", page);
-    webServer.requestReboot();
+    page += "<p id='wait-msg' style='color:var(--text2);margin-top:10px'>Rebooting gateway...</p>";
+    page += "<div class='spinner' style='margin:16px auto'></div>";
+    page += "<p id='wait-detail' style='color:var(--text3);font-size:.82em;margin-top:8px'>Waiting for it to come back online — this page will reload when it does.</p>";
+    page += "</div>";
+    page += "<script>(function(){"
+            "var n=0,max=60,started=Date.now();"
+            "var msg=document.getElementById('wait-msg');"
+            "var det=document.getElementById('wait-detail');"
+            "function tick(){"
+              "n++;"
+              "var s=Math.round((Date.now()-started)/1000);"
+              "fetch('/api/status',{cache:'no-store'}).then(function(r){"
+                "if(r.ok){if(msg)msg.textContent='Back online \\u2014 redirecting...';location.replace('/');}"
+                "else throw new Error();"
+              "}).catch(function(){"
+                "if(det)det.textContent='Still waiting... ('+s+'s)';"
+                "if(n<max)setTimeout(tick,2000);"
+                "else{if(msg)msg.textContent='Gateway not responding';"
+                "if(det)det.innerHTML='Try the <a href=\"/\">dashboard</a> manually \\u2014 if that fails, the gateway may need a power cycle.';}"
+              "});"
+            "}"
+            "setTimeout(tick,5000);"
+            "})();</script>";
+    page += "</body></html>";
+    return page;
+}
+
+// 3.0 task #78: factory-reset core logic + response page. Caller
+// handles auth+CSRF and the post-response reboot.
+String wb_applyResetAndPage() {
+    configMgr.reset();
+    // Wipe the persisted CSRF token too — a factory-reset device should
+    // come back with a fresh token, not inherit one from the previous
+    // installation. configMgr.reset() only clears the "wbconfig"
+    // namespace; the CSRF lives in its own "wbcsrf" namespace.
+    {
+        Preferences p;
+        if (p.begin("wbcsrf", false)) { p.clear(); p.end(); }
+    }
+    String page = htmlHead("Reset");
+    page += "<div class='card' style='text-align:center'><h2 style='color:var(--warning)'>Factory Reset</h2>";
+    page += "<p style='color:var(--text2)'>Rebooting into AP mode...</p></div></div></body></html>";
+    return page;
 }
 
 static void handleReset() {
     if (!checkAuth()) return;
     if (!checkCsrf()) return;
-    configMgr.reset();
-    String page = htmlHead("Reset");
-    page += "<div class='card' style='text-align:center'><h2 style='color:var(--warning)'>Factory Reset</h2>";
-    page += "<p style='color:var(--text2)'>Rebooting into AP mode...</p></div></div></body></html>";
-    http.send(200, "text/html", page);
+    http.send(200, "text/html", wb_applyResetAndPage());
     webServer.requestReboot();
+}
+
+// 3.0 task #78 audit fix: /api/config/export was missed during
+// the per-route migration. Extract the JSON-building loop so both
+// servers serve byte-identical bodies. Secret fields are masked
+// with "***" — same masking sync had pre-extraction.
+String wb_buildConfigExportJson() {
+    const WBConfig& c = configMgr.get();
+    JsonDocument d;
+    d["version"]      = 1;
+    d["exported_at"]  = millis() / 1000;
+    d["wifi_ssid"]    = c.wifiSSID;
+    d["wifi_pass"]    = c.wifiPass.length() ? "***" : "";
+    d["mqtt_host"]    = c.mqttHost;
+    d["mqtt_port"]    = c.mqttPort;
+    d["mqtt_user"]    = c.mqttUser;
+    d["mqtt_pass"]    = c.mqttPass.length() ? "***" : "";
+    d["mqtt_cid"]     = c.mqttClientId;
+    d["ble_addr"]     = c.bleAddr;
+    d["ble_pin"]      = c.blePin.length() ? "***" : "";
+    d["ble_svc"]      = c.bleService;
+    d["ble_chr"]      = c.bleChar;
+    d["ble_txchr"]    = c.bleTxChar;
+    d["chg_model"]    = c.chargerModel;
+    d["auth_enabled"] = c.authEnabled;
+    d["auth_user"]    = c.authUser;
+    d["auth_pass"]    = c.authPass.length() ? "***" : "";
+    d["poll_status"]  = c.statusPollMs;
+    d["poll_rt"]      = c.realtimePollMs;
+    d["ha_prefix"]    = c.haDiscoveryPrefix;
+    d["ha_devid"]     = c.haDeviceId;
+    String body;
+    serializeJsonPretty(d, body);
+    return body;
+}
+
+// 3.0 task #78: extracted /api/config/import core logic. Parses
+// the JSON body, applies non-sentinel ("***" = preserve) fields to
+// configMgr, saves. Returns the response status + body + a flag
+// telling the caller whether to schedule a reboot. Caller handles
+// auth + CSRF + body acquisition (sync uses http.arg("plain"),
+// async accumulates via the body-handler).
+ImportResult wb_applyConfigImport(const String& jsonBody) {
+    JsonDocument d;
+    if (deserializeJson(d, jsonBody) != DeserializationError::Ok) {
+        return { 400, "{\"ok\":false,\"error\":\"invalid JSON\"}", false };
+    }
+    auto take = [&](JsonVariantConst v, String& dst) {
+        if (v.is<const char*>()) {
+            const char* s = v.as<const char*>();
+            if (strcmp(s, "***") != 0) dst = s;
+        }
+    };
+    WBConfig& c = configMgr.mut();
+    take(d["wifi_ssid"],   c.wifiSSID);
+    take(d["wifi_pass"],   c.wifiPass);
+    take(d["mqtt_host"],   c.mqttHost);
+    if (d["mqtt_port"].is<uint16_t>()) c.mqttPort = d["mqtt_port"].as<uint16_t>();
+    take(d["mqtt_user"],   c.mqttUser);
+    take(d["mqtt_pass"],   c.mqttPass);
+    take(d["mqtt_cid"],    c.mqttClientId);
+    take(d["ble_addr"],    c.bleAddr);
+    take(d["ble_pin"],     c.blePin);
+    take(d["ble_svc"],     c.bleService);
+    take(d["ble_chr"],     c.bleChar);
+    take(d["ble_txchr"],   c.bleTxChar);
+    take(d["chg_model"],   c.chargerModel);
+    if (d["auth_enabled"].is<bool>()) c.authEnabled = d["auth_enabled"].as<bool>();
+    take(d["auth_user"],   c.authUser);
+    take(d["auth_pass"],   c.authPass);
+    if (d["poll_status"].is<uint32_t>()) c.statusPollMs = d["poll_status"].as<uint32_t>();
+    if (d["poll_rt"].is<uint32_t>())     c.realtimePollMs = d["poll_rt"].as<uint32_t>();
+    take(d["ha_prefix"],   c.haDiscoveryPrefix);
+    take(d["ha_devid"],    c.haDeviceId);
+    configMgr.save();
+    return { 200, "{\"ok\":true,\"rebooting\":true}", true };
 }
 
 static void handleNotFound() {
@@ -1223,12 +3039,14 @@ static void handleNotFound() {
 // ========== Server setup ==========
 // ========== Web OTA Upload ==========
 // ========== PAGE: Sessions Heatmap (/sessions) ==========
-static void handleSessionsPage() {
+// 3.0 task #78: extracted body so the async server can call it.
+String wb_buildSessionsPage() {
     String page = htmlHead("Sessions");
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading...</div>
 <div id='pg' style='display:none'>
-<h1>&#x1F4CA; Charging Sessions</h1>
+<h1>&#x1F4CA; Charging Sessions<span id='sess-total' style='font-size:.55em;vertical-align:middle;margin-left:10px;padding:3px 9px;border-radius:10px;background:rgba(59,130,246,.12);color:var(--accent);font-weight:500;display:none'></span></h1>
+<script>fetch('/api/status').then(function(r){return r.json()}).then(function(d){if(typeof d.chg_sessions==='number'&&d.chg_sessions>=0){var el=document.getElementById('sess-total');if(el){el.textContent=d.chg_sessions+' total';el.style.display='inline-block'}}}).catch(function(){})</script>
 <p class='subtitle'>Charging history and patterns</p>
 
 <div class='card'>
@@ -1621,11 +3439,18 @@ loadSessions2();
 </script>
 )HTML";
     page += htmlFoot("/settings");
-    http.send(200, "text/html", page);
+    return page;
 }
 
-static void handleOtaPage() {
-    if (!checkAuth()) return;
+static void handleSessionsPage() {
+    http.send(200, "text/html", wb_buildSessionsPage());
+}
+
+// 3.0 task #78: extracted body so the async server can call it.
+// Note: auth check is the caller's responsibility — both servers
+// gate the page behind their own auth helper before invoking the
+// builder.
+String wb_buildOtaPage() {
     String page = htmlHead("Firmware Update");
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading...</div>
@@ -1647,36 +3472,277 @@ static void handleOtaPage() {
 </div>
 <script>
 document.getElementById('fw').onchange=function(){var f=this.files[0];if(!f)return;var info=document.getElementById('ota-info');info.style.display='block';var sz=(f.size/1024).toFixed(0);var valid=f.name.endsWith('.bin')&&f.size>10000&&f.size<2000000;info.innerHTML=row('File',f.name)+row('Size',sz+' KB')+(valid?'':'<p style="color:var(--danger);margin-top:8px">Invalid: must be .bin, 10KB-2MB</p>')};
-function doOTA(){var f=document.getElementById('fw').files[0];if(!f){toast('Select a firmware file','error');return}if(!f.name.endsWith('.bin')){toast('Must be a .bin file','error');return}if(f.size<10000||f.size>2000000){toast('File size invalid','error');return}var prog=document.getElementById('ota-progress');prog.style.display='block';var bar=document.getElementById('ota-bar');var stat=document.getElementById('ota-status');var xhr=new XMLHttpRequest();xhr.open('POST','/api/ota');xhr.upload.onprogress=function(e){if(e.lengthComputable){var pct=Math.round(e.loaded/e.total*100);bar.style.width=pct+'%';stat.textContent='Uploading... '+pct+'%'}};xhr.onload=function(){if(xhr.status===200){stat.textContent='Update complete! Rebooting...';toast('Firmware updated!','success');bar.style.width='100%';bar.style.background='var(--success)'}else{stat.textContent='Failed: '+xhr.responseText;toast('Update failed','error');bar.style.background='var(--danger)'}};xhr.onerror=function(){stat.textContent='Upload failed';toast('Upload error','error')};xhr.send(f)}
+// Single retry budget — admission rejections (just-rebooted, BLE still
+// settling, WiFi briefly down) are usually transient. Retrying more than
+// once invites flash-storm behaviour we expressly designed the admission
+// guard to prevent.
+var _otaRetried=false;
+function doOTA(){
+  var f=document.getElementById('fw').files[0];
+  if(!f){toast('Select a firmware file','error');return}
+  if(!f.name.endsWith('.bin')){toast('Must be a .bin file','error');return}
+  if(f.size<10000||f.size>2000000){toast('File size invalid','error');return}
+  _otaRetried=false;
+  _doOtaUpload(f);
+}
+function _doOtaUpload(f){
+  var prog=document.getElementById('ota-progress');prog.style.display='block';
+  var bar=document.getElementById('ota-bar');
+  var stat=document.getElementById('ota-status');
+  var xhr=new XMLHttpRequest();xhr.open('POST','/api/ota');
+  xhr.upload.onprogress=function(e){if(e.lengthComputable){var pct=Math.round(e.loaded/e.total*100);bar.style.width=pct+'%';stat.textContent='Uploading... '+pct+'%'}};
+  xhr.onload=function(){
+    if(xhr.status===200){
+      stat.textContent='Update complete! Rebooting...';
+      toast('Firmware updated!','success');
+      bar.style.width='100%';bar.style.background='var(--success)';
+      return;
+    }
+    if(xhr.status===503&&!_otaRetried){
+      // Admission rejected — the gateway is asking us to back off and
+      // try again shortly. Parse Retry-After (seconds) and schedule one
+      // automatic retry. Avoids the user having to manually re-click
+      // Upload after a reboot when the device hasn't quite passed the
+      // settling window yet.
+      var ra=parseInt(xhr.getResponseHeader('Retry-After')||'',10);
+      if(!(ra>0)){
+        try{var j=JSON.parse(xhr.responseText||'{}');if(j&&j.retry_after>0)ra=j.retry_after}catch(e){}
+      }
+      if(!(ra>0))ra=10;
+      _otaRetried=true;
+      bar.style.width='0%';bar.style.background='var(--accent)';
+      var reason='';try{var j2=JSON.parse(xhr.responseText||'{}');reason=j2&&j2.error?j2.error:''}catch(e){}
+      var remain=ra;
+      stat.textContent='Gateway busy ('+(reason||'admission')+ ') — retrying in '+remain+'s...';
+      toast('Gateway busy, auto-retrying in '+remain+'s','info');
+      var timer=setInterval(function(){
+        remain--;
+        if(remain>0){stat.textContent='Gateway busy — retrying in '+remain+'s...';return}
+        clearInterval(timer);
+        stat.textContent='Retrying upload...';
+        // Guard against synchronous throws inside _doOtaUpload (FormData
+        // / XHR constructor failures on exotic browsers). The interval is
+        // already cleared above, but without this catch the user is left
+        // staring at "Retrying upload..." with no feedback if it throws.
+        try{_doOtaUpload(f)}catch(e){
+          stat.textContent='Retry failed: '+(e&&e.message?e.message:e);
+          bar.style.background='var(--danger)';
+          toast('Retry failed','error');
+        }
+      },1000);
+      return;
+    }
+    stat.textContent='Failed: '+xhr.responseText;
+    toast('Update failed','error');
+    bar.style.background='var(--danger)';
+  };
+  xhr.onerror=function(){stat.textContent='Upload failed';toast('Upload error','error')};
+  // CRITICAL: wrap the file in FormData so the body is sent as
+  // multipart/form-data. xhr.send(File) by itself sends the raw bytes
+  // with Content-Type set to the file's MIME (octet-stream for .bin),
+  // and the Arduino WebServer routes those through the raw() dispatch
+  // path which never allocates _currentUpload — handleOtaUpload() then
+  // dereferences a null unique_ptr → LoadProhibited panic.
+  // peter-mcc #4: this is what bricked every browser-driven OTA on
+  // his board until decoded from the serial backtrace.
+  var fd=new FormData();fd.append('firmware',f);
+  xhr.send(fd);
+}
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
 </script>
 )HTML";
     page += htmlFoot("/info");
-    http.send(200, "text/html", page);
+    return page;
+}
+
+static void handleOtaPage() {
+    if (!checkAuth()) return;
+    http.send(200, "text/html", wb_buildOtaPage());
+}
+
+// 3.0 task #78: extracted body of the /logs HTML page (was an
+// inline lambda in registerRoutes). Both sync and async servers
+// auth-check separately and then trampoline through this builder.
+String wb_buildLogsPage() {
+    String page = htmlHead("Logs");
+    page += "<h1>&#x1F4DC; Gateway Log <span id='log-state' style='font-size:.55em;vertical-align:middle;margin-left:8px;padding:3px 8px;border-radius:10px;background:rgba(34,197,94,.15);color:#22c55e'>online</span></h1>";
+    page += "<p style='color:var(--text3);font-size:.82em'>Last 16 KB of serial/telnet output. Auto-refreshes every 3s; scroll-locks to bottom unless you scroll up. Persists across page reloads, wiped on reboot.</p>";
+    page += "<div style='margin-bottom:8px'>";
+    page += "<button class='btn btn-outline' style='padding:6px 12px;font-size:.85em' onclick='copyLog()'>&#x1F4CB; Copy</button> ";
+    page += "<a href='/api/logs' download='wallbox-log.txt' class='btn btn-outline' style='padding:6px 12px;font-size:.85em;text-decoration:none'>&#x2B07; Download</a> ";
+    page += "<button class='btn btn-outline' style='padding:6px 12px;font-size:.85em' onclick='confirm2(\"Reboot the gateway? Config is preserved \\u2014 you can watch the boot trace appear here.\",function(){fetch(\"/api/reboot?csrf=" + csrfToken + "\",{method:\"POST\"}).then(function(){}).catch(function(){})})'>&#x21BB; Reboot &amp; capture boot trace</button>";
+    page += "</div>";
+    page += "<pre id='log' style='background:var(--bg);border-radius:8px;padding:10px;font-size:.78em;max-height:70vh;overflow:auto;white-space:pre-wrap;line-height:1.35'></pre>";
+    page += "<script>(function(){"
+            "var el=document.getElementById('log');"
+            "var st=document.getElementById('log-state');"
+            "var stick=true;var fails=0;"
+            "function setState(label,color,bg){st.textContent=label;st.style.color=color;st.style.background=bg}"
+            "function offline(){setState('offline — gateway rebooting?','#ef4444','rgba(239,68,68,.15)')}"
+            "function online(){setState('online','#22c55e','rgba(34,197,94,.15)');fails=0}"
+            "el.addEventListener('scroll',function(){"
+              "stick=(el.scrollHeight-el.scrollTop-el.clientHeight)<8;"
+            "});"
+            "window.copyLog=function(){var t=el.textContent||'';if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){toast&&toast('Copied','success')}).catch(function(){})}};"
+            "function load(){fetch('/api/logs',{cache:'no-store'})"
+              ".then(function(r){return r.text()})"
+              ".then(function(t){online();el.textContent=t;if(stick)el.scrollTop=el.scrollHeight})"
+              ".catch(function(){fails++;if(fails>=2)offline()});}"
+            "load();setInterval(load,3000);"
+            "})();</script>";
+    page += htmlFoot("/logs");
+    return page;
 }
 
 bool otaInProgress = false;
+// 3.0 task #78 step I: these three lost their `static` so the async
+// OTA handler in wb_web_async.cpp can share the same admission +
+// retry state with the sync handler — preventing a brute-forcer from
+// alternating ports to bypass the otaInProgress guard.
+size_t expectedOtaSize = 0;  // Content-Length captured at FILE_START for truncation check
+// When admission rejects an upload at FILE_START we set otaRetryAfterSec so
+// FILE_END can emit a proper 503 + Retry-After. doOTA() in the browser
+// parses Retry-After and schedules one auto-retry — peter-mcc #4 follow-up:
+// the typical "rejected because we just rebooted" case should self-heal
+// without the user re-clicking Upload.
+uint16_t otaRetryAfterSec = 0;
+String   otaRejectReason;
 
 static void handleOtaUpload() {
+    // DEFENCE IN DEPTH — the Arduino WebServer routes both multipart AND
+    // raw POST bodies through this same lambda (FunctionRequestHandler
+    // calls _ufn() from both upload() and raw() dispatch). _currentUpload
+    // is ONLY allocated for multipart; for raw bodies http.upload() returns
+    // *_currentUpload which is a null unique_ptr → LoadProhibited panic on
+    // dereference. peter-mcc #4 hit this because xhr.send(File) without
+    // FormData sends application/octet-stream, not multipart/form-data.
+    //
+    // The client-side fix (wrap in FormData) is in doOTA() above. This
+    // is the server-side safety net for any other tool that POSTs raw
+    // — HA, curl --data-binary, custom OTA scripts — so they get a
+    // clean error instead of bricking the gateway.
+    // Default to REJECT if Content-Type is missing or doesn't say
+    // multipart. The previous version "if header present, check" was
+    // wrong — when WebServer doesn't collect a header it just returns
+    // empty, so the guard fired open on every raw POST and we still
+    // crashed. Now the only path that reaches http.upload() is one
+    // that explicitly says multipart/.
+    String ct = http.header("Content-Type");
+    if (ct.indexOf("multipart/") < 0) {
+        Log.printf("[OTA] REJECTED: Content-Type='%s' (need multipart/form-data, raw body crashes handler)\n",
+                   ct.c_str());
+        return;  // body is consumed by the WebServer; we just don't act on it
+    }
+
     HTTPUpload& upload = http.upload();
     static size_t totalSize = 0;
     static bool otaError = false;
 
     if (upload.status == UPLOAD_FILE_START) {
+        // Clear any retry hint left over from a prior aborted upload —
+        // FILE_END below only emits 503+Retry-After if THIS upload sets it.
+        otaRetryAfterSec = 0;
+        otaRejectReason  = String();
+        // SECURITY — auth check must happen BEFORE the admission guard,
+        // BEFORE Update.begin() erases the partition. Without this anyone
+        // on the WiFi can flash arbitrary firmware and brick or backdoor
+        // the gateway. checkAuth() is a no-op when web auth isn't
+        // enabled (matches the rest of the API surface).
+        if (!checkAuth()) {
+            Log.println("[OTA] REJECTED: unauthenticated");
+            otaError = true;
+            return;
+        }
+        // Admission guard — reject if the gateway hasn't been healthy long
+        // enough or another OTA is in progress. Prevents flash-storms
+        // (rapid back-to-back OTAs colliding with the post-reboot
+        // settling window) and re-entrant uploads.
+        if (otaInProgress) {
+            Log.println("[OTA] REJECTED: another OTA already in progress");
+            otaError          = true;
+            otaRetryAfterSec  = 10;  // the other OTA should be done by then
+            otaRejectReason   = "another OTA already in progress";
+            return;
+        }
+        String reason;
+        if (!wb_health::canAcceptOta(reason)) {
+            Log.printf("[OTA] REJECTED: %s\n", reason.c_str());
+            otaError         = true;
+            otaRetryAfterSec = (uint16_t)wb_health::otaRetryAfterSeconds();
+            otaRejectReason  = reason;
+            return;
+        }
+
         Log.printf("[OTA] Upload start: %s\n", upload.filename.c_str());
         totalSize = 0;
         otaError = false;
         otaInProgress = true;
 
-        // Check partition size
+        // Pause BLE for the OTA window. BLE scans/reconnects set the radio
+        // coex preference to BT and starve WiFi for several seconds at a
+        // time — bad for a streaming OTA TCP upload.
+        wallboxBLE.pause(5 * 60 * 1000);  // 5 min — auto-resumes after
+
+        // Extend the Task Watchdog timeout to cover the blocking flash
+        // erase that's about to happen inside Update.begin(). On an empty
+        // / fully-used OTA partition the erase can take 10+ seconds, well
+        // beyond the default 5s WDT — which would otherwise panic-reboot
+        // mid-upload (reported by peter-mcc in #4). Restored on FILE_END
+        // and ABORTED so a failed OTA doesn't leave the WDT permanently
+        // relaxed — see wb_watchdog.h.
+        wb_wdt::extendTo(60);
+
+        // Use the HTTP Content-Length to size Update.begin() — this
+        // erases only as much as needed instead of the whole 1.9 MB
+        // partition. Browser-side time-to-first-byte is much shorter.
+        size_t expected = 0;
+        if (http.hasHeader("Content-Length")) {
+            expected = (size_t) http.header("Content-Length").toInt();
+            // Content-Length includes multipart envelope (~150 bytes); fine to over-erase by that much
+        }
         const esp_partition_t* partition = esp_ota_get_next_update_partition(NULL);
         if (partition) {
-            Log.printf("[OTA] Target partition: %s (%u bytes)\n", partition->label, partition->size);
+            Log.printf("[OTA] Target partition: %s (%u bytes), expected upload: %u\n",
+                       partition->label, partition->size, (unsigned)expected);
         }
+        // Sanity: Content-Length must fit the OTA partition with some margin.
+        // Refusing here means we never erase if the upload is clearly bogus.
+        if (partition && expected > 0 && expected > partition->size) {
+            Log.printf("[OTA] REJECTED: payload (%u) larger than partition (%u)\n",
+                       (unsigned)expected, (unsigned)partition->size);
+            otaError = true;
+            otaInProgress = false;
+            return;
+        }
+        expectedOtaSize = expected;
 
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+        bool ok = expected > 0 ? Update.begin(expected) : Update.begin(UPDATE_SIZE_UNKNOWN);
+        if (!ok) {
             Log.printf("[OTA] Begin failed: %s\n", Update.errorString());
             otaError = true;
+        } else if (http.hasHeader("X-Firmware-MD5")) {
+            // Optional end-to-end integrity check. When supplied, the
+            // Update library streams an MD5 alongside the partition
+            // writes and fails Update.end() if the final hash doesn't
+            // match — so a flipped byte mid-flight (rare on TCP, but
+            // possible on Wi-Fi with marginal signal) gets caught
+            // before we mark the partition valid and reboot into it.
+            String md5 = http.header("X-Firmware-MD5");
+            md5.trim();
+            md5.toLowerCase();
+            // 32 hex chars = 16 bytes. Anything else is malformed —
+            // skip rather than fail so a typo on the client side doesn't
+            // brick the upload outright.
+            if (md5.length() == 32) {
+                if (Update.setMD5(md5.c_str())) {
+                    Log.printf("[OTA] Expecting MD5 %s\n", md5.c_str());
+                } else {
+                    Log.println("[OTA] WARN: Update.setMD5() rejected — proceeding without integrity check");
+                }
+            } else {
+                Log.printf("[OTA] WARN: X-Firmware-MD5 has wrong length (%u, expected 32) — ignored\n",
+                           (unsigned)md5.length());
+            }
         }
     } else if (upload.status == UPLOAD_FILE_WRITE && !otaError) {
         // First chunk — validate ESP32 magic byte
@@ -1696,18 +3762,69 @@ static void handleOtaUpload() {
         totalSize += upload.currentSize;
     } else if (upload.status == UPLOAD_FILE_END) {
         otaInProgress = false;
+        // Restore the WDT regardless of success or error. Doing it here
+        // catches every terminal path below — success branch reboots
+        // anyway, but error paths must not leave the WDT relaxed.
+        wb_wdt::restore();
+        // Truncation check — if we received fewer bytes than Content-Length
+        // promised, refuse to commit. Otherwise `Update.end(true)` will
+        // happily mark a partial OTA partition as valid and brick the device.
+        // Tolerance: ±256 bytes for the multipart envelope.
+        if (!otaError && expectedOtaSize > 0) {
+            size_t diff = (totalSize < expectedOtaSize)
+                            ? expectedOtaSize - totalSize
+                            : totalSize - expectedOtaSize;
+            if (diff > 256) {
+                Log.printf("[OTA] TRUNCATED: expected ~%u bytes, got %u — aborting\n",
+                    (unsigned)expectedOtaSize, (unsigned)totalSize);
+                otaError = true;
+            }
+        }
         if (otaError) {
             Update.abort();
-            Log.println("[OTA] Aborted due to errors");
-            http.send(500, "text/plain", "Upload failed");
+            // Admission-rejection path: emit a proper 503 with Retry-After
+            // so the browser can auto-retry once the window opens. Other
+            // errors (truncation, magic byte, Update.begin failure) get
+            // 500 — those won't help by retrying.
+            if (otaRetryAfterSec > 0) {
+                Log.printf("[OTA] Rejected — telling client to retry in %us: %s\n",
+                           (unsigned)otaRetryAfterSec, otaRejectReason.c_str());
+                wb_ota_history::recordOta(millis() / 1000, WB_VERSION, totalSize, false,
+                                       (String("rejected: ") + otaRejectReason).c_str());
+                http.sendHeader("Retry-After", String(otaRetryAfterSec));
+                String body = "{\"error\":\"" + otaRejectReason
+                            + "\",\"retry_after\":" + String(otaRetryAfterSec) + "}";
+                http.send(503, "application/json", body);
+            } else {
+                Log.println("[OTA] Aborted due to errors");
+                wb_ota_history::recordOta(millis() / 1000, WB_VERSION, totalSize, false, "aborted");
+                http.send(500, "text/plain", "Upload failed");
+            }
         } else if (Update.end(true)) {
             Log.printf("[OTA] Success! %u bytes written to partition\n", totalSize);
+            wb_ota_history::recordOta(millis() / 1000, WB_VERSION, totalSize, true, "ok");
+            // Mark this device as OTA-proven so future flashes use the
+            // relaxed 15s admission window instead of the conservative
+            // 60s one. Safe to call repeatedly — internally NVS-cached.
+            wb_health::markOtaSuccess();
             http.send(200, "text/plain", "OK");
             delay(1000);
             ESP.restart();
         } else {
             Log.printf("[OTA] End failed: %s\n", Update.errorString());
+            wb_ota_history::recordOta(millis() / 1000, WB_VERSION, totalSize, false, Update.errorString());
             http.send(500, "text/plain", Update.errorString());
+        }
+    } else if (upload.status == UPLOAD_FILE_ABORTED) {
+        // Client (or our admission guard) bailed mid-flow. Make sure we
+        // don't leave Update.begin()'s erased partition in a half-committed
+        // state — abort it explicitly so the bootloader keeps booting the
+        // current healthy partition.
+        if (otaInProgress) {
+            Update.abort();
+            otaInProgress = false;
+            wb_wdt::restore();
+            Log.println("[OTA] Upload aborted by client — partition left untouched");
         }
     }
 }
@@ -1739,19 +3856,243 @@ static void handleServiceWorker() {
 }
 
 static void registerRoutes() {
+    // Capture Content-Length so the OTA handler can size Update.begin().
+    // Capture Content-Type so the OTA handler can distinguish multipart
+    // (good) from raw POST (would crash on http.upload() — see #4).
+    // Arduino WebServer drops every header NOT in this list, so the
+    // OTA handler's Content-Type guard depends on this entry existing.
+    // X-Firmware-MD5 is honored by the OTA handler — when present, the
+    // Arduino Update library computes the hash as bytes stream in and
+    // refuses to commit on mismatch. Tools that can compute MD5 of the
+    // .bin (curl --header, HA OTA scripts) get end-to-end integrity for
+    // free; browsers don't send it today (kept off the upload page to
+    // avoid the multi-second hash step on a 1.5 MB file).
+    static const char* otaHeaders[] = {"Content-Length", "Content-Type", "X-Firmware-MD5"};
+    http.collectHeaders(otaHeaders, 3);
     http.on("/style.css", handleStyleCss);
     http.on("/app.js", handleAppJs);
     http.on("/save", HTTP_POST, handleSave);
     http.on("/reset", HTTP_POST, handleReset);
+    // Reboot without modifying NVS — useful for capturing a fresh boot
+    // trace from /logs without losing any config. Auth + CSRF gated.
+    http.on("/api/reboot", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        if (!checkCsrf()) return;
+        http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+        webServer.requestReboot();
+    });
+    // /api/pin?pin=<digits>&csrf=... — local-only update of the
+    // Bluetooth Passcode used to pair to the charger. Does NOT call
+    // any s_* setter on the charger; the user creates the passcode in
+    // the official Wallbox app and copies it here so our NimBLE pair
+    // can authenticate. Empty pin clears the field. Reboots after
+    // save so the new value takes effect on the next pair attempt.
+    http.on("/api/pin", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        if (!checkCsrf()) return;
+        String pin = http.arg("pin");
+        // Light sanity: trim, allow empty (clear), allow digits only
+        // up to 16 chars. Reject anything else so we don't store
+        // garbage that breaks the BLE pair flow.
+        pin.trim();
+        if (pin.length() > 16) {
+            http.send(400, "application/json", "{\"error\":\"passcode too long\"}");
+            return;
+        }
+        for (size_t i = 0; i < pin.length(); i++) {
+            char c = pin[i];
+            if (c < '0' || c > '9') {
+                http.send(400, "application/json", "{\"error\":\"passcode must be digits only\"}");
+                return;
+            }
+        }
+        configMgr.mut().blePin = pin;
+        configMgr.save();
+        http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+        webServer.requestReboot();
+    });
     http.on("/api/ble-scan", handleBleScan);
     http.on("/api/wifi-scan", handleWifiScan);
     http.on("/api/status", handleApiStatus);
     http.on("/api/ble/pause", handleBlePause);
     http.on("/api/charger", handleApiCharger);
     http.on("/api/command", handleApiCommand);
+    // 2.7.0 step 7 — poll endpoint for the async ?wait=0 path. Returns:
+    //   200 + body  → response landed, returned in the body
+    //   202 + status:pending → request still in flight, or evicted
+    //                          from the small RAM map but might still
+    //                          be tracked by the BLE task
+    //   410 Gone    → reqId is from the future (was never issued by
+    //                 this gateway boot — caller likely typo'd, fuzzed,
+    //                 or is talking to a different gateway after a
+    //                 reboot)
+    //   400         → no ?id= param, or non-numeric / zero
+    http.on("/api/command_status", []() {
+        if (!checkAuth()) return;
+        if (!http.hasArg("id")) {
+            http.send(400, "application/json", "{\"error\":\"missing id\"}");
+            return;
+        }
+        uint32_t reqId = (uint32_t)http.arg("id").toInt();
+        if (reqId == 0) {
+            http.send(400, "application/json", "{\"error\":\"invalid id\"}");
+            return;
+        }
+        String body;
+        if (wallboxBLE.tryFetchResponse(reqId, body) && body.length()) {
+            http.send(200, "application/json", body);
+            return;
+        }
+        // Step 9 audit fix: distinguish "future id never issued" (410)
+        // from "could still be in flight" (202). Without this, /api/
+        // command_status returns 202 forever for an invalid id, which
+        // lets a bad client (or a probe after gateway reboot) poll
+        // indefinitely. 410 is correctly retry-discouraged in HTTP
+        // semantics — callers know to stop.
+        uint32_t nextId = wallboxBLE.peekNextReqId();
+        if (reqId >= nextId) {
+            http.send(410, "application/json",
+                "{\"error\":\"unknown id — never issued\"}");
+            return;
+        }
+        String pending = "{\"id\":" + String(reqId) + ",\"status\":\"pending\"}";
+        http.send(202, "application/json", pending);
+    });
+    http.on("/api/fw/dismiss", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        wallboxBLE.dismissFirmwareChange();
+        http.send(200, "application/json", "{\"ok\":true}");
+    });
+    // /api/config/export — returns the gateway's NVS config as JSON, with
+    // passwords/PINs masked. Safe to share for support/backup.
+    http.on("/api/config/export", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Content-Disposition",
+            "attachment; filename=\"wallbox-config.json\"");
+        http.send(200, "application/json", wb_buildConfigExportJson());
+    });
+
+    // /api/config/import — POST a JSON payload to restore config. Values
+    // equal to "***" are skipped (preserves the existing secret). The
+    // gateway reboots after a successful import.
+    http.on("/api/config/import", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        if (!checkCsrf()) return;
+        if (!http.hasArg("plain")) {
+            http.send(400, "application/json", "{\"ok\":false,\"error\":\"missing body\"}");
+            return;
+        }
+        ImportResult r = wb_applyConfigImport(http.arg("plain"));
+        http.send(r.status, "application/json", r.body);
+        if (r.reboot) webServer.requestReboot();
+    });
+
+    // /api/ota/history — the last few OTA attempts (newest first)
+    http.on("/api/ota/history", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Cache-Control", "no-store");
+        http.send(200, "application/json", wb_ota_history::toJson());
+    });
+    // /api/diag/runtime — heap + per-task stack monitoring. The last
+    // values logged via this endpoint can hint at memory pressure that
+    // preceded a panic (the panic itself doesn't tell us that).
+    http.on("/api/diag/runtime", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Cache-Control", "no-store");
+        http.send(200, "application/json", wb_buildDiagRuntimeJson());
+    });
+    // /api/boot/history — last ~10 boot reasons (newest first).
+    // Lets us see WHY the gateway rebooted (panic / WDT / power-on / etc).
+    http.on("/api/boot/history", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Cache-Control", "no-store");
+        // current_fw lets /info's badge count "bad boots on THIS firmware"
+        // instead of including pre-upgrade dev-testing panics still in
+        // the NVS ring.
+        http.send(200, "application/json", wb_buildBootHistoryJson());
+    });
+    // /api/diag/disconnects — counters + recent BLE/MQTT reconnect events
+    http.on("/api/diag/disconnects", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Cache-Control", "no-store");
+        http.send(200, "application/json", wb_diag::toJson());
+    });
+    // Manual clear for the counters (e.g., after acknowledging an outage)
+    http.on("/api/diag/clear", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        if (!checkCsrf()) return;
+        wb_diag::clear();
+        http.send(200, "application/json", "{\"ok\":true}");
+    });
+
+    // /api/logs — last ~16 KB of Serial/telnet output in chronological order.
+    // Plain text so it's trivially curlable; auth-gated when web auth is on.
+    http.on("/api/logs", []() {
+        if (!checkAuth()) return;
+        String body;
+        Log.copyBuffer(body);
+        http.sendHeader("Cache-Control", "no-store");
+        http.send(200, "text/plain; charset=utf-8", body);
+    });
+    // /logs — auto-refreshing viewer. Handler logic extracted into
+    // wb_buildLogsPage() for the 3.0 async server migration (task
+    // #78).
+    http.on("/logs", []() {
+        if (!checkAuth()) return;
+        http.send(200, "text/html", wb_buildLogsPage());
+    });
+    // Health endpoint — returns 200 only when the gateway is in a stable,
+    // healthy state. Used by OTA tooling to confirm the previous flash
+    // actually worked before attempting another. Returns 503 with a JSON
+    // reason otherwise.
+    http.on("/api/health", []() {
+        String reason;
+        bool ok = wb_health::canAcceptOta(reason);
+        // max_reentry is the proof field: it must stay 1. >1 means the web
+        // server was pumped re-entrantly (the panic class of bug). tokens =
+        // current rate-limit budget. Both are cheap to read and let a stress
+        // harness assert correctness over Wi-Fi without a serial console.
+        String diag = ",\"max_reentry\":" + String(g_webMaxReentry)
+                    + ",\"tokens\":" + String((int)_tbTokens)
+                    // loop_max_ms = longest gap between consecutive main
+                    // loop() iterations since boot. Healthy: under
+                    // ~200 ms in steady state. A wedge (peter-mcc #4)
+                    // would show as multi-second values here.
+                    + ",\"loop_max_ms\":" + String((uint32_t)g_loopMaxMs)
+                    + ",\"heap_free\":" + String(ESP.getFreeHeap())
+                    + ",\"uptime\":" + String(millis()/1000)
+                    // ota_proven flips to true the first time an OTA
+                    // commits + the new firmware reaches healthy state.
+                    // ota_min_uptime is the threshold currently in force
+                    // (60s fresh, 15s once proven). Lets a tester confirm
+                    // the relaxed window engaged without scraping logs.
+                    + ",\"ota_proven\":" + String(wb_health::otaProven() ? "true" : "false")
+                    + ",\"ota_min_uptime\":" + String(wb_health::effectiveOtaMinUptimeMs()/1000);
+        if (ok) {
+            http.send(200, "application/json", "{\"ok\":true" + diag + "}");
+        } else {
+            http.send(503, "application/json",
+                "{\"ok\":false,\"reason\":\"" + reason + "\"" + diag + "}");
+        }
+    });
     http.on("/ota", handleOtaPage);
     http.on("/api/ota", HTTP_POST, []() {}, handleOtaUpload);
     http.on("/sessions", handleSessionsPage);
+
+    // Pre-gzipped /settings body (task #75). The bytes are stored in
+    // PROGMEM by scripts/precompress_settings.py; we send them raw
+    // with Content-Encoding: gzip so the browser decompresses on its
+    // side. Cache-Control is short — page version is tied to the
+    // firmware build, so any OTA invalidates the gzipped content.
+    http.on("/settings/body.gz", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Content-Encoding", "gzip");
+        http.sendHeader("Cache-Control", "public, max-age=300");
+        http.sendHeader("X-Uncompressed-Bytes",
+            String((unsigned long)SETTINGS_BODY_RAW_LEN));
+        http.send_P(200, "text/html",
+            (const char*)SETTINGS_BODY_GZ, SETTINGS_BODY_GZ_LEN);
+    });
     http.on("/manifest.json", handleManifest);
     http.on("/sw.js", handleServiceWorker);
     http.on("/favicon.ico", []() { http.send(204); });
@@ -1765,30 +4106,49 @@ void WBWebServer::beginAP() {
     dns.start(53, "*", WiFi.softAPIP());
 
     registerRoutes();
-    http.on("/", handleConfig);  // AP mode: config first
+    // AP mode: first-time setup wizard at /setup. The root / and /config
+    // also serve it so phone captive-portal redirects land in the wizard,
+    // not the dense single-page form (which stays available at /config for
+    // power users who want random-access tab editing).
+    http.on("/", handleSetup);
+    http.on("/setup", handleSetup);
     http.on("/config", handleConfig);
     http.on("/dashboard", handleDashboard);
     http.on("/settings", handleSettings);
     http.on("/info", handleInfo);
     http.onNotFound(handleNotFound);
-    http.begin();
-    Log.println("[Web] AP captive portal ready");
+    // AP mode keeps the sync server on port 80 so the OS captive-
+    // portal probe (always on the standard HTTP port) can find it.
+    http.begin(80);
+    Log.println("[Web] AP captive portal ready on :80");
 }
 
 void WBWebServer::beginSTA() {
+    // 3.0 sync-server retirement: the legacy sync WebServer only runs
+    // in AP mode now (where the OS captive-portal probe needs :80 and
+    // the async server isn't started yet). Once we're in STA mode the
+    // async server in wb_web_async.cpp on :80 handles every route and
+    // there's nothing left for the sync server to do — no fallback
+    // listener, no registerRoutes(), no http.begin().
     _apMode = false;
-    registerRoutes();
-    http.on("/", handleDashboard);  // STA mode: dashboard is home
-    http.on("/config", handleConfig);
-    http.on("/settings", handleSettings);
-    http.on("/info", handleInfo);
-    http.begin();
-    Log.printf("[Web] http://%s/ (dashboard)\n", WiFi.localIP().toString().c_str());
+    Log.printf("[Web] http://%s/ (async on :80, sync retired)\n",
+        WiFi.localIP().toString().c_str());
 }
 
 void WBWebServer::loop() {
-    if (_apMode) dns.processNextRequest();
-    http.handleClient();
+    if (_apMode) {
+        // AP-mode captive-portal path. The async server isn't up yet
+        // (no STA WiFi) so the sync WebServer + DNS captive trick is
+        // still load-bearing here.
+        dns.processNextRequest();
+        g_webReentryDepth++;
+        if (g_webReentryDepth > g_webMaxReentry) g_webMaxReentry = g_webReentryDepth;
+        http.handleClient();
+        g_webReentryDepth--;
+    }
+    // STA mode: nothing to pump — async server has its own task.
+    // The reboot flag still gets serviced from here so the existing
+    // async OTA handler's webServer.requestReboot() call still works.
     if (_rebootRequested) {
         static uint32_t rt = 0;
         if (rt == 0) rt = millis();

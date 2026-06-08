@@ -47,7 +47,8 @@ constexpr const char* MET_GET_SESSIONS   = "r_ses";   // session info
 constexpr const char* MET_GET_SESSION    = "r_log";   // session log
 constexpr const char* MET_GET_SCHEDULE   = "r_sch";   // schedule
 constexpr const char* MET_GET_SCHEDULES  = "r_schs";  // all schedules
-constexpr const char* MET_GET_LOCK       = "gulck";   // socket locking
+constexpr const char* MET_GET_LOCK       = "gulck";   // socket locking (legacy / per-config)
+constexpr const char* MET_GET_LOCK_STATE = "r_lck";   // discrete lock status — 0=unlocked, 1=locked (confirmed on MAX, per jagheterfredrik/wallbox-ble)
 constexpr const char* MET_GET_WIFI       = "gwsta";   // wifi status
 constexpr const char* MET_GET_WIFI_NETS  = "gwnet";   // wifi networks
 constexpr const char* MET_GET_TIMEZONE   = "g_tzn";   // timezone
@@ -66,8 +67,10 @@ constexpr const char* MET_GET_NETWORKS   = "gnsta";   // networks status
 constexpr const char* MET_GET_MOBILE     = "gmcon";   // mobile connectivity
 constexpr const char* MET_GET_PROXY      = "gpmod";   // proxy mode
 constexpr const char* MET_GET_BATTERY    = "r_socr";  // battery config (inferred)
-constexpr const char* MET_GET_CHARGER_VER = "r_ver";  // charger versions (inferred)
-constexpr const char* MET_GET_DISCHARGE  = "r_dch";   // discharge session (inferred)
+constexpr const char* MET_GET_CHARGER_VER = "fw_v_";  // charger versions (per jagheterfredrik/wallbox-ble)
+constexpr const char* MET_GET_DISCHARGE  = "r_dis";   // discharge session (per jagheterfredrik/wallbox-ble)
+constexpr const char* MET_GET_SERIAL     = "r_sn_";   // serial number (universal)
+constexpr const char* MET_GET_MAC        = "g_mac";   // MAC addresses (universal)
 constexpr const char* MET_GET_ECO_SMART  = "g_ecos";  // eco smart (inferred)
 
 // Write methods

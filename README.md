@@ -21,6 +21,40 @@
 
 > **Disclaimer:** Independent open-source project. Not affiliated with, endorsed by, or connected to Wallbox Chargers SL. Use at your own risk; modifying charger settings may void your warranty.
 
+### Recent releases
+
+- **3.0.0** — async webserver everywhere (10-step migration);
+  WebSocket push channel for live dashboard state at `ws://host/ws`;
+  4-step **setup wizard** at `/setup` for first-time onboarding;
+  tabbed `/config` and `/info` pages; companion **HA Add-on**
+  (sidebar dashboard + controls + OTA upload) and **HA Integration**
+  (`custom_components/wallbox_gateway`, no MQTT broker needed);
+  schedule writes finally work after silent breakage since v2.1.0;
+  MQTT discovery migrated to HA Core 2026.4+ `default_entity_id`
+  schema; power-flow card on the dashboard; hourly charger-clock
+  auto-sync.
+- **2.8.0** — `/settings` page transmitted bytes cut ~2.4× via build-
+  time gzip; smart tripwire ring on /info shows recent long loop
+  iterations so you can tell a one-off from a recurring pattern
+- **2.7.0** — async BLE request queue: HA commands and
+  `/api/command` no longer block status updates; WiFi reconnect
+  moved off the main loop (`wb_net` module); event-driven, never
+  polling; chunked-wait pump keeps MQTT + WS alive during BAPI
+  roundtrips. New `?wait` / `?sync` / `/api/command_status` API
+  surface (documented below). Comprehensive live test suite
+  (api_command_async + edge_cases + longevity + hardening +
+  ui_surface) under `tests/`
+- **2.6.1** — protocol auto-detect for Pulsar MAX FW 6.11.26+
+  (dual-char BLE switchover)
+- **2.6.0** — one-publish-per-tick HA discovery (bounds
+  `loop_max_ms` under broker outages); diagnostic-category
+  entities for HA
+- **2.5.x** — persistent CSRF token across reboots; web-auth
+  rate-limit polish
+
+Full history in [CHANGELOG.md](CHANGELOG.md); upcoming work in
+[docs/ROADMAP.md](docs/ROADMAP.md).
+
 ## More screenshots
 
 | Sessions / Heatmap | Home Assistant |
@@ -46,6 +80,29 @@ Home Assistant  ◄──MQTT──►  ESP32 Gateway  ◄──BLE (BAPI)──
 
 The ESP32 sits within Bluetooth range (~10m) of your charger, maintains a persistent BLE
 connection, and bridges BLE commands to MQTT with full Home Assistant auto-discovery.
+
+### Two valid architectures — pick the one that fits
+
+This project takes the **smart-gateway** route: the ESP32 runs the full BAPI
+protocol + BGX bridge handling + status / control / discovery and publishes to
+your MQTT broker. There's also an alternative community path that uses an
+**HA Bluetooth Proxy** (any ESPHome-based ESP32 with `bluetooth_proxy`) +
+[`jagheterfredrik/wallbox-ble`](https://github.com/jagheterfredrik/wallbox-ble)
+as a Python HA custom component — in that model the proxy is a dumb radio
+relay and HA itself does the BLE talking.
+
+|  | This gateway | HA BLE Proxy + wallbox-ble |
+|---|---|---|
+| Protocol implementation | C++ on ESP32 | Python in HA |
+| MQTT broker | Used | Not used |
+| Survives HA being offline | ✓ keeps publishing | ✗ |
+| Standalone (no HA needed) | ✓ | ✗ |
+| Multi-charger | future (v3.0) | trivial — one proxy can see many |
+| Upgrade path for new BAPI methods | firmware OTA | Python update |
+| Diagnostic surface | telnet, `/api/logs`, GATT dump in firmware | HA logs |
+
+Both work; choose based on whether you want the gateway to be self-contained
+(this project) or HA-centric (the proxy path).
 
 ## Features
 
@@ -75,6 +132,14 @@ connection, and bridges BLE commands to MQTT with full Home Assistant auto-disco
 ### Home Assistant integration
 - 30+ auto-discovered entities (sensors, switches, numbers, selects, buttons)
 - Proper native HA types (Eco Smart = select dropdown, Auto Lock = switch, etc.)
+- Diagnostic-category entities (loop_max_ms, heap_free, reentry tripwire,
+  rate-limit tokens etc.) collapse into a separate HA card so the main
+  device view stays clean — since v2.6.0
+- HA toggles are non-blocking on the gateway main loop (commands enqueue
+  through the BLE async queue) — since v2.7.0; status updates keep
+  flowing while a command is in flight
+- Dynamic `sw_version` reported via discovery so HA shows your exact
+  firmware build
 - Energy Dashboard compatible
 - Time-of-use cost tracking examples in [HA docs](docs/HOME_ASSISTANT.md)
 
@@ -89,16 +154,23 @@ connection, and bridges BLE commands to MQTT with full Home Assistant auto-disco
 - Web config UI with NVS persistence
 - OTA updates (web upload + ArduinoOTA)
 - Dual partition table with automatic rollback on failed updates
-- mDNS: `http://wallbox-gw.local`
+- mDNS: `http://wallbox-gw.local` — rebound automatically on every
+  WiFi reconnect so service-discovery clients always see the right IP
 - Optional web authentication (rate limiting + lockout)
-- CSRF protection on state-changing endpoints
+- CSRF protection on state-changing endpoints — token persists in NVS
+  across reboots so a logged-in browser session survives a firmware
+  update without re-auth
+- Connection Diagnostics on /info: latched `loop_max_ms`, recent-events
+  smart tripwire (last 8 long iterations with timestamps so you can
+  tell a one-off from a recurring spike), BLE / MQTT / WiFi reconnect
+  counters, NVS-persisted disconnect-event history across boots
 
 ## Compatible Chargers
 
 | Model | Status |
 |---|---|
 | **Pulsar MAX** (FW 6.11.16 and earlier) | ✅ Fully tested |
-| **Pulsar MAX** (FW 6.11.26+) | ✅ Working in v2.3.0+ (encrypted BLE handled) |
+| **Pulsar MAX** (FW 6.11.26+) | ✅ Working in v2.6.1+ — at this firmware Wallbox switched MAX to the dual-char BLE protocol that previously only shipped on Plus/Copper/Quasar; the gateway auto-detects the mismatch on connect and adopts the right protocol family without a reboot |
 | **Pulsar Plus** | 🟡 Active prep, looking for testers |
 | **Copper SB**, **Commander 2**, **Quasar / Quasar 2** | ⚪ Untested — reports welcome |
 
@@ -266,6 +338,35 @@ Optional username/password authentication (Config → Web Security):
 | `wallbox/cmd/timezone` | `Australia/Sydney` (any IANA zone) | Set timezone |
 | `wallbox/bapi` | `{"met":"r_dat","par":null}` | Raw BAPI command |
 
+### HTTP `/api/command` query parameters (since 2.7.0)
+
+The gateway also exposes a direct BAPI passthrough at
+`GET /api/command?action=bapi&met=<method>&par=<value>` which the
+web UI uses internally and external scripts can drive directly.
+Two query knobs control sync vs async behavior:
+
+| Param | Range | Default | Effect |
+|-------|-------|---------|--------|
+| `wait` | `0`-`8000` ms | `5000` | How long the gateway waits for the BAPI response inline. On completion within the window: `200` + response body. On timeout: `202` + `{"id":N,"status":"pending"}`. |
+| `wait=0` | | | Pure async — return `202` immediately, response will be published to `wallbox/response/<met>`. |
+| `sync` | `0`/`1` | `0` | `sync=1` preserves the pre-2.7.0 byte-for-byte blocking shape (use only if your client can't handle 202). |
+
+Poll a pending async response:
+
+```
+GET /api/command_status?id=<reqId>
+```
+
+Returns:
+- `200` + body — response landed
+- `202` + `{"id":N,"status":"pending"}` — still in flight
+- `410 Gone` — `id` is from a different gateway boot or never issued
+- `400` — missing or zero `id`
+
+Backward compatibility: existing scripts that don't pass `?wait` or
+`?sync` continue to work unchanged; the `5000` ms default matches the
+pre-2.7.0 `sendCommand` internal timeout.
+
 ## Development
 
 ### Project structure
@@ -273,19 +374,37 @@ Optional username/password authentication (Config → Web Security):
 ```
 esp32-wallbox/
 ├── src/
-│   ├── main.cpp              # Setup, polling loop, OTA, mDNS
-│   ├── wb_ble.cpp            # BLE client, BAPI framing, reconnect logic
-│   ├── wb_mqtt.cpp           # MQTT bridge, HA auto-discovery
-│   ├── wb_web.cpp            # 4-page web UI + APIs
+│   ├── main.cpp              # Setup, loop iteration tracker, OTA admission, telnet log
+│   ├── wb_ble.cpp            # BLE client (NimBLE), BAPI framing, async request queue
+│   ├── wb_mqtt.cpp           # MQTT bridge, one-publish-per-tick HA auto-discovery
+│   ├── wb_web.cpp            # 4-page web UI + REST API + chunked-wait pump
+│   ├── wb_ws.cpp             # WebSockets server (live status / meter / BLE push)
+│   ├── wb_net.cpp            # Event-driven WiFi reconnect + mDNS rebind (2.7.0)
 │   ├── wb_config.cpp         # NVS config manager
-│   └── bapi.cpp              # BAPI protocol framing + parser
-├── include/
-│   ├── wb_ble.h, wb_mqtt.h, wb_web.h, wb_config.h
-│   └── bapi.h                # 70+ BAPI method constants
+│   ├── wb_diag.cpp           # Reconnect counters, smart tripwire ring, loop-max gate
+│   ├── wb_health.cpp         # OTA validation, boot-history persistence
+│   ├── wb_ota_history.cpp    # Persisted last-N OTA attempts
+│   ├── wb_log.cpp            # Serial + telnet ring buffer for /api/logs
+│   ├── wb_watchdog.cpp       # FreeRTOS task watchdog wiring
+│   └── bapi.cpp              # BAPI protocol method constants + helpers
+├── include/                  # Public headers, one per src/ module
 ├── docs/
-│   └── HOME_ASSISTANT.md     # HA integration guide
+│   ├── HOME_ASSISTANT.md     # HA integration guide
+│   ├── ROADMAP.md            # Living backlog with release targets
+│   ├── LOVELACE_CARD.yaml    # Drop-in HA dashboard card
+│   ├── plans/                # Per-task implementation plans
+│   └── screenshots/
+├── tests/                    # Live integration tests (run against a real gateway)
+│   ├── api_command_async.py  # 13 tests — /api/command contract + latency
+│   ├── edge_cases.py         # 13 tests — parallel correlation, URL clamps, backpressure
+│   ├── longevity.py          # Memory soak, WS resilience, MQTT command storm
+│   ├── hardening.py          # Reusable burst + charger-monitor harness
+│   └── ui_surface.py         # 18 probes mirroring every UI BAPI fetch
 ├── tools/
 │   └── ble_monitor.py        # Serial diagnostic tool
+├── scripts/
+│   ├── version.py            # PIO pre-script: bake git-describe into WB_VERSION
+│   └── precompress_settings.py  # PIO pre-script: gzip /settings body → PROGMEM
 ├── partitions_ota.csv        # Dual OTA partition table
 └── platformio.ini            # Build config (ESP32-S3 + OTA env)
 ```
@@ -310,6 +429,23 @@ See `include/bapi.h` for all 70+ method names (r_dat, r_sta, w_cha, w_mxI, s_alo
   and disconnects. Usage: `python ble_monitor.py --port COM4`
 - Importable as module: `from ble_monitor import WallboxMonitor`
 
+### Tests
+
+Live integration tests run against a real gateway over the network — see
+[tests/README.md](tests/README.md) for setup. Quick start:
+
+```bash
+pip install requests websocket-client paho-mqtt
+export WB_GATEWAY=http://wallbox-gw.local
+export WB_AUTH_PASS=...    # only if web auth is enabled
+python -m unittest tests.api_command_async tests.edge_cases tests.longevity -v
+python -m tests.ui_surface && python -m tests.hardening
+```
+
+The suite covers the async `/api/command` contract, URL edge cases,
+parallel correlation, memory soak, WebSocket resilience, MQTT command
+storm (opt-in), and every BAPI fetch the UI makes.
+
 ## Contributing
 
 Contributions welcome! Please:
@@ -323,6 +459,13 @@ Contributions welcome! Please:
 - [@benvanmierloo](https://github.com/benvanmierloo) — BLE SMP pairing for
   newer Wallbox firmware (≥ 6.11.26), telnet log server
   ([#1](https://github.com/botts7/esp32-wallbox/pull/1))
+- [@peter-mcc](https://github.com/peter-mcc) — Tester reports that drove
+  the loop-max-ms tripwire, MQTT reconnect-grace gate, and the 2.6.0
+  one-publish-per-tick HA discovery refactor
+- [@mvanlijden](https://github.com/mvanlijden) — Field report
+  ([#11](https://github.com/botts7/esp32-wallbox/issues/11)) of the
+  MAX-at-6.11.26 protocol-family mismatch that became the 2.6.1 auto-
+  detect fix
 
 ## Related Projects
 

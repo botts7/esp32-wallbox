@@ -3,3 +3,4 @@
 !.vscode/settings.json
 !.vscode/extensions.json
 __pycache__/
+.tmp/
