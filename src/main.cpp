@@ -216,23 +216,7 @@ void setup() {
     // Load config from NVS
     configMgr.begin();
 
-    // Check if WiFi is configured FIRST, before BLE init.
-    //
-    // In AP setup mode (no WiFi credentials yet) BLE is useless — we're
-    // not paired with the charger and the user is just trying to enter
-    // their SSID. Bringing up NimBLE here hogs the 2.4 GHz radio, which
-    // makes the captive portal's WiFi scan ("Scan failed" with no
-    // networks) and appears to feed the AP-mode crash loop observed
-    // at ~95-160 s uptime (radio coexistence fault). Defer BLE init
-    // until after STA connects so AP mode runs WiFi-only.
-    if (!configMgr.hasWiFi()) {
-        // First boot — AP mode for setup. No BLE.
-        Log.println("[Main] No WiFi configured — starting AP setup mode (BLE deferred)");
-        webServer.beginAP();
-        return;  // loop() will only run web server
-    }
-
-    // Init BLE — only reached when WiFi is configured.
+    // Init BLE
     NimBLEDevice::init("WallboxGW");
     NimBLEDevice::setMTU(247);
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);  // +9dBm max range
@@ -245,6 +229,14 @@ void setup() {
     // peripheral declares NoInputNoOutput, so KeyboardOnly is harmless there.
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_ONLY);
     Log.println("[BLE] TX power: +9 dBm, IO cap: KeyboardOnly");
+
+    // Check if WiFi is configured
+    if (!configMgr.hasWiFi()) {
+        // First boot — AP mode for setup
+        Log.println("[Main] No WiFi configured — starting AP setup mode");
+        webServer.beginAP();
+        return;  // loop() will only run web server
+    }
 
     // ---- Radio coexistence (WiFi + BLE share 2.4GHz) ----
     esp_wifi_set_ps(WIFI_PS_NONE);              // no WiFi power save — prevents BLE stalls
