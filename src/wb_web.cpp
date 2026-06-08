@@ -2022,6 +2022,35 @@ function pauseBle(){
 // this step alone, take what's already there." First-time use sees the
 // defaults from ConfigManager::load() (chg_model=max, ha_prefix=
 // "homeassistant", auth disabled, etc.).
+// 3.0: human-readable mapping of esp-wifi disconnect reason codes for
+// the captive-portal "your last attempt failed" banner. Reason codes
+// come from wifi_err_reason_t in esp_wifi_types.h. Only the cases a
+// home-user will plausibly hit are spelled out; everything else falls
+// through to a generic "code N" message so the user has SOMETHING
+// concrete to share when asking for help.
+static String _wifiReasonExplain(uint8_t r) {
+    switch (r) {
+        case 2:    // AUTH_EXPIRE
+        case 15:   // 4WAY_HANDSHAKE_TIMEOUT
+        case 202:  // AUTH_FAIL
+        case 204:  // HANDSHAKE_TIMEOUT
+            return "The Wi-Fi password looks wrong. Double-check it (case-sensitive). "
+                   "If your router's name has spaces or special characters, type the SSID by hand instead of using Scan.";
+        case 201:  // NO_AP_FOUND
+            return "Could not find your network. Either the SSID was mistyped, "
+                   "or your router is on the 5 GHz band only — the gateway only sees 2.4 GHz networks.";
+        case 5:    // ASSOC_TOOMANY
+            return "Your router refused the connection (too many clients, or this MAC may be on a deny list).";
+        case 13:   // INVALID_PMKID / IE_INVALID
+        case 14:   // CHALLENGE_FAIL
+            return "Authentication negotiation failed. If your router uses WPA3-only, switch it to WPA2/WPA3 mixed mode — the gateway is WPA2.";
+        case 1:    // UNSPECIFIED (or our synthetic "never got there")
+            return "The gateway couldn't reach your network. Likely causes: SSID mistyped, router on 5 GHz only, or out of range.";
+        default:
+            return "Connection failed for an uncommon reason. See the per-boot diagnostics in /info for the full picture.";
+    }
+}
+
 String wb_buildSetupPage() {
     const WBConfig& cfg = configMgr.get();
     String page = htmlHead("Setup");
@@ -2068,6 +2097,27 @@ String wb_buildSetupPage() {
   <h2 class='wiz-title' id='wiz-step-title'>Step 1 of 4 - WiFi</h2>
   <p class='wiz-help' id='wiz-step-help'>Required so your gateway can join your home network. Once connected, every other setting can be edited from the dashboard.</p>
 )HTML";
+
+    // 3.0: surface the prior boot's WiFi failure (if any) as a banner
+    // at the top of the wizard so the user knows what went wrong on
+    // the LAST attempt before they retype credentials.
+    {
+        uint8_t failReason = configMgr.lastWifiFailReason();
+        if (failReason > 0) {
+            String failSsid = configMgr.lastWifiFailSsid();
+            page += "<div style='background:rgba(239,68,68,.10);border:1px solid rgba(239,68,68,.30);border-radius:10px;padding:12px 14px;margin-bottom:18px;color:#fca5a5;font-size:.88em;line-height:1.5'>";
+            page += "<div style='font-weight:600;color:#ef4444;margin-bottom:4px'>&#x26A0; Last attempt failed</div>";
+            page += "<div style='color:var(--text2);margin-bottom:6px'>Tried to join <b>";
+            page += (failSsid.length() ? failSsid : String("(unknown)"));
+            page += "</b> &mdash; ";
+            page += _wifiReasonExplain(failReason);
+            page += "</div>";
+            page += "<div style='color:var(--text3);font-size:.78em'>Reason code ";
+            page += String((unsigned)failReason);
+            page += " &middot; this notice will clear automatically once the gateway joins a network successfully.</div>";
+            page += "</div>";
+        }
+    }
 
     // -------------- Form --------------
     page += "<form id='wizForm' method='POST' action='/save'>";

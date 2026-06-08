@@ -160,6 +160,10 @@ bool begin() {
         _connected          = true;
         _lastConnectedAt    = millis();
         _pendingMdnsRefresh = true;
+        // Clear any previous-boot failure record now that we're back
+        // online — the /setup banner shouldn't claim a failure that
+        // we just recovered from.
+        configMgr.clearWifiFail();
         return true;
     }
 
@@ -175,6 +179,12 @@ bool begin() {
     //   status=6 / reason=2 AUTH_EXPIRE  → password wrong, AP dropped
     Log.printf("\n[WiFi] Failed to connect (status=%d reason=%u after %d tries)\n",
         (int)WiFi.status(), (unsigned)_lastDiscReason, tries);
+    // Persist for the captive-portal banner on the next AP-mode boot.
+    // Default to reason=1 (UNSPECIFIED) when the event never fired —
+    // means we never got far enough to even attempt association,
+    // typically a 5 GHz-only network or an SSID typo.
+    uint8_t r = _lastDiscReason ? _lastDiscReason : 1;
+    configMgr.recordWifiFail(r, cfg.wifiSSID);
     return false;
 }
 

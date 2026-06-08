@@ -95,4 +95,43 @@ void ConfigManager::reset() {
     _prefs.clear();
     _cfg = WBConfig{};
     Log.println("[Config] Reset to defaults");
+    // Also wipe the failure-history namespace so a freshly-onboarded
+    // gateway doesn't carry forward a stale "last attempt failed"
+    // banner from before the reset.
+    Preferences p;
+    if (p.begin("wbfail", false)) { p.clear(); p.end(); }
+}
+
+void ConfigManager::recordWifiFail(uint8_t reason, const String& ssid) {
+    Preferences p;
+    if (!p.begin("wbfail", false)) return;
+    p.putUChar("reason", reason);
+    p.putString("ssid", ssid);
+    p.end();
+    Log.printf("[Config] Recorded WiFi-join failure: reason=%u ssid='%s'\n",
+        (unsigned)reason, ssid.c_str());
+}
+
+void ConfigManager::clearWifiFail() {
+    Preferences p;
+    if (!p.begin("wbfail", false)) return;
+    if (p.isKey("reason")) p.remove("reason");
+    if (p.isKey("ssid"))   p.remove("ssid");
+    p.end();
+}
+
+uint8_t ConfigManager::lastWifiFailReason() const {
+    Preferences p;
+    if (!p.begin("wbfail", true)) return 0;
+    uint8_t r = p.getUChar("reason", 0);
+    p.end();
+    return r;
+}
+
+String ConfigManager::lastWifiFailSsid() const {
+    Preferences p;
+    if (!p.begin("wbfail", true)) return "";
+    String s = p.getString("ssid", "");
+    p.end();
+    return s;
 }

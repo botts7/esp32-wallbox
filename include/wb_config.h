@@ -90,6 +90,19 @@ public:
     // Reset all config to defaults
     void reset();
 
+    // ---- Last WiFi-join failure (3.0 onboarding feedback) ----
+    //
+    // Persisted in its own NVS namespace ("wbfail") so the captive
+    // portal /setup page can render a friendly "your last attempt
+    // failed because X" banner. recordWifiFail() is called from
+    // wb_net::begin() on the failure path; clearWifiFail() runs on
+    // the first successful WiFi join after reboot. Reason 0 = no
+    // failure recorded.
+    void recordWifiFail(uint8_t reason, const String& ssid);
+    void clearWifiFail();
+    uint8_t lastWifiFailReason() const;
+    String  lastWifiFailSsid()   const;
+
 private:
     Preferences _prefs;
     WBConfig _cfg;
