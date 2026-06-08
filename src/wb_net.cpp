@@ -74,7 +74,14 @@ static uint32_t _nextBackoff(uint32_t cur) {
 // WiFi.reconnect(). The event-task stack is small and the framework
 // reuses it across all events — heavy work here can stack-overflow or
 // deadlock the driver. All real work runs in tick() on main.
-static void onWiFiEvent(WiFiEvent_t event) {
+//
+// FORENSIC (task #97): also log STA_DISCONNECTED reason codes so the
+// boot trace tells us whether a 20 s blocking begin() gave up because
+// the SSID wasn't found, the password was wrong, the handshake timed
+// out, or the AP actively dropped us.
+static volatile uint8_t _lastDiscReason = 0;
+
+static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     uint32_t now = millis();
     switch (event) {
         case ARDUINO_EVENT_WIFI_STA_GOT_IP:
@@ -87,6 +94,8 @@ static void onWiFiEvent(WiFiEvent_t event) {
             }
             break;
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+            _lastDiscReason = info.wifi_sta_disconnected.reason;
+            // fall through
         case ARDUINO_EVENT_WIFI_STA_LOST_IP:
             if (_connected) {
                 _connected           = false;
@@ -107,9 +116,14 @@ static void onWiFiEvent(WiFiEvent_t event) {
     }
 }
 
+uint8_t lastDisconnectReason() { return _lastDiscReason; }
+
 bool begin() {
     const WBConfig& cfg = configMgr.get();
-    if (cfg.wifiSSID.length() == 0) return false;
+    if (cfg.wifiSSID.length() == 0) {
+        Log.println("[WiFi] begin() early-return: wifiSSID empty");
+        return false;
+    }
 
     // Register event handler BEFORE WiFi.begin() so we catch the
     // initial GOT_IP. The framework dispatches events to all
@@ -117,7 +131,14 @@ bool begin() {
     // is safe.
     WiFi.onEvent(onWiFiEvent);
 
-    Log.printf("[WiFi] Connecting to %s", cfg.wifiSSID.c_str());
+    // FORENSIC (task #97): log SSID + pass length right before the
+    // begin call so a boot trace shows exactly what was attempted.
+    // Earlier ConfigManager::load() log shows what came out of NVS;
+    // this shows what WiFi.begin was actually invoked with.
+    Log.printf("[WiFi] Connecting to '%s' (ssid_len=%u, pass_len=%u)",
+        cfg.wifiSSID.c_str(),
+        (unsigned)cfg.wifiSSID.length(),
+        (unsigned)cfg.wifiPass.length());
     WiFi.mode(WIFI_STA);
     WiFi.begin(cfg.wifiSSID.c_str(), cfg.wifiPass.c_str());
 
@@ -142,7 +163,18 @@ bool begin() {
         return true;
     }
 
-    Log.println("\n[WiFi] Failed to connect");
+    // FORENSIC (task #97): expose final WiFi.status() AND the latest
+    // disconnect-reason code from the WiFi event task. Combined they
+    // pinpoint the failure mode:
+    //   status=1 / reason=201 NO_AP_FOUND  → SSID typo or 5 GHz-only
+    //   status=4 / reason=202 AUTH_FAIL    → password wrong
+    //   status=6 / reason=204 HANDSHAKE_TIMEOUT → password right but
+    //                                            AP rejected anyway
+    //   status=6 / reason=15 4WAY_HANDSHAKE_TIMEOUT → password wrong
+    //                                                 (newer ESP-IDF)
+    //   status=6 / reason=2 AUTH_EXPIRE  → password wrong, AP dropped
+    Log.printf("\n[WiFi] Failed to connect (status=%d reason=%u after %d tries)\n",
+        (int)WiFi.status(), (unsigned)_lastDiscReason, tries);
     return false;
 }
 

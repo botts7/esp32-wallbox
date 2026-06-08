@@ -62,6 +62,7 @@ String wb_buildBootHistoryJson();
 // HTML-page builders extracted from the sync handlers in wb_web.cpp.
 String wb_buildDashboardPage();
 String wb_buildConfigPage();
+String wb_buildSetupPage();
 String wb_buildInfoPage();
 String wb_buildSessionsPage();
 String wb_buildOtaPage();
@@ -489,6 +490,14 @@ static void _registerHtmlPages() {
         req->send(200, "text/html", wb_buildConfigPage());
     });
 
+    // GET /setup — first-time onboarding wizard. Same page builder as
+    // the sync server uses in AP mode; here in STA it's available for
+    // users who want to re-run a guided setup (after a factory reset
+    // dance, or to update creds without diving into /config's tabs).
+    _async.on("/setup", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->send(200, "text/html", wb_buildSetupPage());
+    });
+
     // GET /info — diagnostics + charger info.
     _async.on("/info", HTTP_GET, [](AsyncWebServerRequest* req) {
         req->send(200, "text/html", wb_buildInfoPage());
@@ -604,18 +613,29 @@ static void _registerFormPostRoutes() {
 static void _registerBleRoutes() {
 
     // GET /api/ble-scan — kicks off an 8 s BLE scan, returns devices
-    // as JSON. Blocking call on AsyncTCP task.
+    // as JSON. Blocking call on AsyncTCP task — extend TWDT so the
+    // 5 s default doesn't kill the task mid-scan (manifests in the
+    // browser as "TypeError: Failed to fetch" because the connection
+    // drops when AsyncTCP panics).
     _async.on("/api/ble-scan", HTTP_GET, [](AsyncWebServerRequest* req) {
-        req->send(200, "application/json", wb_runBleScan());
+        wb_wdt::extendTo(15);
+        String body = wb_runBleScan();
+        wb_wdt::restore();
+        req->send(200, "application/json", body);
     });
 
     // GET /api/wifi-scan — kicks off a WiFi scan (~5 s).
     // Async server always runs in STA mode (started by wb_web_async::
     // begin() only when WiFi is up), so the AP-bypass branch from the
     // sync handler isn't applicable here — always auth-gate.
+    // Same TWDT extension as ble-scan above — scanNetworks(false, ...,
+    // 400 ms/channel) × 14 channels can hit ~5.6 s, right at the
+    // default WDT threshold.
     _async.on("/api/wifi-scan", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
+        wb_wdt::extendTo(15);
         ScanResult r = wb_runWifiScan();
+        wb_wdt::restore();
         req->send(r.status, "application/json", r.body);
     });
 

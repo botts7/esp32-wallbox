@@ -35,11 +35,35 @@ void ConfigManager::load() {
     _cfg.haDeviceId   = _prefs.getString("ha_devid", "wallbox_pulsar_max");
     _cfg.lastSeenFw   = _prefs.getString("last_fw", "");
 
+    // FORENSIC (task #97): also log the LENGTHS so trailing whitespace,
+    // hidden control characters, or empty-but-set values surface in the
+    // boot trace. Quote strings so we can see whitespace at the edges.
     Log.println("[Config] Loaded from NVS:");
-    Log.printf("  WiFi: %s\n", _cfg.wifiSSID.c_str());
-    Log.printf("  MQTT: %s:%d\n", _cfg.mqttHost.c_str(), _cfg.mqttPort);
-    Log.printf("  BLE:  %s (PIN: %s)\n", _cfg.bleAddr.c_str(),
-                  _cfg.blePin.length() > 0 ? "set" : "none");
+    Log.printf("  WiFi SSID:  '%s' (len=%u)\n",
+        _cfg.wifiSSID.c_str(), _cfg.wifiSSID.length());
+    Log.printf("  WiFi pass:  len=%u (masked)\n", _cfg.wifiPass.length());
+    Log.printf("  MQTT host:  '%s' (len=%u) port=%u\n",
+        _cfg.mqttHost.c_str(), _cfg.mqttHost.length(), _cfg.mqttPort);
+    Log.printf("  MQTT user:  '%s' (len=%u)\n",
+        _cfg.mqttUser.c_str(), _cfg.mqttUser.length());
+    Log.printf("  MQTT pass:  len=%u (masked)\n", _cfg.mqttPass.length());
+    Log.printf("  MQTT cid:   '%s'\n", _cfg.mqttClientId.c_str());
+    Log.printf("  BLE addr:   '%s' (len=%u) pin=%s\n",
+        _cfg.bleAddr.c_str(), _cfg.bleAddr.length(),
+        _cfg.blePin.length() > 0 ? "set" : "none");
+    Log.printf("  BLE svc:    '%s' (len=%u)\n",
+        _cfg.bleService.c_str(), _cfg.bleService.length());
+    Log.printf("  BLE chr:    '%s' (len=%u)\n",
+        _cfg.bleChar.c_str(), _cfg.bleChar.length());
+    Log.printf("  BLE txchr:  '%s' (len=%u)\n",
+        _cfg.bleTxChar.c_str(), _cfg.bleTxChar.length());
+    Log.printf("  chg_model:  '%s'\n", _cfg.chargerModel.c_str());
+    Log.printf("  auth:       en=%d user='%s' pass_len=%u\n",
+        (int)_cfg.authEnabled, _cfg.authUser.c_str(), _cfg.authPass.length());
+    Log.printf("  polls:      status=%lums realtime=%lums\n",
+        (unsigned long)_cfg.statusPollMs, (unsigned long)_cfg.realtimePollMs);
+    Log.printf("  HA:         prefix='%s' devid='%s'\n",
+        _cfg.haDiscoveryPrefix.c_str(), _cfg.haDeviceId.c_str());
 }
 
 void ConfigManager::save() {
