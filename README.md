@@ -23,6 +23,16 @@
 
 ### Recent releases
 
+- **3.0.0** — async webserver everywhere (10-step migration);
+  WebSocket push channel for live dashboard state at `ws://host/ws`;
+  4-step **setup wizard** at `/setup` for first-time onboarding;
+  tabbed `/config` and `/info` pages; companion **HA Add-on**
+  (sidebar dashboard + controls + OTA upload) and **HA Integration**
+  (`custom_components/wallbox_gateway`, no MQTT broker needed);
+  schedule writes finally work after silent breakage since v2.1.0;
+  MQTT discovery migrated to HA Core 2026.4+ `default_entity_id`
+  schema; power-flow card on the dashboard; hourly charger-clock
+  auto-sync.
 - **2.8.0** — `/settings` page transmitted bytes cut ~2.4× via build-
   time gzip; smart tripwire ring on /info shows recent long loop
   iterations so you can tell a one-off from a recurring pattern

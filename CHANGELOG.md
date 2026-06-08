@@ -4,7 +4,7 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [3.0.0] - 2026-06-07
+## [3.0.0] - 2026-06-08
 
 The platform release. Three changes worth a major-version bump:
 
@@ -46,6 +46,23 @@ The platform release. Three changes worth a major-version bump:
   than ~60 minutes from real time.
 - **Proactive BLE pairing on connect.** Reduces the "first command
   fails on cold connect" window.
+- **First-time setup wizard at `/setup`.** A 4-step linear flow
+  (WiFi -> MQTT -> Charger BLE -> Web Security) replaces the one
+  long form for first-time onboarding. Each step has Skip,
+  pre-fills from current config when re-running, and ends in a
+  single submit to the existing `/save` handler. AP-mode root
+  redirects here so captive-portal users land in the guided flow.
+- **Tabbed `/config` and `/info` pages.** Same idiom as `/settings`
+  — five tabs on `/config` (WiFi / MQTT / Charger BLE / Security /
+  Advanced), three on `/info` (Overview / Diagnostics / Tools).
+  Active tab persists in localStorage. Long single-page scrolling
+  replaced with focused sections.
+- **WiFi-join failure feedback.** When a save+reboot lands a wrong
+  password (or hits a 5 GHz-only / WPA3-only router), the gateway
+  records the disconnect reason to NVS and the setup wizard shows
+  a banner on the next AP-mode boot explaining what likely went
+  wrong (auth fail, SSID not found, handshake timeout). Cleared
+  on the first successful WiFi join.
 
 ### Fixed
 
@@ -79,6 +96,38 @@ The platform release. Three changes worth a major-version bump:
   loop now aborts on `clr_sch` errors instead of forging ahead and
   writing into an unknown schedule slot. Edit-mode no longer
   duplicates the slot id.
+- **`WB_ASYNC_WEB=0` default broke STA-mode HTTP entirely.** When
+  the sync server was retired in STA mode (this same release), the
+  default build flag still left the async server compiled out —
+  net effect: a fresh-clone build of 3.0 served NO HTTP on STA
+  after the first save+reboot. Default flipped to `1`. Anyone
+  needing the legacy sync-only build can still pass
+  `-D WB_ASYNC_WEB=0` at the CLI.
+- **MQTT discovery `object_id` deprecated.** HA Core 2026.4
+  removed `object_id` from the MQTT discovery schema in favour of
+  `default_entity_id` (which must include the platform prefix).
+  All six publish helpers updated. Existing user entities aren't
+  renamed on upgrade — `default_entity_id` only sets the default
+  at first registration.
+- **CSRF mismatch broke first-time captive-portal save.** Persisted
+  CSRF tokens are good for STA-mode browser sessions but bricked
+  AP-mode setup: a crash-reboot mid-provisioning regenerated the
+  token while the user's form kept the old one, silently 403'ing
+  the save. CSRF check now skipped when `wifiSSID` is empty
+  (= AP-mode setup), which is safe since the AP is WPA2-protected.
+- **BLE-scan + WiFi-scan TWDT panic** when called from the async
+  server. Both scans block ~5-8 s on the AsyncTCP task; the
+  default 5 s task watchdog fired mid-scan, dropped the
+  connection, and the browser surfaced `TypeError: Failed to
+  fetch`. Both endpoints now extend the watchdog to 15 s for the
+  scan window, restored on completion.
+- **Dashboard power-flow + sensor stale-cache after BLE drops.**
+  Cached values from a prior charging session would keep driving
+  the flow animation indefinitely after BLE disconnected, and the
+  numeric tiles (Status, kW, A, V, W) would freeze at last-known.
+  `P()` polling + WS `ble` push + `updateBleHealth` polling all
+  now call a `_clearLive()` helper that resets every BAPI-sourced
+  span and wipes the localStorage rehydration sources.
 
 ### Changed
 
