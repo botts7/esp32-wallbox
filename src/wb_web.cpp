@@ -101,6 +101,22 @@ void ensureCsrfToken() {
 }
 static bool checkCsrf() {
     ensureCsrfToken();
+    // AP-mode first-time setup: skip CSRF.
+    //
+    // The AP is WPA2-protected (only someone who knows the AP password
+    // is on the network at all), there's no existing browser session
+    // for an attacker to forge requests against, and there's no
+    // sensitive state to defend yet — the device is by definition
+    // unconfigured. With CSRF enabled the captive-portal flow breaks
+    // any time the gateway crash-reboots between form-load and
+    // form-submit: the new boot regenerates the token, the user's
+    // browser still holds the old one, and Save silently 403s. This
+    // gate uses "no WiFi configured" as the AP-mode proxy because
+    // it's the same condition that triggers webServer.beginAP() in
+    // setup() and survives partial config writes (mqtt set but WiFi
+    // not yet, etc.).
+    if (configMgr.get().wifiSSID.length() == 0) return true;
+
     String token = http.arg("csrf");
     if (token.length() == 0 || token != csrfToken) {
         http.send(403, "text/plain", "CSRF token mismatch");
