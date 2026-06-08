@@ -1190,11 +1190,20 @@ function _pfRender(){
   _pfAnimate(l1,charging,cp);_pfAnimate(l2,charging,cp);
   _pfBatteryAnimate(charging);
 }
+// 3.0: when BLE drops, clear all live-data spans + the power-flow
+// state so the dashboard reflects "no signal" instead of frozen stale
+// values from the last poll. localStorage is also cleared so a page
+// reload doesn't rehydrate the corpse.
+function _clearLive(){
+  ['v-st','v-pw','v-cr','v-en','v-mc','v-lk','v-oc','v-vt','v-gp','pf-veh-kw','pf-grid-kw','pf-session'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent='--'});
+  _pfState.cp=null;_pfState.en=null;_pfState.house=null;_pfRender();
+  try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
+}
 function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
 function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
 function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null'){/* BLE not delivering charger status — reset power flow + session cache so the animation can't outlive a BLE drop on stale localStorage values */_pfState.cp=null;_pfState.en=null;_pfRender();return}var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(!d||!d.r){_pfState.house=null;_pfRender();return}applyMeterData(d.r)}).catch(function(){_pfState.house=null;_pfRender()})}
 // Hook WS push handlers
-if(window.wbws){window.wbws.subscribe('status',function(d){var s=d&&d.r?d.r:d;applyStatusData(s,null);if(window.wbCheckStatus)window.wbCheckStatus(s)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});}
+if(window.wbws){window.wbws.subscribe('status',function(d){var s=d&&d.r?d.r:d;applyStatusData(s,null);if(window.wbCheckStatus)window.wbCheckStatus(s)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});window.wbws.subscribe('ble',function(d){if(d&&d.state&&d.state!=='connected')_clearLive()});}
 // Render cached values immediately (no spinners)
 try{var c=JSON.parse(localStorage.getItem('wb-last-status')||'null');if(c)applyStatusData(c.s,c.rt)}catch(e){}
 try{var cm=JSON.parse(localStorage.getItem('wb-last-meter')||'null');if(cm)applyMeterData(cm.d)}catch(e){}
@@ -1208,7 +1217,7 @@ fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return 
 var _notifs=[];
 function loadNotifs(){fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.ble!=='connected')return;return fetch('/api/command?action=bapi&met=r_not&par=null',{signal:AbortSignal.timeout(10000)}).then(function(r){return r.json()}).then(function(d){var v=d.r;if(!Array.isArray(v))return;_notifs=v;var bar=document.getElementById('notif-bar');if(!bar)return;if(v.length>0){document.getElementById('notif-count').textContent=v.length;bar.style.display='block'}else{bar.style.display='none'}})}).catch(function(){})}
 function showNotifs(){var m=document.getElementById('notif-modal');var inner=document.getElementById('notif-modal-inner');var html="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0'>&#x1F514; Notifications</h3><button onclick='document.getElementById(\"notif-modal\").style.display=\"none\"' style='background:transparent;border:none;color:var(--text2);font-size:1.6em;cursor:pointer;line-height:1'>×</button></div>";if(!_notifs.length){html+="<div style='color:var(--text3)'>No notifications</div>"}else{_notifs.forEach(function(n,i){var msg=n.message||n.msg||n.text||JSON.stringify(n);var ts=(n.timestamp||n.ts)?new Date((n.timestamp||n.ts)*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ}):'';html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='font-weight:500;font-size:.9em'>#"+(i+1)+" "+msg+"</div>"+(ts?"<div style='font-size:.78em;color:var(--text3);margin-top:4px'>"+ts+"</div>":'')+"</div>"})}inner.innerHTML=html;m.style.display='flex'}
-function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
+function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
 loadNotifs();setInterval(loadNotifs,60000);
 updateBleHealth();setInterval(updateBleHealth,15000);
 </script>
@@ -2001,6 +2010,338 @@ function pauseBle(){
 
 // ========== PAGE 3: Config (/config) ==========
 // 3.0 task #78: extracted body so the async server can call it.
+// ========== Setup Wizard (/setup) ==========
+// 3.0: first-time onboarding wizard. Linear 4-step flow that walks the
+// user through WiFi -> MQTT -> Charger BLE -> Web Security with a
+// progress indicator, Skip-per-step, and a single Save at the end.
+// Submits to the same /save endpoint as /config so there's only one
+// server-side persistence path to maintain.
+//
+// Pre-fills from current configMgr — if a user re-runs the wizard after
+// initial setup the fields show their current values; Skip means "leave
+// this step alone, take what's already there." First-time use sees the
+// defaults from ConfigManager::load() (chg_model=max, ha_prefix=
+// "homeassistant", auth disabled, etc.).
+String wb_buildSetupPage() {
+    const WBConfig& cfg = configMgr.get();
+    String page = htmlHead("Setup");
+    ensureCsrfToken();
+
+    page += R"HTML(
+<style>
+.wiz-wrap{max-width:520px;margin:0 auto;padding:8px 8px 24px}
+.wiz-progress{display:flex;gap:10px;justify-content:center;margin:14px 0 22px}
+.wiz-dot{width:30px;height:6px;border-radius:3px;background:var(--border);transition:background .2s}
+.wiz-dot.active{background:var(--primary)}
+.wiz-dot.done{background:var(--success)}
+.wiz-title{font-size:1.25em;font-weight:600;margin:0 0 4px}
+.wiz-help{color:var(--text2);font-size:.9em;margin:0 0 18px;line-height:1.45}
+.wiz-step{display:none}
+.wiz-step.active{display:block}
+.wiz-nav{display:flex;gap:10px;margin-top:22px;justify-content:flex-end;align-items:center;flex-wrap:wrap}
+.wiz-nav .btn{padding:11px 18px;font-size:.95em}
+.wiz-nav .spacer{flex:1}
+.wiz-skip{color:var(--text3);background:transparent;border:none;cursor:pointer;font-size:.88em;padding:11px 12px;text-decoration:underline}
+.wiz-skip:hover{color:var(--text2)}
+.wiz-section{margin-top:10px}
+.wiz-section label{display:block;color:var(--text2);font-size:.85em;margin:10px 0 4px}
+.wiz-section input,.wiz-section select{width:100%;padding:11px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:1em;font-family:inherit;box-sizing:border-box}
+.wiz-section .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.wiz-banner{background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:8px;padding:10px 12px;color:#93c5fd;font-size:.85em;margin-bottom:14px;line-height:1.4}
+.wiz-warn{background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.30);color:#f59e0b}
+.scan-result{padding:10px;border-radius:8px;border:1px solid var(--border);margin-bottom:6px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;background:var(--bg)}
+.scan-result:hover{background:var(--elevated)}
+.scan-result.wb{border-color:var(--success);background:rgba(34,197,94,.04)}
+.scan-name{font-weight:600;color:var(--text)}
+.scan-addr{color:var(--text3);font-size:.78em;font-family:monospace}
+.scan-rssi{color:var(--text2);font-size:.85em;font-family:monospace}
+</style>
+<div class='wiz-wrap'>
+  <h1 style='text-align:center;margin:6px 0 2px;font-size:1.4em'>Wallbox BLE Gateway</h1>
+  <p style='text-align:center;color:var(--text3);margin:0;font-size:.85em'>Setup wizard</p>
+  <div class='wiz-progress'>
+    <div class='wiz-dot active' data-dot='0'></div>
+    <div class='wiz-dot' data-dot='1'></div>
+    <div class='wiz-dot' data-dot='2'></div>
+    <div class='wiz-dot' data-dot='3'></div>
+  </div>
+  <h2 class='wiz-title' id='wiz-step-title'>Step 1 of 4 - WiFi</h2>
+  <p class='wiz-help' id='wiz-step-help'>Required so your gateway can join your home network. Once connected, every other setting can be edited from the dashboard.</p>
+)HTML";
+
+    // -------------- Form --------------
+    page += "<form id='wizForm' method='POST' action='/save'>";
+    page += "<input type='hidden' name='csrf' value='" + csrfToken + "'>";
+
+    // ---------- Step 1: WiFi ----------
+    page += R"HTML(
+<div class='wiz-step active' data-step='0'>
+  <div class='wiz-section'>
+    <label>SSID</label>
+    <div style='display:flex;gap:8px;align-items:stretch'>
+      <input id='wifi_ssid' name='wifi_ssid' value=')HTML";
+    page += cfg.wifiSSID;
+    page += R"HTML(' placeholder='Type or scan' style='flex:1;margin:0'>
+      <button type='button' id='wifiScanBtn' class='btn btn-outline' style='width:80px;padding:0;margin:0' onclick='scanWifi()'>Scan</button>
+    </div>
+    <div id='wifi-results' style='display:none;background:var(--elevated);border-radius:8px;padding:6px;margin-top:6px;max-height:200px;overflow-y:auto'></div>
+    <label>Password</label>
+    <input type='password' name='wifi_pass' value=')HTML";
+    page += cfg.wifiPass;
+    page += R"HTML(' autocomplete='off'>
+  </div>
+</div>
+)HTML";
+
+    // ---------- Step 2: MQTT ----------
+    page += R"HTML(
+<div class='wiz-step' data-step='1'>
+  <div class='wiz-banner'>
+    Skip this step if you don't use Home Assistant or if you'll set up MQTT later from the dashboard.
+  </div>
+  <div class='wiz-section'>
+    <label>Broker host / IP</label>
+    <input name='mqtt_host' value=')HTML";
+    page += cfg.mqttHost;
+    page += R"HTML(' placeholder='192.168.x.x or homeassistant.local'>
+    <div class='row'>
+      <div><label>Port</label><input name='mqtt_port' type='number' value=')HTML";
+    page += String(cfg.mqttPort);
+    page += R"HTML('></div>
+      <div><label>Client ID</label><input name='mqtt_cid' value=')HTML";
+    page += cfg.mqttClientId;
+    page += R"HTML('></div>
+    </div>
+    <label>Username (optional)</label>
+    <input name='mqtt_user' value=')HTML";
+    page += cfg.mqttUser;
+    page += R"HTML(' placeholder='Leave blank for anonymous brokers'>
+    <label>Password (optional)</label>
+    <input type='password' name='mqtt_pass' value=')HTML";
+    page += cfg.mqttPass;
+    page += R"HTML(' autocomplete='off'>
+  </div>
+</div>
+)HTML";
+
+    // ---------- Step 3: Charger BLE ----------
+    page += R"HTML(
+<div class='wiz-step' data-step='2'>
+  <div class='wiz-banner'>
+    Tap Scan to find your charger by Bluetooth, or type its MAC address manually. The gateway auto-detects whether your charger uses the single-char (MAX) or dual-char (Plus / Copper SB / Quasar) protocol on first connect.
+  </div>
+  <div class='wiz-section'>
+    <button type='button' id='scanBtn' class='btn btn-outline' style='margin-bottom:10px;width:100%' onclick='startScan()'>Scan for Chargers</button>
+    <div id='scanResults' style='margin-bottom:10px'></div>
+    <label>BLE Address</label>
+    <input id='ble_addr' name='ble_addr' value=')HTML";
+    page += cfg.bleAddr;
+    page += R"HTML(' placeholder='6C:1D:EB:30:98:08 (with or without colons)' oninput='formatMAC(this)'>
+    <label>Charger model</label>
+    <select name='chg_model'>
+)HTML";
+    page += String("<option value='max'") + (cfg.chargerModel == "max" ? " selected" : "") + ">Auto-detect / Pulsar MAX</option>";
+    page += String("<option value='plus'") + (cfg.chargerModel == "plus" ? " selected" : "") + ">Pulsar Plus</option>";
+    page += String("<option value='copper'") + (cfg.chargerModel == "copper" ? " selected" : "") + ">Copper SB (experimental)</option>";
+    page += String("<option value='quasar'") + (cfg.chargerModel == "quasar" ? " selected" : "") + ">Quasar (experimental)</option>";
+    page += String("<option value='quasar2'") + (cfg.chargerModel == "quasar2" ? " selected" : "") + ">Quasar 2 / V2H (experimental)</option>";
+    page += R"HTML(
+    </select>
+    <p style='color:var(--text3);font-size:.78em;margin:6px 0 0'><b>Auto-detect</b> stores as MAX and lets the gateway switch to Plus protocol on first connect if the charger advertises the dual-char service (Pulsar MAX 6.11.26+).</p>
+    <label>Bluetooth Passcode (optional)</label>
+    <input name='ble_pin' value=')HTML";
+    page += cfg.blePin;
+    page += R"HTML(' placeholder='Leave blank unless the Wallbox app shows one'>
+    <p style='color:var(--text3);font-size:.78em;margin:6px 0 0'>For Pulsar Plus or Pulsar MAX firmware 6.11+ the Wallbox app shows an 8-digit Bluetooth Passcode under your charger's Settings. Copy it here.</p>
+  </div>
+</div>
+)HTML";
+
+    // ---------- Step 4: Web Security ----------
+    page += R"HTML(
+<div class='wiz-step' data-step='3'>
+  <div class='wiz-banner wiz-warn'>
+    Without a password, anyone on your local network can change your charger settings via this dashboard. Highly recommended to set one.
+  </div>
+  <div class='wiz-section'>
+    <label>Require login</label>
+    <select name='auth_en' id='auth_en' onchange='wizToggleAuth()'>
+)HTML";
+    page += String("<option value='0'") + (cfg.authEnabled ? "" : " selected") + ">No (open network)</option>";
+    page += String("<option value='1'") + (cfg.authEnabled ? " selected" : "") + ">Yes</option>";
+    page += R"HTML(
+    </select>
+    <div id='auth-fields' style='display:none;margin-top:10px'>
+      <label>Username</label>
+      <input name='auth_user' value=')HTML";
+    page += cfg.authUser;
+    page += R"HTML(' autocomplete='username'>
+      <label>Password</label>
+      <input type='password' name='auth_pass' id='auth_pass' value=')HTML";
+    page += cfg.authPass;
+    page += R"HTML(' autocomplete='new-password'>
+      <label>Confirm password</label>
+      <input type='password' id='auth_pass_confirm' value=')HTML";
+    page += cfg.authPass;
+    page += R"HTML(' autocomplete='new-password'>
+      <p style='color:var(--text3);font-size:.78em;margin:6px 0 0'>Lost the password? A factory reset clears it.</p>
+    </div>
+  </div>
+</div>
+)HTML";
+
+    // ---------- Hidden fields for advanced config not in wizard ----------
+    // Carry forward existing values so /save doesn't blank them.
+    page += "<input type='hidden' name='ble_svc' value='" + cfg.bleService + "'>";
+    page += "<input type='hidden' name='ble_chr' value='" + cfg.bleChar + "'>";
+    page += "<input type='hidden' name='ble_txchr' value='" + cfg.bleTxChar + "'>";
+    page += "<input type='hidden' name='poll_status' value='" + String(cfg.statusPollMs) + "'>";
+    page += "<input type='hidden' name='poll_rt' value='" + String(cfg.realtimePollMs) + "'>";
+    page += "<input type='hidden' name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'>";
+    page += "<input type='hidden' name='ha_devid' value='" + cfg.haDeviceId + "'>";
+
+    // ---------- Nav buttons ----------
+    page += R"HTML(
+<div class='wiz-nav'>
+  <button type='button' class='btn btn-outline' id='wiz-back' onclick='wizBack()' style='visibility:hidden'>&larr; Back</button>
+  <div class='spacer'></div>
+  <button type='button' class='wiz-skip' id='wiz-skip' onclick='wizNext()' style='display:none'>Skip</button>
+  <button type='button' class='btn btn-success' id='wiz-next' onclick='wizValidateAndNext()'>Next &rarr;</button>
+  <button type='submit' class='btn btn-success' id='wiz-save' style='display:none' onclick='return wizFinalValidate()'>&#x1F4BE; Save &amp; Reboot</button>
+</div>
+</form>
+</div>
+)HTML";
+
+    // ---------- JS: nav, scan, helpers ----------
+    page += R"HTML(
+<script>
+var _wizStep=0;
+var _titles=['Step 1 of 4 - WiFi','Step 2 of 4 - Home Assistant MQTT','Step 3 of 4 - Charger BLE','Step 4 of 4 - Web Security'];
+var _helps=[
+  'Required so your gateway can join your home network. Once connected, every other setting can be edited from the dashboard.',
+  'Optional. Skip if you don\'t use Home Assistant. The dashboard can be re-opened to configure this later.',
+  'Recommended. Without a paired charger the gateway can still serve the dashboard but cannot read or control your wallbox.',
+  'Recommended. Lock down dashboard access so a guest on your network cannot toggle the charger.'
+];
+function wizShow(n){
+  if(n<0||n>3)return;
+  document.querySelectorAll('.wiz-step').forEach(function(s,i){s.classList.toggle('active',i===n)});
+  document.querySelectorAll('.wiz-dot').forEach(function(d,i){d.classList.toggle('active',i===n);d.classList.toggle('done',i<n)});
+  document.getElementById('wiz-step-title').textContent=_titles[n];
+  document.getElementById('wiz-step-help').textContent=_helps[n];
+  document.getElementById('wiz-back').style.visibility=n>0?'visible':'hidden';
+  document.getElementById('wiz-skip').style.display=n>0&&n<3?'inline-block':'none';
+  document.getElementById('wiz-next').style.display=n<3?'inline-block':'none';
+  document.getElementById('wiz-save').style.display=n===3?'inline-block':'none';
+  _wizStep=n;
+  if(n===3)wizToggleAuth();
+  window.scrollTo(0,0);
+}
+function wizNext(){wizShow(_wizStep+1)}
+function wizBack(){wizShow(_wizStep-1)}
+function wizValidateAndNext(){
+  if(_wizStep===0){
+    var ssid=document.getElementById('wifi_ssid').value.trim();
+    if(!ssid){toast('SSID is required','error');return}
+  }
+  wizNext();
+}
+function wizFinalValidate(){
+  // password confirmation only if auth enabled and password non-empty
+  var en=document.getElementById('auth_en').value;
+  if(en==='1'){
+    var p1=document.getElementById('auth_pass').value;
+    var p2=document.getElementById('auth_pass_confirm').value;
+    if(p1!==p2){toast('Passwords do not match','error');return false}
+    if(!p1){if(!confirm('Login required but password is empty. Continue without a password?'))return false}
+  }
+  return true;
+}
+function wizToggleAuth(){
+  var en=document.getElementById('auth_en').value;
+  document.getElementById('auth-fields').style.display=en==='1'?'block':'none';
+}
+function toast(msg,kind){
+  var t=document.createElement('div');
+  t.textContent=msg;
+  t.style.cssText='position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:'+(kind==='error'?'#ef4444':'#22c55e')+';color:white;padding:10px 18px;border-radius:8px;font-size:.9em;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.3)';
+  document.body.appendChild(t);
+  setTimeout(function(){t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(function(){t.remove()},300)},2500);
+}
+function formatMAC(el){
+  var v=el.value.replace(/[^0-9a-fA-F]/g,'').toUpperCase();
+  if(v.length>12)v=v.substr(0,12);
+  var out='';
+  for(var i=0;i<v.length;i++){if(i>0&&i%2===0)out+=':';out+=v[i]}
+  el.value=out;
+}
+function scanWifi(){
+  var b=document.getElementById('wifiScanBtn');
+  var r=document.getElementById('wifi-results');
+  b.disabled=true;b.textContent='...';
+  r.style.display='block';
+  r.innerHTML='<div style="padding:10px;text-align:center;color:var(--text3)">Scanning WiFi...</div>';
+  fetch('/api/wifi-scan',{signal:AbortSignal.timeout(20000)}).then(function(x){return x.json()}).then(function(d){
+    b.disabled=false;b.textContent='Scan';
+    r.replaceChildren();
+    if(d.error){r.innerHTML='<div style="color:var(--danger);padding:8px">'+d.error+'</div>';return}
+    if(!d.networks||!d.networks.length){r.innerHTML='<div style="color:var(--text3);padding:8px;text-align:center">No networks found</div>';return}
+    d.networks.forEach(function(n){
+      var row=document.createElement('div');
+      row.className='scan-result';
+      row.addEventListener('click',function(){document.getElementById('wifi_ssid').value=n.ssid;r.style.display='none';toast('Selected: '+n.ssid)});
+      var name=document.createElement('span');name.className='scan-name';name.textContent=n.ssid;
+      var rssi=document.createElement('span');rssi.className='scan-rssi';rssi.textContent=n.rssi+' dBm';
+      row.appendChild(name);row.appendChild(rssi);
+      r.appendChild(row);
+    });
+  }).catch(function(e){
+    b.disabled=false;b.textContent='Scan';
+    r.innerHTML='<div style="color:var(--danger);padding:8px">'+(e.message||e)+'</div>';
+  });
+}
+function startScan(){
+  var b=document.getElementById('scanBtn');
+  var r=document.getElementById('scanResults');
+  b.disabled=true;b.innerHTML='Scanning...';
+  r.innerHTML='<div style="padding:10px;text-align:center;color:var(--text3)">Scanning for chargers (8s)...</div>';
+  fetch('/api/ble-scan',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){
+    b.disabled=false;b.innerHTML='Scan for Chargers';
+    r.replaceChildren();
+    if(!d.devices||!d.devices.length){r.innerHTML='<div style="color:var(--text3);padding:8px;text-align:center">No devices found - try moving the gateway closer to the charger and wake the charger keypad first.</div>';return}
+    d.devices.forEach(function(v){
+      var row=document.createElement('div');
+      row.className=v.is_wallbox?'scan-result wb':'scan-result';
+      row.addEventListener('click',function(){document.getElementById('ble_addr').value=v.addr.toUpperCase();toast('Selected: '+v.addr)});
+      var left=document.createElement('div');
+      var name=document.createElement('span');name.className='scan-name';name.textContent=v.name||'(no name)';left.appendChild(name);
+      if(v.is_wallbox){left.appendChild(document.createTextNode(' '));var bg=document.createElement('span');bg.style.cssText='background:rgba(34,197,94,.2);color:#22c55e;padding:1px 6px;border-radius:4px;font-size:.7em;font-weight:600';bg.textContent='WALLBOX';left.appendChild(bg)}
+      left.appendChild(document.createElement('br'));
+      var addr=document.createElement('span');addr.className='scan-addr';addr.textContent=v.addr;left.appendChild(addr);
+      row.appendChild(left);
+      var rssi=document.createElement('span');rssi.className='scan-rssi';rssi.textContent=v.rssi+' dBm';
+      row.appendChild(rssi);
+      r.appendChild(row);
+    });
+  }).catch(function(e){
+    b.disabled=false;b.innerHTML='Scan for Chargers';
+    r.innerHTML='<div style="color:var(--danger);padding:8px">'+(e.message||e)+'</div>';
+  });
+}
+wizShow(0);
+</script>
+)HTML";
+
+    page += htmlFoot("/setup");
+    return page;
+}
+
+static void handleSetup() {
+    if (!checkAuth()) return;
+    http.send(200, "text/html", wb_buildSetupPage());
+}
+
 String wb_buildConfigPage() {
     const WBConfig& cfg = configMgr.get();
     String page = htmlHead("Config");
@@ -2014,37 +2355,61 @@ String wb_buildConfigPage() {
     page += "<span class='status-item'><span class='status-dot " + String(bleOk ? "dot-green" : "dot-yellow") + "'></span>BLE: " + String(wallboxBLE.stateStr()) + "</span>";
     page += "</div>";
 
+    // Tab styles: mirrors /settings page idiom — overflow-x scroll on
+    // narrow viewports, sticky underline on the active tab.
+    page += R"HTML(
+<style>
+.cfg-tabs{display:flex;gap:0;border-bottom:2px solid var(--border);margin:14px 0 0;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.cfg-tabs::-webkit-scrollbar{display:none}
+.cfg-tab{flex:0 0 auto;padding:10px 14px;color:var(--text2);background:transparent;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;cursor:pointer;font-size:.92em;font-family:inherit;white-space:nowrap;transition:color .15s,border-color .15s}
+.cfg-tab.active{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+.cfg-tab:hover:not(.active){color:var(--text)}
+.cfg-panel{display:none;padding-top:16px}
+.cfg-panel.active{display:block}
+</style>
+<div class='cfg-tabs'>
+  <button type='button' class='cfg-tab active' data-panel='0' onclick='cfgTab(0)'>&#x1F4F6; WiFi</button>
+  <button type='button' class='cfg-tab' data-panel='1' onclick='cfgTab(1)'>&#x1F3E0; MQTT</button>
+  <button type='button' class='cfg-tab' data-panel='2' onclick='cfgTab(2)'>&#x1F50B; Charger BLE</button>
+  <button type='button' class='cfg-tab' data-panel='3' onclick='cfgTab(3)'>&#x1F512; Security</button>
+  <button type='button' class='cfg-tab' data-panel='4' onclick='cfgTab(4)'>&#x2699; Advanced</button>
+</div>
+)HTML";
+
     ensureCsrfToken();
     page += "<form method='POST' action='/save'>";
     page += "<input type='hidden' name='csrf' value='" + csrfToken + "'>";
 
-    // WiFi
-    page += "<div class='card'><div class='card-header'><span class='card-icon'>&#x1F4F6;</span><h2>WiFi</h2></div>";
+    // ---------- Panel 0: WiFi ----------
+    page += "<div class='cfg-panel active' data-panel='0'><div class='card'>";
     page += "<label>SSID</label><div style='display:flex;gap:8px;align-items:stretch'>";
     page += "<input id='wifi_ssid' name='wifi_ssid' value='" + cfg.wifiSSID + "' placeholder='Type SSID or scan' style='flex:1;margin:0'>";
     page += "<button type='button' id='wifiScanBtn' class='btn btn-outline' style='width:80px;padding:0;margin:0' onclick='scanWifi()'>Scan</button></div>";
     page += "<div id='wifi-results' style='display:none;background:var(--elevated);border-radius:8px;padding:6px;margin-top:-6px;margin-bottom:14px;max-height:200px;overflow-y:auto'></div>";
-    page += "<label>Password</label><input type='password' name='wifi_pass' value='" + cfg.wifiPass + "'></div>";
+    page += "<label>Password</label><input type='password' name='wifi_pass' value='" + cfg.wifiPass + "' autocomplete='off'>";
+    page += "</div></div>";
 
-    // MQTT
-    page += "<div class='card'><div class='card-header'><span class='card-icon'>&#x1F3E0;</span><h2>MQTT</h2></div>";
+    // ---------- Panel 1: MQTT ----------
+    page += "<div class='cfg-panel' data-panel='1'><div class='card'>";
     page += "<label>Host</label><input name='mqtt_host' value='" + cfg.mqttHost + "' placeholder='homeassistant.local'>";
     page += "<div class='row'><div><label>Port</label><input name='mqtt_port' type='number' value='" + String(cfg.mqttPort) + "'></div>";
     page += "<div><label>Client ID</label><input name='mqtt_cid' value='" + cfg.mqttClientId + "'></div></div>";
     page += "<label>Username</label><input name='mqtt_user' value='" + cfg.mqttUser + "' placeholder='optional'>";
-    page += "<label>Password</label><input type='password' name='mqtt_pass' value='" + cfg.mqttPass + "' placeholder='optional'></div>";
+    page += "<label>Password</label><input type='password' name='mqtt_pass' value='" + cfg.mqttPass + "' placeholder='optional' autocomplete='off'>";
+    page += "</div></div>";
 
-    // BLE
-    page += "<div class='card'><div class='card-header'><span class='card-icon'>&#x1F50B;</span><h2>Charger BLE</h2></div>";
+    // ---------- Panel 2: Charger BLE ----------
+    page += "<div class='cfg-panel' data-panel='2'><div class='card'>";
     page += "<button type='button' id='scanBtn' class='btn btn-outline' style='margin-bottom:12px' onclick='startScan()'>Scan for Chargers</button>";
     page += "<div id='scanResults'></div>";
     page += "<label>BLE Address</label><input id='ble_addr' name='ble_addr' value='" + cfg.bleAddr + "' placeholder='6C1DEB309808' oninput='formatMAC(this)'>";
     page += "<p class='help'>With or without colons</p>";
     page += "<label>Bluetooth Passcode <span style='color:var(--text3);font-weight:400'>(also called \"BLE PIN\")</span></label><input name='ble_pin' value='" + cfg.blePin + "' placeholder='Leave blank if your firmware has no passcode'>";
-    page += "<p class='help'>For Pulsar Plus / newer Pulsar MAX firmware (6.11+): open the Wallbox app, go to your charger → Settings, and look for <b>Bluetooth Passcode</b>. Copy that 8-digit code here. On older firmware leave blank.</p></div>";
+    page += "<p class='help'>For Pulsar Plus / newer Pulsar MAX firmware (6.11+): open the Wallbox app, go to your charger &rarr; Settings, and look for <b>Bluetooth Passcode</b>. Copy that 8-digit code here. On older firmware leave blank.</p>";
+    page += "</div></div>";
 
-    // Security
-    page += "<div class='card'><div class='card-header'><span class='card-icon'>&#x1F512;</span><h2>Web Security</h2></div>";
+    // ---------- Panel 3: Web Security ----------
+    page += "<div class='cfg-panel' data-panel='3'><div class='card'>";
     if (!cfg.authEnabled || cfg.authPass.length() == 0) {
         page += "<div style='background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.30);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.85em;color:#f59e0b'>";
         page += "&#x26A0; <b>No password set.</b> Anyone on your local network can control the charger via this UI. ";
@@ -2055,31 +2420,49 @@ String wb_buildConfigPage() {
     page += "<select name='auth_en'><option value='0'" + String(cfg.authEnabled ? "" : " selected") + ">Disabled</option><option value='1'" + String(cfg.authEnabled ? " selected" : "") + ">Enabled</option></select>";
     page += "<div class='row'>";
     page += "<div><label>Username</label><input name='auth_user' value='" + cfg.authUser + "'></div>";
-    page += "<div><label>Password <span style='color:var(--text3);font-weight:400'>(recommended)</span></label><input type='password' name='auth_pass' value='" + cfg.authPass + "' placeholder='Leave blank to skip — local network only'></div>";
+    page += "<div><label>Password <span style='color:var(--text3);font-weight:400'>(recommended)</span></label><input type='password' name='auth_pass' value='" + cfg.authPass + "' placeholder='Leave blank to skip - local network only' autocomplete='new-password'></div>";
     page += "</div>";
-    page += "<p class='help'>When enabled, all control actions and OTA require login. Dashboard viewing remains open. If you set a password and leave auth disabled, we'll enable it for you.</p></div>";
+    page += "<p class='help'>When enabled, all control actions and OTA require login. Dashboard viewing remains open. If you set a password and leave auth disabled, we'll enable it for you.</p>";
+    page += "</div></div>";
 
-    // Advanced
-    page += "<details><summary style='color:var(--text3);cursor:pointer;padding:6px 0;font-size:.85em'>Advanced</summary><div class='card'>";
+    // ---------- Panel 4: Advanced ----------
+    page += "<div class='cfg-panel' data-panel='4'><div class='card'>";
     page += "<label>Charger model</label><select name='chg_model'>";
     page += String("<option value='max'") + (cfg.chargerModel == "max" ? " selected" : "") + ">Pulsar MAX (single-char)</option>";
     page += String("<option value='plus'") + (cfg.chargerModel == "plus" ? " selected" : "") + ">Pulsar Plus (dual-char)</option>";
-    page += String("<option value='copper'") + (cfg.chargerModel == "copper" ? " selected" : "") + ">Copper SB (Plus protocol — experimental)</option>";
-    page += String("<option value='quasar'") + (cfg.chargerModel == "quasar" ? " selected" : "") + ">Quasar (Plus protocol — experimental)</option>";
-    page += String("<option value='quasar2'") + (cfg.chargerModel == "quasar2" ? " selected" : "") + ">Quasar 2 / V2H (Plus protocol — experimental)</option>";
+    page += String("<option value='copper'") + (cfg.chargerModel == "copper" ? " selected" : "") + ">Copper SB (Plus protocol &mdash; experimental)</option>";
+    page += String("<option value='quasar'") + (cfg.chargerModel == "quasar" ? " selected" : "") + ">Quasar (Plus protocol &mdash; experimental)</option>";
+    page += String("<option value='quasar2'") + (cfg.chargerModel == "quasar2" ? " selected" : "") + ">Quasar 2 / V2H (Plus protocol &mdash; experimental)</option>";
     page += String("<option value='custom'") + (cfg.chargerModel == "custom" ? " selected" : "") + ">Custom (set UUIDs below)</option>";
     page += "</select>";
     page += "<p class='help'>Picking <b>Pulsar Plus</b> auto-fills the Nordic UART UUIDs on save. Use <b>Custom</b> if you know better.</p>";
     page += "<label>Service UUID</label><input name='ble_svc' value='" + cfg.bleService + "' style='font-size:12px;font-family:monospace'>";
-    page += "<label>Char UUID (write — also notify in single-char mode)</label><input name='ble_chr' value='" + cfg.bleChar + "' style='font-size:12px;font-family:monospace'>";
-    page += "<label>TX/Notify Char UUID (optional — leave blank for single-char Pulsar MAX)</label><input name='ble_txchr' value='" + cfg.bleTxChar + "' placeholder='Required for Pulsar Plus' style='font-size:12px;font-family:monospace'>";
+    page += "<label>Char UUID (write &mdash; also notify in single-char mode)</label><input name='ble_chr' value='" + cfg.bleChar + "' style='font-size:12px;font-family:monospace'>";
+    page += "<label>TX/Notify Char UUID (optional &mdash; leave blank for single-char Pulsar MAX)</label><input name='ble_txchr' value='" + cfg.bleTxChar + "' placeholder='Required for Pulsar Plus' style='font-size:12px;font-family:monospace'>";
     page += "<div class='row'><div><label>Status Poll (ms)</label><input name='poll_status' type='number' value='" + String(cfg.statusPollMs) + "'></div>";
     page += "<div><label>Realtime Poll (ms)</label><input name='poll_rt' type='number' value='" + String(cfg.realtimePollMs) + "'></div></div>";
     page += "<div class='row'><div><label>HA Prefix</label><input name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'></div>";
-    page += "<div><label>Device ID</label><input name='ha_devid' value='" + cfg.haDeviceId + "'></div></div></div></details>";
+    page += "<div><label>Device ID</label><input name='ha_devid' value='" + cfg.haDeviceId + "'></div></div>";
+    page += "</div></div>";
 
+    // ---------- Save button (outside panels so always visible) ----------
     page += "<button type='submit' class='btn btn-success' style='margin-top:12px'>&#x1F4BE; Save &amp; Reboot</button></form>";
-    page += "<a href='/ota' class='btn btn-outline' style='margin-top:10px'>&#x1F4E6; Firmware Update</a>";
+    page += "<a href='/ota' class='btn btn-outline' style='margin-top:10px'>&#x1F4E6; Firmware Update</a> ";
+    page += "<a href='/setup' class='btn btn-outline' style='margin-top:10px;margin-left:6px'>&#x1F9ED; Run setup wizard</a>";
+
+    // Tab nav JS (kept simple — toggle .active on tabs + panels).
+    page += R"HTML(
+<script>
+function cfgTab(n){
+  document.querySelectorAll('.cfg-tab').forEach(function(t,i){t.classList.toggle('active',i===n)});
+  document.querySelectorAll('.cfg-panel').forEach(function(p,i){p.classList.toggle('active',i===n)});
+  // Persist last-opened tab so the user lands back in the same place
+  // after a save+reboot (cosmetic, not security-sensitive).
+  try{localStorage.setItem('wb-cfg-tab',String(n))}catch(e){}
+}
+try{var n=parseInt(localStorage.getItem('wb-cfg-tab')||'0',10);if(n>=0&&n<5)cfgTab(n)}catch(e){}
+</script>
+)HTML";
 
     // Backup & Restore — passwords/PINs are masked in the export, so the
     // download is safe to share. Restore preserves the existing secrets
@@ -3642,7 +4025,12 @@ void WBWebServer::beginAP() {
     dns.start(53, "*", WiFi.softAPIP());
 
     registerRoutes();
-    http.on("/", handleConfig);  // AP mode: config first
+    // AP mode: first-time setup wizard at /setup. The root / and /config
+    // also serve it so phone captive-portal redirects land in the wizard,
+    // not the dense single-page form (which stays available at /config for
+    // power users who want random-access tab editing).
+    http.on("/", handleSetup);
+    http.on("/setup", handleSetup);
     http.on("/config", handleConfig);
     http.on("/dashboard", handleDashboard);
     http.on("/settings", handleSettings);
