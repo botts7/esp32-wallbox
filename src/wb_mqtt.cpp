@@ -206,7 +206,12 @@ static void publishDiscoveryEntity(PubSubClient& mqtt, const char* component,
     JsonDocument doc;
     doc["name"] = name;
     doc["unique_id"] = cfg.haDeviceId + "_" + objectId;
-    doc["object_id"] = cfg.haDeviceId + "_" + objectId;
+    // HA Core 2026.4 removed `object_id` from the MQTT discovery schema —
+    // replaced by `default_entity_id`, which must include the platform
+    // prefix (e.g. "sensor.wallbox_pulsar_max_chg_power"). Pre-existing
+    // entities aren't renamed; `default_entity_id` only sets the default
+    // for first-registration.
+    doc["default_entity_id"] = String(component) + "." + cfg.haDeviceId + "_" + objectId;
     doc["state_topic"] = stateTopic;
     doc["value_template"] = valTemplate;
     doc["availability_topic"] = availTopic();
@@ -246,7 +251,9 @@ static void publishDiscoverySwitch(PubSubClient& mqtt, const char* objectId,
     JsonDocument doc;
     doc["name"] = name;
     doc["unique_id"] = cfg.haDeviceId + "_" + objectId;
-    doc["object_id"] = cfg.haDeviceId + "_" + objectId;
+    // See publishDiscoveryEntity for the object_id -> default_entity_id
+    // migration rationale.
+    doc["default_entity_id"] = String("switch.") + cfg.haDeviceId + "_" + objectId;
     doc["command_topic"] = cmdTopic;
     doc["state_topic"] = stateTopic;
     doc["value_template"] = valTemplate;
@@ -278,7 +285,9 @@ static void publishDiscoveryNumber(PubSubClient& mqtt, const char* objectId,
     JsonDocument doc;
     doc["name"] = name;
     doc["unique_id"] = cfg.haDeviceId + "_" + objectId;
-    doc["object_id"] = cfg.haDeviceId + "_" + objectId;
+    // See publishDiscoveryEntity for the object_id -> default_entity_id
+    // migration rationale.
+    doc["default_entity_id"] = String("number.") + cfg.haDeviceId + "_" + objectId;
     doc["command_topic"] = cmdTopic;
     doc["state_topic"] = stateTopic;
     doc["value_template"] = valTemplate;
@@ -312,7 +321,9 @@ static void publishDiscoveryButton(PubSubClient& mqtt, const char* objectId,
     JsonDocument doc;
     doc["name"] = name;
     doc["unique_id"] = cfg.haDeviceId + "_" + objectId;
-    doc["object_id"] = cfg.haDeviceId + "_" + objectId;
+    // See publishDiscoveryEntity for the object_id -> default_entity_id
+    // migration rationale.
+    doc["default_entity_id"] = String("button.") + cfg.haDeviceId + "_" + objectId;
     doc["command_topic"] = cmdTopic;
     doc["payload_press"] = payload_press;
     doc["availability_topic"] = availTopic();
@@ -339,7 +350,9 @@ static void publishDiscoverySelect(PubSubClient& mqtt, const char* objectId,
     JsonDocument doc;
     doc["name"] = name;
     doc["unique_id"] = cfg.haDeviceId + "_" + objectId;
-    doc["object_id"] = cfg.haDeviceId + "_" + objectId;
+    // See publishDiscoveryEntity for the object_id -> default_entity_id
+    // migration rationale.
+    doc["default_entity_id"] = String("select.") + cfg.haDeviceId + "_" + objectId;
     doc["command_topic"] = cmdTopic;
     doc["state_topic"] = stateTopic;
     doc["value_template"] = valTemplate;
@@ -1231,7 +1244,9 @@ void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
                 JsonDocument doc;
                 doc["name"] = "Car Connected";
                 doc["unique_id"] = bsCfg.haDeviceId + "_car_connected";
-                doc["object_id"] = bsCfg.haDeviceId + "_car_connected";
+                // See publishDiscoveryEntity for the object_id ->
+                // default_entity_id migration rationale.
+                doc["default_entity_id"] = String("binary_sensor.") + bsCfg.haDeviceId + "_car_connected";
                 doc["state_topic"] = baseTopic() + "/car_connected";
                 doc["payload_on"] = "ON";
                 doc["payload_off"] = "OFF";
