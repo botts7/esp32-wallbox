@@ -34,7 +34,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 57;
+static const size_t kDiscoveryCount = 58;
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -1142,6 +1142,19 @@ const DiscoveryEntry kEntries[] = {
     /* 56 */ { EntityKind::SENSOR, "wifi_rssi", "WiFi Signal", "mdi:wifi",
                TopicSlot::GATEWAY, "{{ value_json.wifi_rssi | default(0) }}",
                "dBm", "signal_strength", "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // Surfaces the Wallbox app's "Schedule paused" + "Solar charging
+    // paused" labels. The `gen` field in r_dat is the sticky
+    // manual-override flag: 0 = schedule armed (will fire normally),
+    // non-zero = schedule paused (override active, regardless of
+    // whether the charger is currently charging or stopped). Only the
+    // Wallbox app's Resume action clears it back to 0; pressing Start
+    // or Stop in our gateway does NOT change it. ON = paused.
+    /* 57 */ { EntityKind::BINARY_SENSOR, "schedule_paused", "Schedule Paused", "mdi:calendar-clock",
+               TopicSlot::STATUS,
+               "{% if (value_json.r.gen | default(0)) != 0 %}ON{% else %}OFF{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 };
 
