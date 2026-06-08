@@ -513,13 +513,19 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
 
     if (sub == "charging") {
         // payload: "start", "stop", "pause", "resume" or 1/2
-        // w_cha par: 1=resume/start, 2=pause/stop (based on Wallbox convention)
+        // w_cha par: 1=resume/start, then EITHER 2 (Pulsar MAX hard stop)
+        // OR 0 (Pulsar Plus family pause). Plus chargers don't accept
+        // par=2 — they ACK the command but the charger keeps charging.
+        // jagheterfredrik/wallbox-ble uses par=0 for the Plus protocol
+        // family and that's what peter-mcc's Plus needed (issue #4 follow-up).
         String action = payload;
         action.toLowerCase();
         int val = 0;
-        if (action == "start" || action == "resume" || action == "1") val = 1;
-        else if (action == "stop" || action == "pause" || action == "2") val = 2;
-        else {
+        if (action == "start" || action == "resume" || action == "1") {
+            val = 1;
+        } else if (action == "stop" || action == "pause" || action == "2") {
+            val = configMgr.isPlusFamily() ? 0 : 2;
+        } else {
             Log.printf("[CMD] Unknown charging action: %s\n", payload);
             return;
         }

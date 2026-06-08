@@ -932,7 +932,10 @@ static void handleApiCommand() {
     const char* met = nullptr;
     String par;
     if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
-    else if (action == "stop")    { met = bapi::MET_START_STOP;  par = "2"; }
+    // w_cha stop par: 2 for Pulsar MAX (hard stop), 0 for Pulsar Plus
+    // family (pause semantics — Plus ACKs par=2 but ignores it).
+    // Mirrors jagheterfredrik/wallbox-ble's Plus convention. See #4.
+    else if (action == "stop")    { met = bapi::MET_START_STOP;  par = configMgr.isPlusFamily() ? "0" : "2"; }
     else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
     else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
     else if (action == "current") { met = bapi::MET_SET_CURRENT; par = value; }
