@@ -34,7 +34,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 58;
+static const size_t kDiscoveryCount = 59;
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -96,6 +96,7 @@ enum class TopicSlot : uint8_t {
     CMD_PHASE_SWITCH,
     CMD_HALO,
     CMD_TIMEZONE,
+    CMD_RESUME_SCHEDULE,
 };
 
 struct DiscoveryEntry {
@@ -512,16 +513,18 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
     String par;
 
     if (sub == "charging") {
-        // payload: "start", "stop", "pause", "resume" or 1/2
-        // w_cha par: 1=resume/start, then EITHER 2 (Pulsar MAX hard stop)
+        // payload: "start", "stop", "pause", or 1/2
+        // w_cha par: 1=start, then EITHER 2 (Pulsar MAX hard stop)
         // OR 0 (Pulsar Plus family pause). Plus chargers don't accept
         // par=2 — they ACK the command but the charger keeps charging.
         // jagheterfredrik/wallbox-ble uses par=0 for the Plus protocol
         // family and that's what peter-mcc's Plus needed (issue #4 follow-up).
+        // Note: "resume" is NOT routed here — it has a dedicated sub
+        // below that sends s_cmode {"mode":0} (clears schedule override).
         String action = payload;
         action.toLowerCase();
         int val = 0;
-        if (action == "start" || action == "resume" || action == "1") {
+        if (action == "start" || action == "1") {
             val = 1;
         } else if (action == "stop" || action == "pause" || action == "2") {
             val = configMgr.isPlusFamily() ? 0 : 2;
@@ -531,6 +534,15 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         }
         par = String(val);
         wallboxBLE.enqueueRequest(bapi::MET_START_STOP, par.c_str());
+
+    } else if (sub == "resume_schedule") {
+        // Clears the schedule/eco-smart manual-override flag — what
+        // the Wallbox app's Resume button does. Defensive prefix:
+        // send Stop first because s_cmode mode=0 rejects (subcode 6)
+        // when actively charging. Stop is a no-op when not charging.
+        const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
+        wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
+        wallboxBLE.enqueueRequest("s_cmode", "{\"mode\":0}");
 
     } else if (sub == "current") {
         // payload: integer 6-32
@@ -761,6 +773,7 @@ void WallboxMQTT::sendDiscovery() {
     _discTopics.cmdPhaseSwitch   = cPrefix + "phase_switch";
     _discTopics.cmdHalo          = cPrefix + "halo";
     _discTopics.cmdTimezone      = cPrefix + "timezone";
+    _discTopics.cmdResumeSched   = cPrefix + "resume_schedule";
 
     _discoveryIndex = 0;
 }
@@ -1156,6 +1169,15 @@ const DiscoveryEntry kEntries[] = {
                "{% if (value_json.r.gen | default(0)) != 0 %}ON{% else %}OFF{% endif %}",
                nullptr, nullptr, nullptr, nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // Button-press of "Resume Schedule" -> publishes any payload to
+    // the resume_schedule command topic; the MQTT callback routes
+    // that to s_cmode {"mode":0} which clears r_dat.gen back to 0.
+    /* 58 */ { EntityKind::BUTTON, "resume_schedule", "Resume Schedule", "mdi:play-circle",
+               TopicSlot::NONE, nullptr,
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::CMD_RESUME_SCHEDULE, 0,0,0, nullptr,
+               nullptr, nullptr, nullptr, 0 },
 };
 
 const size_t kEntryCount = sizeof(kEntries) / sizeof(kEntries[0]);
@@ -1214,6 +1236,7 @@ void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
             case wb_disc::TopicSlot::CMD_PHASE_SWITCH: return _discTopics.cmdPhaseSwitch.c_str();
             case wb_disc::TopicSlot::CMD_HALO:         return _discTopics.cmdHalo.c_str();
             case wb_disc::TopicSlot::CMD_TIMEZONE:     return _discTopics.cmdTimezone.c_str();
+            case wb_disc::TopicSlot::CMD_RESUME_SCHEDULE: return _discTopics.cmdResumeSched.c_str();
         }
         return nullptr;
     };

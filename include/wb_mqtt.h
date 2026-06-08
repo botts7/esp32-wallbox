@@ -74,6 +74,7 @@ private:
         String cmdAutolockEnable, cmdAutolockTime;
         String cmdEcoMode, cmdEcoPower;
         String cmdPowerShare, cmdPhaseSwitch, cmdHalo, cmdTimezone;
+        String cmdResumeSched;
     } _discTopics;
 };
 

@@ -63,15 +63,16 @@ The platform release. Three changes worth a major-version bump:
   a banner on the next AP-mode boot explaining what likely went
   wrong (auth fail, SSID not found, handshake timeout). Cleared
   on the first successful WiFi join.
-- **Schedule-paused indicator.** New MQTT `binary_sensor.schedule_paused`
-  (entity #57 in HA discovery) plus an amber banner on `/dashboard`
-  that surface the Wallbox app's "Schedule & Solar charging paused"
-  state. Backed by `r_dat.gen != 0` — the sticky manual-override
-  flag that the official app reads. Independent of `charger_status`:
-  a manually started charge while the schedule is paused (Start
-  pressed without first hitting Resume in the Wallbox app) keeps the
-  indicator on, matching what the Wallbox app shows. Only the
-  Wallbox app's Resume button clears it.
+- **Schedule-paused indicator + Resume button.** New MQTT
+  `binary_sensor.schedule_paused` (entity #57) plus a paired
+  `button.resume_schedule` (entity #58), and an amber banner on
+  `/dashboard` with an inline Resume button. Backed by `r_dat.gen`
+  for the read (0 = armed, non-zero = paused) and `s_cmode` with
+  `{"mode":0}` for the write. Independent of charging state: a
+  manually started charge while the schedule is paused keeps the
+  indicator on, matching the Wallbox app exactly. New
+  `/api/command?action=resume` endpoint maps to the same call so
+  HA automations + the dashboard share one code path.
 
 ### Fixed
 
