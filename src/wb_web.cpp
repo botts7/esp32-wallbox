@@ -2557,6 +2557,22 @@ String wb_buildInfoPage() {
   Behaviour may have shifted — keep an eye on the dashboard. <a href='#' onclick='dismissFwBanner();return false' style='color:#f59e0b;text-decoration:underline'>Dismiss</a>
 </div>
 
+<style>
+.info-tabs{display:flex;gap:0;border-bottom:2px solid var(--border);margin:0 0 14px;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.info-tabs::-webkit-scrollbar{display:none}
+.info-tab{flex:0 0 auto;padding:10px 14px;color:var(--text2);background:transparent;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;cursor:pointer;font-size:.92em;font-family:inherit;white-space:nowrap;transition:color .15s,border-color .15s}
+.info-tab.active{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+.info-tab:hover:not(.active){color:var(--text)}
+.info-panel{display:none}
+.info-panel.active{display:block}
+</style>
+<div class='info-tabs'>
+  <button type='button' class='info-tab active' onclick='infoTab(0)'>&#x2139; Overview</button>
+  <button type='button' class='info-tab' onclick='infoTab(1)'>&#x1F4C8; Diagnostics</button>
+  <button type='button' class='info-tab' onclick='infoTab(2)'>&#x1F527; Tools</button>
+</div>
+
+<div class='info-panel active' data-panel='0'>
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F4E1;</span><h2>Gateway</h2></div>
   <div id='gw'>Loading...</div>
@@ -2566,13 +2582,27 @@ String wb_buildInfoPage() {
   <div class='card-header'><span class='card-icon'>&#x1F50C;</span><h2>Charger Details</h2></div>
   <div id='chg'>Loading...</div>
 </div>
+</div>
 
+<div class='info-panel' data-panel='1'>
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F4C8;</span><h2>Connection Diagnostics</h2></div>
   <div id='diag-rows' style='font-size:.88em'>Loading...</div>
   <button class='btn btn-outline' style='padding:6px 12px;font-size:.82em;margin-top:8px' onclick='clearDiag()'>Clear counters</button>
 </div>
 
+<div class='card'>
+  <div class='card-header'><span class='card-icon'>&#x1F4E6;</span><h2>Firmware</h2></div>
+  <a href='/ota' class='btn btn-outline' style='text-decoration:none;display:block;margin-bottom:8px'>&#x1F4E6; Upload firmware (OTA)</a>
+  <div id='boot-reason' style='font-size:.82em;color:var(--text3);margin-top:6px;margin-bottom:6px'></div>
+  <div id='ota-history' style='display:none;margin-top:8px'>
+    <div style='font-size:.82em;color:var(--text2);margin-bottom:6px'>Recent OTA attempts:</div>
+    <div id='ota-history-rows' style='font-size:.78em;font-family:monospace'></div>
+  </div>
+</div>
+</div>
+
+<div class='info-panel' data-panel='2'>
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F517;</span><h2>Charger Info</h2></div>
   <div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'>
@@ -2626,15 +2656,16 @@ String wb_buildInfoPage() {
   <p class='help' style='margin-top:4px'>Select a command and press Send to query the charger directly</p>
   <pre id='br' style='background:var(--bg);border-radius:8px;padding:10px;margin-top:10px;white-space:pre-wrap;max-height:250px;overflow:auto;display:none;font-size:.82em'></pre>
 </div>
-
-<div class='card'>
-  <a href='/ota' class='btn btn-outline' style='text-decoration:none;display:block;margin-bottom:8px'>&#x1F4E6; Firmware Update</a>
-  <div id='boot-reason' style='font-size:.82em;color:var(--text3);margin-top:6px;margin-bottom:6px'></div>
-  <div id='ota-history' style='display:none;margin-top:8px'>
-    <div style='font-size:.82em;color:var(--text2);margin-bottom:6px'>Recent OTA attempts:</div>
-    <div id='ota-history-rows' style='font-size:.78em;font-family:monospace'></div>
-  </div>
 </div>
+
+<script>
+function infoTab(n){
+  document.querySelectorAll('.info-tab').forEach(function(t,i){t.classList.toggle('active',i===n)});
+  document.querySelectorAll('.info-panel').forEach(function(p,i){p.classList.toggle('active',i===n)});
+  try{localStorage.setItem('wb-info-tab',String(n))}catch(e){}
+}
+try{var n=parseInt(localStorage.getItem('wb-info-tab')||'0',10);if(n>=0&&n<3)infoTab(n)}catch(e){}
+</script>
 <p style='text-align:center;color:var(--text3);font-size:.75em;margin-top:16px'>Wallbox BLE Gateway )HTML" WB_VERSION R"HTML(</p>
 
 <script>
