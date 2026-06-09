@@ -229,7 +229,16 @@ void WallboxBLE::loop() {
                 // can override via bapiTimeoutMs from the caller.
                 uint32_t to = req.bapiTimeoutMs ? req.bapiTimeoutMs : 5000;
                 String resp = _sendCommandDirect(req.met, req.par, to);
-                _storeResponse(req.reqId, resp);
+                // Phase 3: hoist the response body into a shared_ptr so
+                // the response map and the MQTT pending-pub ring share
+                // ONE heap allocation instead of two copies. make_shared
+                // additionally co-locates the control block + String in
+                // a single block, saving a second heap alloc per drain.
+                std::shared_ptr<String> sharedResp;
+                if (resp.length() > 0) {
+                    sharedResp = std::make_shared<String>(std::move(resp));
+                }
+                _storeResponse(req.reqId, sharedResp);
                 bool doWake = (req.replyMode == ReplyMode::WAKE_WAITER
                             || req.replyMode == ReplyMode::WAKE_AND_MQTT);
                 bool doMqtt = (req.replyMode == ReplyMode::MQTT_PUBLISH
@@ -237,8 +246,8 @@ void WallboxBLE::loop() {
                 if (doWake && req.waiter) {
                     xTaskNotify(req.waiter, req.reqId, eSetValueWithOverwrite);
                 }
-                if (doMqtt && resp.length()) {
-                    _enqueueMqttPub(String(req.met), resp);
+                if (doMqtt && sharedResp && sharedResp->length()) {
+                    _enqueueMqttPub(String(req.met), sharedResp);
                 }
             }
         }
@@ -950,8 +959,8 @@ void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_
 // Cap at kPendingPubSize entries; drops oldest with a log line if the
 // ring fills (which only happens if main task drain is wedged —
 // shouldn't happen in normal flow).
-void WallboxBLE::_enqueueMqttPub(const String& met, const String& json) {
-    if (met.length() == 0 || json.length() == 0) return;
+void WallboxBLE::_enqueueMqttPub(const String& met, std::shared_ptr<String> json) {
+    if (met.length() == 0 || !json || json->length() == 0) return;
     if (!_pendingPubMutex) return;
     if (xSemaphoreTake(_pendingPubMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
     uint8_t next = (_pendingPubHead + 1) % kPendingPubSize;
@@ -962,7 +971,7 @@ void WallboxBLE::_enqueueMqttPub(const String& met, const String& json) {
         _pendingPubTail = (_pendingPubTail + 1) % kPendingPubSize;
     }
     _pendingPub[_pendingPubHead].met  = met;
-    _pendingPub[_pendingPubHead].json = json;
+    _pendingPub[_pendingPubHead].json = std::move(json);  // ref bump
     _pendingPubHead = next;
     xSemaphoreGive(_pendingPubMutex);
 }
@@ -977,10 +986,19 @@ bool WallboxBLE::drainPendingResponsePub(String& out_met, String& out_json) {
     bool got = false;
     if (_pendingPubTail != _pendingPubHead) {
         out_met  = _pendingPub[_pendingPubTail].met;
-        out_json = _pendingPub[_pendingPubTail].json;
-        // Free the heap-backed Strings before advancing the tail.
+        // Dereference shared_ptr to copy body out to caller. One copy
+        // here — unavoidable since the caller (MQTT publish) needs
+        // ownership of the bytes to feed PubSubClient. The other
+        // potential consumer (_responseMap) holds its own ref to the
+        // same underlying String; if it already drained, this is the
+        // last ref and the String frees when we reset() below.
+        if (_pendingPub[_pendingPubTail].json) {
+            out_json = *_pendingPub[_pendingPubTail].json;
+        }
+        // Release refs so the underlying buffer frees when both
+        // consumers have drained.
         _pendingPub[_pendingPubTail].met  = String();
-        _pendingPub[_pendingPubTail].json = String();
+        _pendingPub[_pendingPubTail].json.reset();
         _pendingPubTail = (_pendingPubTail + 1) % kPendingPubSize;
         got = true;
     }
@@ -991,8 +1009,8 @@ bool WallboxBLE::drainPendingResponsePub(String& out_met, String& out_json) {
 // 2.7.0 step 3 — store a completed response in the RAM map. Called
 // from the BLE task's drain loop after sendCommand returns. Mutex-
 // protected; safe to read from any task via tryFetchResponse.
-void WallboxBLE::_storeResponse(uint32_t reqId, const String& json) {
-    if (reqId == 0 || json.length() == 0) return;
+void WallboxBLE::_storeResponse(uint32_t reqId, std::shared_ptr<String> json) {
+    if (reqId == 0 || !json || json->length() == 0) return;
     if (!_responseMapMutex) return;
     if (xSemaphoreTake(_responseMapMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         Log.printf("[BLE] _storeResponse %u — mutex timeout\n", (unsigned)reqId);
@@ -1007,7 +1025,7 @@ void WallboxBLE::_storeResponse(uint32_t reqId, const String& json) {
     }
     slot.reqId       = reqId;
     slot.completedAt = millis();
-    slot.json        = json;
+    slot.json        = std::move(json);  // ref bump if shared, else move
     _responseMapHead = (_responseMapHead + 1) % kResponseMapSize;
     xSemaphoreGive(_responseMapMutex);
 }
@@ -1023,10 +1041,17 @@ bool WallboxBLE::tryFetchResponse(uint32_t reqId, String& out) {
     bool found = false;
     for (uint8_t i = 0; i < kResponseMapSize; i++) {
         if (_responseMap[i].reqId == reqId) {
-            out = _responseMap[i].json;
-            // Consume — slot becomes available for next eviction.
+            // Dereference the shared_ptr to copy the JSON body out
+            // to the caller. This is the ONE copy that's unavoidable
+            // — the caller wants ownership for its HTTP response.
+            if (_responseMap[i].json) {
+                out = *_responseMap[i].json;
+            }
+            // Consume — release shared ref. If MQTT publish path also
+            // holds a ref, that one stays valid; underlying String is
+            // freed when last ref drops.
             _responseMap[i].reqId = 0;
-            _responseMap[i].json = String();  // free heap
+            _responseMap[i].json.reset();
             found = true;
             break;
         }

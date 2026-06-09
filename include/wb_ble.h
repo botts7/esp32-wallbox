@@ -6,6 +6,7 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <freertos/queue.h>
+#include <memory>  // shared_ptr for BAPI response drain (task #104 phase 3)
 #include "bapi.h"
 
 // Wallbox BLE connection manager.
@@ -379,14 +380,18 @@ private:
     struct ResponseSlot {
         uint32_t reqId;          // 0 = empty slot
         uint32_t completedAt;    // millis() when stored, for diag
-        String   json;
+        // shared_ptr so the BLE-task drain can hand the same response
+        // body to BOTH this map (for /api/command_status pollers) and
+        // _pendingPub (for MQTT subscribers) under WAKE_AND_MQTT mode
+        // without a second copy. Audit task #104 phase 3.
+        std::shared_ptr<String> json;
     };
     ResponseSlot _responseMap[kResponseMapSize] = {};
     uint8_t      _responseMapHead = 0;  // next eviction index (FIFO)
     SemaphoreHandle_t _responseMapMutex = nullptr;
     // Internal: store a response in the map under _responseMapMutex.
     // No-op if reqId == 0 (fire-and-forget) or json is empty.
-    void _storeResponse(uint32_t reqId, const String& json);
+    void _storeResponse(uint32_t reqId, std::shared_ptr<String> json);
 
     // Step 5: pending-MQTT-publish ring. BLE-task drain enqueues
     // when replyMode == MQTT_PUBLISH; main task drains via
@@ -395,13 +400,16 @@ private:
     // with a log line.
     struct PendingPub {
         String met;
-        String json;
+        // shared_ptr (see ResponseSlot above) so the same BAPI response
+        // body lives ONCE on the heap and gets handed to both ring
+        // buffers without a second copy. Audit task #104 phase 3.
+        std::shared_ptr<String> json;
     };
     PendingPub _pendingPub[kPendingPubSize] = {};
     uint8_t    _pendingPubHead = 0;   // next eviction (write) index
     uint8_t    _pendingPubTail = 0;   // next read index
     SemaphoreHandle_t _pendingPubMutex = nullptr;
-    void _enqueueMqttPub(const String& met, const String& json);
+    void _enqueueMqttPub(const String& met, std::shared_ptr<String> json);
 
     // 2.7.0 step 4: the "direct" BAPI write+wait path. Same body as
     // the pre-step-4 sendCommand: takes _cmdMutex, writes the framed
