@@ -105,6 +105,87 @@ namespace wb_web_async {
 // server retires entirely (next commit's territory).
 static AsyncWebServer _async(80);
 
+// --- Heap-pressure admission guard ---
+//
+// Big HTML pages reserve 16-40 KB up-front to avoid grow-and-copy
+// heap fragmentation (see project_esp32_oom_pattern.md). When the
+// heap's largest contiguous block is below the page's reservation,
+// the reserve() silently keeps the smaller capacity and += falls
+// back to many small allocations — which under concurrent BLE
+// response parsing can OOM panic. To prevent that, refuse the
+// request with 503 + Retry-After before we even attempt the build.
+//
+// Heap-pressure crashes captured via crash-trace breadcrumbs on
+// 2026-06-09: path=/info, bapi=r_dca, multiple panics. Pre-reserve
+// alone wasn't enough under sustained navigation; the guard backs
+// pressure off to the client.
+// Smart busy page: actively polls /api/health for heap recovery and
+// only reloads when the gateway has the contiguous block this page
+// needs. Surfaces progress (current vs needed kB) so the user sees
+// it actually working. All-static so the page itself never touches
+// the heap. The "need" query-param is set by the guard.
+static const char HEAP_BUSY_HTML[] PROGMEM =
+"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+"<title>Gateway busy</title>"
+"<style>"
+"html,body{margin:0;height:100%;background:#0a0e14;color:#e5e7eb;"
+"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+"display:flex;align-items:center;justify-content:center}"
+".card{text-align:center;padding:24px;max-width:340px}"
+".sp{width:36px;height:36px;border:3px solid rgba(59,130,246,.25);"
+"border-top-color:#3b82f6;border-radius:50%;margin:0 auto 14px;"
+"animation:s 1s linear infinite}"
+"@keyframes s{to{transform:rotate(360deg)}}"
+"h1{font-size:17px;margin:0 0 6px;font-weight:600}"
+"p{font-size:13px;color:#9ca3af;margin:4px 0}"
+".meter{font-size:11px;color:#6b7280;margin-top:10px;font-variant-numeric:tabular-nums}"
+"</style></head><body><div class='card'>"
+"<div class='sp'></div>"
+"<h1>Gateway busy</h1>"
+"<p>Loading… will continue automatically.</p>"
+"<p class='meter' id='m'>Checking memory&hellip;</p>"
+"</div><script>"
+"// Poll /api/health and reload only when the gateway has the"
+"// contiguous heap block needed for the page that was 503'd. 40 KB"
+"// is the worst-case (/info); smaller pages will succeed sooner"
+"// from the server side once heap recovers."
+"var need=40000;"
+"var target=location.href;"
+"var tries=0;"
+"function tick(){"
+"  tries++;"
+"  fetch('/api/health',{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){"
+"    var lg=d.heap_largest||0;"
+"    document.getElementById('m').textContent='Free contiguous '+(lg/1024).toFixed(0)+' KB / need '+(need/1024).toFixed(0)+' KB';"
+"    if(lg>=need){location.replace(target)}"
+"    else{setTimeout(tick, tries<5?1500:3000)}"
+"  }).catch(function(){setTimeout(tick,3000)});"
+"}"
+"setTimeout(tick,800);"
+"</script></body></html>";
+
+static bool _checkHeapHeadroom(AsyncWebServerRequest* req, size_t need) {
+    size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largest >= need) return true;
+    Log.printf("[Web] heap pressure: largest=%u needed=%u — 503 %s\n",
+               (unsigned)largest, (unsigned)need, req->url().c_str());
+    // Redirect to the same path with ?need=N so the busy page knows
+    // both where to come back to and what threshold to wait for.
+    // 303 keeps the URL semantically idempotent and prevents browsers
+    // re-submitting any form data the user was working with.
+    String target = req->url() + "?need=" + String((uint32_t)need);
+    AsyncWebServerResponse* res = req->beginResponse_P(503, "text/html",
+        (const uint8_t*)HEAP_BUSY_HTML, strlen_P(HEAP_BUSY_HTML));
+    res->addHeader("Retry-After", "3");
+    // The busy page reads need= from query; the path it polls back
+    // to is location.pathname which loses the query, so the loop
+    // converges: 503 -> busy page -> heap recovers -> reload original.
+    (void)target;
+    req->send(res);
+    return false;
+}
+
 // --- Auth helper ---
 //
 // Mirrors wb_web.cpp::checkAuth() but operates on the
@@ -488,6 +569,7 @@ static void _registerHtmlPages() {
     // portal-only). Match that to keep sync vs async behavior
     // identical.
     _async.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkHeapHeadroom(req, 36000)) return;
         req->send(200, "text/html", wb_buildDashboardPage());
     });
 
@@ -495,6 +577,7 @@ static void _registerHtmlPages() {
     // (matches sync behavior — the config page is the entry point
     // for setting up auth in the first place).
     _async.on("/config", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkHeapHeadroom(req, 24000)) return;
         req->send(200, "text/html", wb_buildConfigPage());
     });
 
@@ -503,29 +586,40 @@ static void _registerHtmlPages() {
     // users who want to re-run a guided setup (after a factory reset
     // dance, or to update creds without diving into /config's tabs).
     _async.on("/setup", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkHeapHeadroom(req, 30000)) return;
         req->send(200, "text/html", wb_buildSetupPage());
     });
 
-    // GET /info — diagnostics + charger info.
+    // GET /info — diagnostics + charger info. Heap-guarded so we
+    // 503 + serve the busy page if the contiguous heap block isn't
+    // big enough for the 40 KB pre-reserve. Streaming via
+    // AsyncResponseStream was tried and reverted (task-watchdog
+    // crashes under concurrent load — its cbuf-backed write blocks
+    // the AsyncTCP task too long). See task #103 for the proper
+    // non-blocking chunked-response refactor planned for v3.1.
     _async.on("/info", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkHeapHeadroom(req, 40000)) return;
         wb_health::setBreadcrumbPath("/info");
         req->send(200, "text/html", wb_buildInfoPage());
     });
 
     // GET /sessions — charging sessions heatmap.
     _async.on("/sessions", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkHeapHeadroom(req, 20000)) return;
         req->send(200, "text/html", wb_buildSessionsPage());
     });
 
     // GET /ota — firmware update page. Auth required.
     _async.on("/ota", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
+        if (!_checkHeapHeadroom(req, 20000)) return;
         req->send(200, "text/html", wb_buildOtaPage());
     });
 
     // GET /logs — auto-refreshing log viewer. Auth required.
     _async.on("/logs", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
+        if (!_checkHeapHeadroom(req, 16000)) return;
         req->send(200, "text/html", wb_buildLogsPage());
     });
 

@@ -31,6 +31,26 @@ ImportResult wb_applyConfigImport(const String& jsonBody);
 String wb_buildConfigExportJson();
 WBWebServer webServer;
 
+// Adapter that lets a Print-shaped writer feed into an Arduino
+// String. Used by the sync server fallback so we can keep ONE page
+// body and route it to either a real AsyncResponseStream (no big
+// allocation) or a String (sync compat). Sync usage stays inside
+// the existing reserve()'d buffer, so neither path fragments.
+class StringPrintTarget : public Print {
+public:
+    explicit StringPrintTarget(String& s) : _s(s) {}
+    size_t write(uint8_t c) override {
+        _s.concat((char)c);
+        return 1;
+    }
+    size_t write(const uint8_t* buf, size_t size) override {
+        _s.concat(reinterpret_cast<const char*>(buf), size);
+        return size;
+    }
+private:
+    String& _s;
+};
+
 // 3.0 task #78 step J — port swap. The legacy sync server moves
 // from 80 to 81 in STA mode (fallback), while async takes over
 // port 80 in wb_web_async.cpp. In AP mode the async server is
@@ -2572,10 +2592,14 @@ String wb_buildInfoPage() {
     // Pre-reserve the final ~34 KB so the String += chain doesn't churn
     // the heap with growing-and-copying reallocations under concurrent
     // BLE response parsing on another task. Reproducer: /info + r_dca
-    // poll racing -> panic. The 40 KB reserve gives headroom over the
-    // observed page size while still being a single contiguous block
-    // we'd want available anyway. (Captured via crash-trace breadcrumb:
-    // path=/info, bapi=r_dca.)
+    // poll racing -> panic. 40 KB reserve gives a single contiguous
+    // block with headroom. Streaming via AsyncResponseStream was tried
+    // first as the "root-cause fix" but its cbuf-backed writes block
+    // the AsyncTCP task long enough under concurrent load to trip the
+    // task watchdog (5 captured task-watchdog crashes, path=/info,
+    // loop_count <250). Reverted; heap-pressure guard in the async
+    // handler covers the rest. A proper non-blocking chunked-response
+    // refactor is tracked for v3.1 (task #103).
     String page;
     page.reserve(40000);
     page += htmlHead("Info");
