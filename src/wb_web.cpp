@@ -1072,7 +1072,13 @@ static String normalizeMAC(const String& raw) {
 // 3.0 task #78: extracted body of handleDashboard(). Non-static so
 // the async server can call it. Sync handler trampolines through.
 String wb_buildDashboardPage() {
-    String page = htmlHead("Dashboard");
+    // Pre-reserve to avoid heap-fragmentation panics under concurrent
+    // BLE response parsing — same root cause as the /info crash.
+    // Observed size ~32 KB; 36 KB reserves a single contiguous block
+    // with comfortable headroom.
+    String page;
+    page.reserve(36000);
+    page += htmlHead("Dashboard");
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Dashboard...</div>
 <div id='pg' style='display:none'>
@@ -2067,7 +2073,10 @@ static String _wifiReasonExplain(uint8_t r) {
 
 String wb_buildSetupPage() {
     const WBConfig& cfg = configMgr.get();
-    String page = htmlHead("Setup");
+    // Pre-reserve to avoid heap-fragmentation panics. ~26 KB observed.
+    String page;
+    page.reserve(30000);
+    page += htmlHead("Setup");
     ensureCsrfToken();
 
     page += R"HTML(
@@ -2408,7 +2417,10 @@ static void handleSetup() {
 
 String wb_buildConfigPage() {
     const WBConfig& cfg = configMgr.get();
-    String page = htmlHead("Config");
+    // Pre-reserve to avoid heap-fragmentation panics. ~21 KB observed.
+    String page;
+    page.reserve(24000);
+    page += htmlHead("Config");
 
     page += "<h1>&#x1F527; Configuration</h1>";
 
@@ -3064,7 +3076,10 @@ static void handleNotFound() {
 // ========== PAGE: Sessions Heatmap (/sessions) ==========
 // 3.0 task #78: extracted body so the async server can call it.
 String wb_buildSessionsPage() {
-    String page = htmlHead("Sessions");
+    // Pre-reserve to avoid heap-fragmentation panics.
+    String page;
+    page.reserve(20000);
+    page += htmlHead("Sessions");
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading...</div>
 <div id='pg' style='display:none'>
@@ -3474,7 +3489,10 @@ static void handleSessionsPage() {
 // gate the page behind their own auth helper before invoking the
 // builder.
 String wb_buildOtaPage() {
-    String page = htmlHead("Firmware Update");
+    // Pre-reserve to avoid heap-fragmentation panics. ~17 KB observed.
+    String page;
+    page.reserve(20000);
+    page += htmlHead("Firmware Update");
     page += R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading...</div>
 <div id='pg' style='display:none'>
@@ -3587,7 +3605,10 @@ static void handleOtaPage() {
 // inline lambda in registerRoutes). Both sync and async servers
 // auth-check separately and then trampoline through this builder.
 String wb_buildLogsPage() {
-    String page = htmlHead("Logs");
+    // Pre-reserve to avoid heap-fragmentation panics. ~14 KB observed.
+    String page;
+    page.reserve(16000);
+    page += htmlHead("Logs");
     page += "<h1>&#x1F4DC; Gateway Log <span id='log-state' style='font-size:.55em;vertical-align:middle;margin-left:8px;padding:3px 8px;border-radius:10px;background:rgba(34,197,94,.15);color:#22c55e'>online</span></h1>";
     page += "<p style='color:var(--text3);font-size:.82em'>Last 16 KB of serial/telnet output. Auto-refreshes every 3s; scroll-locks to bottom unless you scroll up. Persists across page reloads, wiped on reboot.</p>";
     page += "<div style='margin-bottom:8px'>";

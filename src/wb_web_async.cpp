@@ -22,6 +22,7 @@
 #include "wb_version.h"    // WB_VERSION for OTA history records
 #include <Update.h>         // ESP32 Arduino OTA write API
 #include <esp_ota_ops.h>    // esp_ota_get_next_update_partition for size check
+#include <esp_heap_caps.h>  // heap_caps_get_largest_free_block for /api/health
 #include <WiFi.h>
 #include <functional>
 
@@ -178,6 +179,13 @@ static void _registerReadOnlyRoutes() {
         doc["tokens"]         = wb_web_tokens_remaining();
         doc["loop_max_ms"]    = (uint32_t)g_loopMaxMs;
         doc["heap_free"]      = (uint32_t)ESP.getFreeHeap();
+        // Largest contiguous free block — drops below heap_free under
+        // fragmentation, which is what triggers OOM panics for the
+        // big page builders even when total free heap looks fine.
+        // Aim to keep this above ~40 KB; below 20 KB is danger zone.
+        doc["heap_largest"]   = (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        // Lifetime minimum — the absolute worst-case dip since boot.
+        doc["heap_min_ever"]  = (uint32_t)ESP.getMinFreeHeap();
         doc["uptime"]         = (uint32_t)(millis() / 1000);
         doc["ota_proven"]     = wb_health::otaProven();
         doc["ota_min_uptime"] = wb_health::effectiveOtaMinUptimeMs() / 1000;
