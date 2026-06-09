@@ -103,7 +103,13 @@ int wb_web_tokens_remaining();
 
 static void publishGatewayInfo() {
     if (!wallboxMQTT.isConnected()) return;
-    String json = "{\"rssi\":";
+    // Pre-reserve so the ~50 += appends below don't churn the heap
+    // every 60 s on the main task. Observed size ~700-900 bytes;
+    // 1024 covers comfortably with no realloc. Flagged by audit
+    // (task #108) — same antipattern as wb_buildInfoPage etc.
+    String json;
+    json.reserve(1024);
+    json = "{\"rssi\":";
     json += String(wallboxBLE.rssi());
     json += ",\"ble_state\":\"";
     json += wallboxBLE.stateStr();

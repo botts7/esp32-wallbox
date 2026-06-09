@@ -715,7 +715,13 @@ static void handleWifiScan() {
 // JSON shape on its port without duplicating the field list. The
 // sync handler below is now a one-line trampoline.
 String wb_buildStatusJson() {
-    String json = "{";
+    // Pre-reserve to avoid the +=-chain realloc churn flagged by the
+    // audit (task #108). Observed payload ~550 bytes; 1 KB covers it
+    // with headroom for the longer chg_* string fields that show up
+    // on a fully-paired charger.
+    String json;
+    json.reserve(1024);
+    json = "{";
     json += "\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") + "\"";
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
     json += ",\"ssid\":\"" + WiFi.SSID() + "\"";
@@ -819,6 +825,12 @@ String wb_buildDiagRuntimeJson() {
     body += ",\"loop_stack_hwm\":";
     TaskHandle_t arduinoLoop = xTaskGetHandle("loopTask");
     body += arduinoLoop ? String(uxTaskGetStackHighWaterMark(arduinoLoop)) : String("null");
+    // AsyncTCP task HWM — audit task #109. Proves the async stack
+    // isn't a hidden bottleneck under big-page-build load. Name from
+    // ESPAsyncTCP / AsyncTCP fork's xTaskCreatePinnedToCore call.
+    body += ",\"async_stack_hwm\":";
+    TaskHandle_t asyncTcp = xTaskGetHandle("async_tcp");
+    body += asyncTcp ? String(uxTaskGetStackHighWaterMark(asyncTcp)) : String("null");
     body += ",\"uptime_s\":" + String(millis() / 1000);
     body += "}";
     return body;
@@ -3751,15 +3763,6 @@ static void handleOtaUpload() {
         // time — bad for a streaming OTA TCP upload.
         wallboxBLE.pause(5 * 60 * 1000);  // 5 min — auto-resumes after
 
-        // Extend the Task Watchdog timeout to cover the blocking flash
-        // erase that's about to happen inside Update.begin(). On an empty
-        // / fully-used OTA partition the erase can take 10+ seconds, well
-        // beyond the default 5s WDT — which would otherwise panic-reboot
-        // mid-upload (reported by peter-mcc in #4). Restored on FILE_END
-        // and ABORTED so a failed OTA doesn't leave the WDT permanently
-        // relaxed — see wb_watchdog.h.
-        wb_wdt::extendTo(60);
-
         // Use the HTTP Content-Length to size Update.begin() — this
         // erases only as much as needed instead of the whole 1.9 MB
         // partition. Browser-side time-to-first-byte is much shorter.
@@ -3775,6 +3778,8 @@ static void handleOtaUpload() {
         }
         // Sanity: Content-Length must fit the OTA partition with some margin.
         // Refusing here means we never erase if the upload is clearly bogus.
+        // Done BEFORE extending the WDT so an early-return here doesn't
+        // leave the watchdog permanently relaxed (task #106 audit fix).
         if (partition && expected > 0 && expected > partition->size) {
             Log.printf("[OTA] REJECTED: payload (%u) larger than partition (%u)\n",
                        (unsigned)expected, (unsigned)partition->size);
@@ -3784,9 +3789,23 @@ static void handleOtaUpload() {
         }
         expectedOtaSize = expected;
 
+        // Extend the Task Watchdog timeout to cover the blocking flash
+        // erase inside Update.begin(). On an empty / fully-used OTA
+        // partition the erase can take 10+ seconds, well beyond the
+        // default 5s WDT — which would otherwise panic-reboot mid-upload
+        // (reported by peter-mcc in #4). Restored on FILE_END / ABORTED
+        // so a failed OTA doesn't leave the WDT permanently relaxed —
+        // and if Update.begin() itself fails, we restore inline before
+        // returning so the watchdog isn't leaked.
+        wb_wdt::extendTo(60);
+
         bool ok = expected > 0 ? Update.begin(expected) : Update.begin(UPDATE_SIZE_UNKNOWN);
         if (!ok) {
             Log.printf("[OTA] Begin failed: %s\n", Update.errorString());
+            // Restore here — the upload is dead and FILE_END/ABORTED
+            // may not fire to do it later. Idempotent if FILE_END
+            // still runs.
+            wb_wdt::restore();
             otaError = true;
         } else if (http.hasHeader("X-Firmware-MD5")) {
             // Optional end-to-end integrity check. When supplied, the

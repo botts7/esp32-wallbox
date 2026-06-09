@@ -1067,13 +1067,15 @@ static void _registerOtaRoute() {
                 otaInProgress = true;
 
                 wallboxBLE.pause(5 * 60 * 1000);  // 5 min
-                wb_wdt::extendTo(60);  // erase can take >5 s
 
                 size_t expected = (size_t)req->contentLength();
                 expectedOtaSize = expected;
 
                 const esp_partition_t* partition =
                     esp_ota_get_next_update_partition(NULL);
+                // Size sanity-check BEFORE extending the WDT so an early
+                // return here doesn't leak the relaxed timeout (task
+                // #106 audit fix).
                 if (partition && expected > 0 &&
                         expected > partition->size) {
                     Log.printf("[OTA-async] REJECTED: payload (%u) "
@@ -1085,12 +1087,17 @@ static void _registerOtaRoute() {
                     return;
                 }
 
+                wb_wdt::extendTo(60);  // erase can take >5 s
+
                 bool ok = expected > 0
                     ? Update.begin(expected)
                     : Update.begin(UPDATE_SIZE_UNKNOWN);
                 if (!ok) {
                     Log.printf("[OTA-async] Begin failed: %s\n",
                         Update.errorString());
+                    // Restore before returning — `final` may not fire to
+                    // clean up later. Idempotent if it does.
+                    wb_wdt::restore();
                     _asyncOtaError = true;
                     return;
                 }
