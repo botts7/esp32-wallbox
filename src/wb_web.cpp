@@ -787,21 +787,55 @@ static void handleBlePause() {
 static String _cachedStatus = "null";
 static String _cachedRealtime = "null";
 static uint32_t _cacheTime = 0;
+// Cross-task mutex (audit task #107). updateCache() runs on the
+// main task; wb_buildChargerJson() runs on the AsyncTCP task. Arduino
+// String is not thread-safe — a reader landing mid-realloc sees a torn
+// inner-buffer pointer + length, returning malformed JSON to the
+// dashboard (caught harmlessly by JS try/catch, but it IS a real race).
+// Lazy-init: created on first updateCache(). Same pattern as
+// WallboxBLE::_cacheMutex.
+static SemaphoreHandle_t _cacheMutex = nullptr;
 
 void WBWebServer::updateCache(const String& status, const String& realtime) {
+    if (!_cacheMutex) _cacheMutex = xSemaphoreCreateMutex();
+    if (_cacheMutex && xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        // Couldn't take in 50 ms — reader is iterating. Skip this
+        // update; next call will retry. Better than blocking the
+        // main task on a contended reader.
+        return;
+    }
     if (!status.isEmpty()) _cachedStatus = status;
     if (!realtime.isEmpty()) _cachedRealtime = realtime;
     _cacheTime = millis();
+    if (_cacheMutex) xSemaphoreGive(_cacheMutex);
 }
 
 // 3.0 task #78: same extraction pattern as wb_buildStatusJson —
 // non-static so the async server can call it.
 String wb_buildChargerJson() {
-    // Always return cached data instantly — never block on BLE
-    return "{\"status\":" + _cachedStatus +
-           ",\"realtime\":" + _cachedRealtime +
+    // Always return cached data instantly — never block on BLE.
+    // Hold the mutex just long enough to snapshot the two Strings;
+    // the response build happens after release so the lock is held
+    // for a few microseconds.
+    String status = "null", realtime = "null";
+    uint32_t cacheTime = 0;
+    if (_cacheMutex && xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        status = _cachedStatus;
+        realtime = _cachedRealtime;
+        cacheTime = _cacheTime;
+        xSemaphoreGive(_cacheMutex);
+    } else {
+        // Mutex unavailable (early boot before first updateCache, or
+        // updateCache holding it): serve last best-effort copy. Race
+        // is the original known issue, but at least we don't block.
+        status = _cachedStatus;
+        realtime = _cachedRealtime;
+        cacheTime = _cacheTime;
+    }
+    return "{\"status\":" + status +
+           ",\"realtime\":" + realtime +
            ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"" +
-           ",\"cache_age\":" + String((millis() - _cacheTime) / 1000) + "}";
+           ",\"cache_age\":" + String((millis() - cacheTime) / 1000) + "}";
 }
 
 static void handleApiCharger() {
