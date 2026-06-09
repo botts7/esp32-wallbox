@@ -26,6 +26,15 @@ uint8_t bootCountBumpAndRead();
 // newest first.
 void recordBootReason();
 
+// Crash-trace breadcrumbs. Three small string fields + a loop counter
+// live in RTC NOINIT memory: not initialised on warm reboot, so they
+// survive a panic. Update at the entry of HTTP handlers, BLE TX, and
+// each main-loop tick; recordBootReason() captures the snapshot on the
+// next boot when the prior reset was a panic/watchdog.
+void setBreadcrumbPath(const char* path);
+void setBreadcrumbBapi(const char* met);
+void bumpBreadcrumbLoop();
+
 // Get current boot's reset reason as a short string ("power-on",
 // "panic", "task-wdt", "brownout", "external", "software", ...).
 const char* currentBootReasonStr();

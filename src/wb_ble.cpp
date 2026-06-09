@@ -1,6 +1,7 @@
 #include "wb_ble.h"
 #include "wb_log.h"
 #include "wb_config.h"
+#include "wb_health.h"
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 
@@ -1065,6 +1066,11 @@ uint32_t WallboxBLE::enqueueRequest(const char* met, const char* par,
 }
 
 String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t timeoutMs) {
+    // Crash-trace breadcrumb: record the BAPI method we're about to
+    // write so a panic in BLE-write land tells us which command was
+    // in flight. RTC NOINIT survives the reset.
+    wb_health::setBreadcrumbBapi(met);
+
     // Serialise BAPI commands across tasks. The BLE task's own keepalive
     // and the Arduino main task's polls can both end up here — without
     // this mutex, two writeValue() calls on _chr could race and corrupt

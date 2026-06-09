@@ -500,6 +500,7 @@ static void _registerHtmlPages() {
 
     // GET /info — diagnostics + charger info.
     _async.on("/info", HTTP_GET, [](AsyncWebServerRequest* req) {
+        wb_health::setBreadcrumbPath("/info");
         req->send(200, "text/html", wb_buildInfoPage());
     });
 
@@ -674,6 +675,12 @@ static void _registerBleRoutes() {
         // Resolve action -> met + par.
         String action = req->hasParam("action")
             ? req->getParam("action")->value() : String("");
+        // Crash-trace breadcrumb: record the action so a panic in
+        // command dispatch land tells us which one was in flight.
+        {
+            String trace = "/api/command?action=" + action;
+            wb_health::setBreadcrumbPath(trace.c_str());
+        }
         String value = req->hasParam("value")
             ? req->getParam("value")->value() : String("");
         const char* met = nullptr;

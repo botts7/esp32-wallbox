@@ -399,6 +399,12 @@ void loop() {
         g_loopLastMs = now;
     }
 
+    // Crash-trace breadcrumb: bump the loop counter every iteration.
+    // On a panic, the counter that survives in RTC NOINIT memory tells
+    // us roughly when in the boot we crashed (high count = late, low
+    // count = early). Negligible cost — single non-atomic increment.
+    wb_health::bumpBreadcrumbLoop();
+
     // Always run web server + OTA + telnet
     ArduinoOTA.handle();
     webServer.loop();

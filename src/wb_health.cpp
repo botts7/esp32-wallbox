@@ -40,6 +40,41 @@ static const char* NVS_BOOT_HIST = "boot_hist";  // JSON array of recent boot re
 static const uint8_t BOOT_HIST_MAX = 10;
 static esp_reset_reason_t _thisBootReason = ESP_RST_UNKNOWN;
 
+// Crash-trace breadcrumbs in RTC NOINIT memory. Survive panic +
+// warm-boot; lost on cold power-on (acceptable: a cold start has no
+// previous crash to attribute to). Magic verifies the struct wasn't
+// trampled by an unrelated RTC NOINIT consumer.
+static const uint32_t WB_BC_MAGIC = 0xB12EAD0FUL;  // "B12EAD0F" — breadcrumb tag
+
+typedef struct {
+    uint32_t magic;
+    char     path[32];     // last HTTP request path (truncated)
+    char     bapi[16];     // last BAPI met submitted to BLE worker
+    uint32_t loop_count;   // main-loop tick counter
+    uint8_t  reserved[4];
+} __attribute__((packed)) WBBreadcrumbs;
+
+static RTC_NOINIT_ATTR WBBreadcrumbs _bc;
+// Cache the previous-boot snapshot so /api/boot/history can surface it.
+static WBBreadcrumbs _bcSnapshot = {};
+static bool          _bcSnapshotValid = false;
+
+void setBreadcrumbPath(const char* path) {
+    if (!path) return;
+    size_t n = strnlen(path, sizeof(_bc.path) - 1);
+    memcpy(_bc.path, path, n);
+    _bc.path[n] = '\0';
+}
+
+void setBreadcrumbBapi(const char* met) {
+    if (!met) return;
+    size_t n = strnlen(met, sizeof(_bc.bapi) - 1);
+    memcpy(_bc.bapi, met, n);
+    _bc.bapi[n] = '\0';
+}
+
+void bumpBreadcrumbLoop() { _bc.loop_count++; }
+
 const char* currentBootReasonStr() {
     switch (_thisBootReason) {
         case ESP_RST_POWERON:   return "power-on";
@@ -60,6 +95,29 @@ void recordBootReason() {
     _thisBootReason = esp_reset_reason();
     Log.printf("[Health] Boot reset reason: %s\n", currentBootReasonStr());
 
+    // Snapshot the RTC NOINIT breadcrumbs from the previous boot BEFORE
+    // we overwrite them with this boot's identity. If the magic matches,
+    // the previous boot left a valid trail. Surface only on crash-class
+    // reasons so a clean software-restart doesn't blame the last action.
+    bool crashClass = (_thisBootReason == ESP_RST_PANIC ||
+                       _thisBootReason == ESP_RST_INT_WDT ||
+                       _thisBootReason == ESP_RST_TASK_WDT ||
+                       _thisBootReason == ESP_RST_WDT ||
+                       _thisBootReason == ESP_RST_BROWNOUT);
+    if (_bc.magic == WB_BC_MAGIC && crashClass) {
+        _bcSnapshot = _bc;
+        _bcSnapshotValid = true;
+        // Defensive null-termination — the strings should already be
+        // terminated, but RTC RAM can corrupt under brownout.
+        _bcSnapshot.path[sizeof(_bcSnapshot.path) - 1] = '\0';
+        _bcSnapshot.bapi[sizeof(_bcSnapshot.bapi) - 1] = '\0';
+        Log.printf("[Health] Previous-boot breadcrumbs — last path: '%s'  last BAPI: '%s'  loop count: %u\n",
+                   _bcSnapshot.path, _bcSnapshot.bapi, (unsigned)_bcSnapshot.loop_count);
+    }
+    // Re-arm the breadcrumbs for THIS boot.
+    memset(&_bc, 0, sizeof(_bc));
+    _bc.magic = WB_BC_MAGIC;
+
     Preferences p;
     if (!p.begin(NVS_NS, false)) return;
     String s = p.getString(NVS_BOOT_HIST, "[]");
@@ -72,6 +130,15 @@ void recordBootReason() {
     JsonObject e = arr.add<JsonObject>();
     e["reason"] = currentBootReasonStr();
     e["raw"]    = (int)_thisBootReason;
+    if (_bcSnapshotValid) {
+        // Persist the breadcrumb trail next to the boot reason so /info
+        // can show "panic at last path X, last BAPI Y" without a serial
+        // console. Truncated to fit comfortably in the NVS slot.
+        JsonObject bc = e["bc"].to<JsonObject>();
+        bc["path"]       = _bcSnapshot.path;
+        bc["bapi"]       = _bcSnapshot.bapi;
+        bc["loop_count"] = _bcSnapshot.loop_count;
+    }
     // `at` is wall-clock epoch when first observed by SNTP. NTP hasn't
     // synced yet at recordBootReason() time (very early setup), so seed
     // 0 here. updateBootTimeIfPossible() patches it once NTP comes up.

@@ -2557,7 +2557,16 @@ static void handleConfig() {
 // ========== PAGE 4: Info (/info) ==========
 // 3.0 task #78: extracted body so the async server can call it.
 String wb_buildInfoPage() {
-    String page = htmlHead("Info");
+    // Pre-reserve the final ~34 KB so the String += chain doesn't churn
+    // the heap with growing-and-copying reallocations under concurrent
+    // BLE response parsing on another task. Reproducer: /info + r_dca
+    // poll racing -> panic. The 40 KB reserve gives headroom over the
+    // observed page size while still being a single contiguous block
+    // we'd want available anyway. (Captured via crash-trace breadcrumb:
+    // path=/info, bapi=r_dca.)
+    String page;
+    page.reserve(40000);
+    page += htmlHead("Info");
     // CSRF token needed by interactive JS (e.g. clearDiag) — injected
     // here so the page-body raw string can stay static.
     page += "<script>window.WB_CSRF='" + csrfToken + "';</script>";
