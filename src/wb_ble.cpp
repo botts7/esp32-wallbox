@@ -4,6 +4,7 @@
 #include "wb_health.h"
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
+#include <utility>  // std::move
 
 WallboxBLE wallboxBLE;
 WallboxBLE* WallboxBLE::_instance = nullptr;
@@ -929,7 +930,13 @@ void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_
 
     bool complete = _instance->_parser.feed(data, len);
     if (complete) {
-        _instance->_lastResponse = _instance->_parser.json();
+        // Move-out: ownership of the parser's accumulated buffer
+        // transfers to _lastResponse instead of being copied. Cuts
+        // the BAPI response pipeline from 3-4 simultaneous String
+        // copies down to 2 (parser->_lastResponse->caller). The
+        // remaining copy is the caller's `resp` in _sendCommandDirect
+        // which a v3.1 follow-up will also collapse.
+        _instance->_lastResponse = _instance->_parser.takeBuffer();
         _instance->_responseReady = true;
         _instance->_seenBapiThisConnection = true;
         if (_instance->_responseCb) {
@@ -1135,9 +1142,14 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
     }
 
     Log.printf("[BLE] RX %s (%d bytes)\n", met, _lastResponse.length());
-    String resp = _lastResponse;
+    // Move ownership of the response buffer out instead of copying.
+    // _cmdMutex serialises BAPI calls, so _lastResponse is exclusively
+    // ours from notify-completion until the next reset(). After this
+    // move, _lastResponse is empty; the next BAPI request will
+    // overwrite via takeBuffer() in the notify callback.
+    String resp = std::move(_lastResponse);
     if (_cmdMutex) xSemaphoreGive(_cmdMutex);
-    return resp;
+    return resp;  // RVO + move = zero additional copies on the return
 }
 
 // 2.7.0 step 4 — public sendCommand is now a thin wrapper around

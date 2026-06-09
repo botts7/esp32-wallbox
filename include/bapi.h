@@ -27,10 +27,21 @@ public:
     bool feed(const uint8_t* data, size_t len);
     // Get the parsed JSON string (valid after feed() returns true)
     const String& json() const { return _buf; }
+    // Move-out accessor: hands ownership of the accumulated buffer to
+    // the caller (typically WallboxBLE::_lastResponse) and resets the
+    // parser state for the next response. Eliminates the copy that
+    // used to happen in the BLE notify callback. Foundation fix for
+    // the multi-copy BAPI response pipeline that caused the /info OOM.
+    String takeBuffer();
     // Get response ID (-1 if not found)
     int responseId() const;
     // Check if response is an error
     bool isError() const;
+    // Reserve capacity for the accumulation buffer (default 4 KB
+    // covers the typical r_dca / r_sta response without grow-and-copy
+    // reallocations during feed(). Larger responses — r_log, r_schs —
+    // grow normally from here. Called by reset() with the default size.
+    static constexpr size_t kReserveBytes = 4096;
 private:
     String _buf;
     int _braceDepth = 0;
