@@ -194,6 +194,45 @@ static void populateDeviceBlock(JsonObject dev) {
     }
 }
 
+// ---- Shared discovery payload buffer ----
+//
+// Foundation fix (task #105) for the MQTT-discovery boot-time
+// fragmentation source. The 5 publishDiscovery* helpers used to do
+// `JsonDocument doc; String payload; serializeJson(doc, payload);`
+// per entity — 59 alloc/free cycles in ~60 s right when WiFi + BLE
+// + web server are also fighting for heap. Audit measured ~120 KB
+// of churn over that window.
+//
+// Replacement: two file-static instances reused across every
+// publish. JsonDocument keeps its allocator pool across clear();
+// the String keeps its reserved capacity across `= ""`. Permanent
+// RAM cost ~2 KB; boot-time alloc churn eliminated.
+//
+// Single-thread safety: discovery publishes only run from the main
+// task's tickDiscovery() drain (one-publish-per-tick rate-limited
+// since task #74). No concurrency on these statics.
+namespace {
+JsonDocument g_discDoc;
+String       g_discPayload;
+bool         g_discReserved = false;
+
+void _discPrep() {
+    if (!g_discReserved) {
+        g_discPayload.reserve(1024);
+        g_discReserved = true;
+    }
+    g_discDoc.clear();
+    g_discPayload = "";  // clears content; capacity preserved
+}
+
+void _discSerializeAndPublish(PubSubClient& mqtt, const String& topic) {
+    serializeJson(g_discDoc, g_discPayload);
+    mqtt.beginPublish(topic.c_str(), g_discPayload.length(), true);
+    mqtt.print(g_discPayload);
+    mqtt.endPublish();
+}
+}  // anonymous namespace
+
 static void publishDiscoveryEntity(PubSubClient& mqtt, const char* component,
     const char* objectId, const char* name, const char* icon,
     const char* stateTopic, const char* valTemplate,
@@ -204,40 +243,36 @@ static void publishDiscoveryEntity(PubSubClient& mqtt, const char* component,
     const WBConfig& cfg = configMgr.get();
     String topic = cfg.haDiscoveryPrefix + "/" + component + "/" + cfg.haDeviceId + "/" + objectId + "/config";
 
-    JsonDocument doc;
-    doc["name"] = name;
-    doc["unique_id"] = cfg.haDeviceId + "_" + objectId;
+    _discPrep();
+    g_discDoc["name"] = name;
+    g_discDoc["unique_id"] = cfg.haDeviceId + "_" + objectId;
     // HA Core 2026.4 removed `object_id` from the MQTT discovery schema —
     // replaced by `default_entity_id`, which must include the platform
     // prefix (e.g. "sensor.wallbox_pulsar_max_chg_power"). Pre-existing
     // entities aren't renamed; `default_entity_id` only sets the default
     // for first-registration.
-    doc["default_entity_id"] = String(component) + "." + cfg.haDeviceId + "_" + objectId;
-    doc["state_topic"] = stateTopic;
-    doc["value_template"] = valTemplate;
-    doc["availability_topic"] = availTopic();
-    if (icon) doc["icon"] = icon;
-    if (unit) doc["unit_of_measurement"] = unit;
-    if (devClass) doc["device_class"] = devClass;
-    if (stateClass) doc["state_class"] = stateClass;
-    if (cmdTopic) doc["command_topic"] = cmdTopic;
+    g_discDoc["default_entity_id"] = String(component) + "." + cfg.haDeviceId + "_" + objectId;
+    g_discDoc["state_topic"] = stateTopic;
+    g_discDoc["value_template"] = valTemplate;
+    g_discDoc["availability_topic"] = availTopic();
+    if (icon) g_discDoc["icon"] = icon;
+    if (unit) g_discDoc["unit_of_measurement"] = unit;
+    if (devClass) g_discDoc["device_class"] = devClass;
+    if (stateClass) g_discDoc["state_class"] = stateClass;
+    if (cmdTopic) g_discDoc["command_topic"] = cmdTopic;
     // HA recognises entity_category="diagnostic" — collapses these
     // entities into a separate "Diagnostic" section on the device
     // page, out of the main Sensors / Controls list. Use for
     // observability counters (max_reentry, loop_max_ms, heap_free,
     // etc.) that are useful for debugging but not for normal use.
-    if (entityCategory) doc["entity_category"] = entityCategory;
+    if (entityCategory) g_discDoc["entity_category"] = entityCategory;
 
     // Device block — populated by the shared helper so every helper
     // emits the same fields. See populateDeviceBlock() comment for
     // what's in there. No via_device — the ESP32 gateway IS the device.
-    populateDeviceBlock(doc["device"].to<JsonObject>());
+    populateDeviceBlock(g_discDoc["device"].to<JsonObject>());
 
-    String payload;
-    serializeJson(doc, payload);
-    mqtt.beginPublish(topic.c_str(), payload.length(), true);
-    mqtt.print(payload);
-    mqtt.endPublish();
+    _discSerializeAndPublish(mqtt, topic);
 }
 
 static void publishDiscoverySwitch(PubSubClient& mqtt, const char* objectId,
@@ -249,29 +284,25 @@ static void publishDiscoverySwitch(PubSubClient& mqtt, const char* objectId,
     const WBConfig& cfg = configMgr.get();
     String topic = cfg.haDiscoveryPrefix + "/switch/" + cfg.haDeviceId + "/" + objectId + "/config";
 
-    JsonDocument doc;
-    doc["name"] = name;
-    doc["unique_id"] = cfg.haDeviceId + "_" + objectId;
+    _discPrep();
+    g_discDoc["name"] = name;
+    g_discDoc["unique_id"] = cfg.haDeviceId + "_" + objectId;
     // See publishDiscoveryEntity for the object_id -> default_entity_id
     // migration rationale.
-    doc["default_entity_id"] = String("switch.") + cfg.haDeviceId + "_" + objectId;
-    doc["command_topic"] = cmdTopic;
-    doc["state_topic"] = stateTopic;
-    doc["value_template"] = valTemplate;
-    doc["payload_on"] = payloadOn;
-    doc["payload_off"] = payloadOff;
-    doc["state_on"] = stateOn;
-    doc["state_off"] = stateOff;
-    doc["availability_topic"] = availTopic();
-    if (icon) doc["icon"] = icon;
+    g_discDoc["default_entity_id"] = String("switch.") + cfg.haDeviceId + "_" + objectId;
+    g_discDoc["command_topic"] = cmdTopic;
+    g_discDoc["state_topic"] = stateTopic;
+    g_discDoc["value_template"] = valTemplate;
+    g_discDoc["payload_on"] = payloadOn;
+    g_discDoc["payload_off"] = payloadOff;
+    g_discDoc["state_on"] = stateOn;
+    g_discDoc["state_off"] = stateOff;
+    g_discDoc["availability_topic"] = availTopic();
+    if (icon) g_discDoc["icon"] = icon;
 
-    populateDeviceBlock(doc["device"].to<JsonObject>());
+    populateDeviceBlock(g_discDoc["device"].to<JsonObject>());
 
-    String payload;
-    serializeJson(doc, payload);
-    mqtt.beginPublish(topic.c_str(), payload.length(), true);
-    mqtt.print(payload);
-    mqtt.endPublish();
+    _discSerializeAndPublish(mqtt, topic);
 }
 
 static void publishDiscoveryNumber(PubSubClient& mqtt, const char* objectId,
@@ -283,33 +314,29 @@ static void publishDiscoveryNumber(PubSubClient& mqtt, const char* objectId,
     const WBConfig& cfg = configMgr.get();
     String topic = cfg.haDiscoveryPrefix + "/number/" + cfg.haDeviceId + "/" + objectId + "/config";
 
-    JsonDocument doc;
-    doc["name"] = name;
-    doc["unique_id"] = cfg.haDeviceId + "_" + objectId;
+    _discPrep();
+    g_discDoc["name"] = name;
+    g_discDoc["unique_id"] = cfg.haDeviceId + "_" + objectId;
     // See publishDiscoveryEntity for the object_id -> default_entity_id
     // migration rationale.
-    doc["default_entity_id"] = String("number.") + cfg.haDeviceId + "_" + objectId;
-    doc["command_topic"] = cmdTopic;
-    doc["state_topic"] = stateTopic;
-    doc["value_template"] = valTemplate;
-    doc["min"] = minVal;
-    doc["max"] = maxVal;
-    doc["step"] = step;
-    doc["availability_topic"] = availTopic();
-    if (icon) doc["icon"] = icon;
-    if (unit) doc["unit_of_measurement"] = unit;
+    g_discDoc["default_entity_id"] = String("number.") + cfg.haDeviceId + "_" + objectId;
+    g_discDoc["command_topic"] = cmdTopic;
+    g_discDoc["state_topic"] = stateTopic;
+    g_discDoc["value_template"] = valTemplate;
+    g_discDoc["min"] = minVal;
+    g_discDoc["max"] = maxVal;
+    g_discDoc["step"] = step;
+    g_discDoc["availability_topic"] = availTopic();
+    if (icon) g_discDoc["icon"] = icon;
+    if (unit) g_discDoc["unit_of_measurement"] = unit;
     // HA's "box" mode renders an exact-value input field; default is a
     // slider. Used by the Auto Lock Timeout entity so users can type
     // 5/10/30 directly instead of dragging across a 60-step range.
-    if (mode) doc["mode"] = mode;
+    if (mode) g_discDoc["mode"] = mode;
 
-    populateDeviceBlock(doc["device"].to<JsonObject>());
+    populateDeviceBlock(g_discDoc["device"].to<JsonObject>());
 
-    String payload;
-    serializeJson(doc, payload);
-    mqtt.beginPublish(topic.c_str(), payload.length(), true);
-    mqtt.print(payload);
-    mqtt.endPublish();
+    _discSerializeAndPublish(mqtt, topic);
 }
 
 static void publishDiscoveryButton(PubSubClient& mqtt, const char* objectId,
@@ -319,24 +346,20 @@ static void publishDiscoveryButton(PubSubClient& mqtt, const char* objectId,
     const WBConfig& cfg = configMgr.get();
     String topic = cfg.haDiscoveryPrefix + "/button/" + cfg.haDeviceId + "/" + objectId + "/config";
 
-    JsonDocument doc;
-    doc["name"] = name;
-    doc["unique_id"] = cfg.haDeviceId + "_" + objectId;
+    _discPrep();
+    g_discDoc["name"] = name;
+    g_discDoc["unique_id"] = cfg.haDeviceId + "_" + objectId;
     // See publishDiscoveryEntity for the object_id -> default_entity_id
     // migration rationale.
-    doc["default_entity_id"] = String("button.") + cfg.haDeviceId + "_" + objectId;
-    doc["command_topic"] = cmdTopic;
-    doc["payload_press"] = payload_press;
-    doc["availability_topic"] = availTopic();
-    if (icon) doc["icon"] = icon;
+    g_discDoc["default_entity_id"] = String("button.") + cfg.haDeviceId + "_" + objectId;
+    g_discDoc["command_topic"] = cmdTopic;
+    g_discDoc["payload_press"] = payload_press;
+    g_discDoc["availability_topic"] = availTopic();
+    if (icon) g_discDoc["icon"] = icon;
 
-    populateDeviceBlock(doc["device"].to<JsonObject>());
+    populateDeviceBlock(g_discDoc["device"].to<JsonObject>());
 
-    String payload;
-    serializeJson(doc, payload);
-    mqtt.beginPublish(topic.c_str(), payload.length(), true);
-    mqtt.print(payload);
-    mqtt.endPublish();
+    _discSerializeAndPublish(mqtt, topic);
 }
 
 // Select entity (dropdown) — for Eco Smart mode, Halo LED, Timezone
@@ -348,28 +371,24 @@ static void publishDiscoverySelect(PubSubClient& mqtt, const char* objectId,
     const WBConfig& cfg = configMgr.get();
     String topic = cfg.haDiscoveryPrefix + "/select/" + cfg.haDeviceId + "/" + objectId + "/config";
 
-    JsonDocument doc;
-    doc["name"] = name;
-    doc["unique_id"] = cfg.haDeviceId + "_" + objectId;
+    _discPrep();
+    g_discDoc["name"] = name;
+    g_discDoc["unique_id"] = cfg.haDeviceId + "_" + objectId;
     // See publishDiscoveryEntity for the object_id -> default_entity_id
     // migration rationale.
-    doc["default_entity_id"] = String("select.") + cfg.haDeviceId + "_" + objectId;
-    doc["command_topic"] = cmdTopic;
-    doc["state_topic"] = stateTopic;
-    doc["value_template"] = valTemplate;
-    doc["availability_topic"] = availTopic();
-    if (icon) doc["icon"] = icon;
+    g_discDoc["default_entity_id"] = String("select.") + cfg.haDeviceId + "_" + objectId;
+    g_discDoc["command_topic"] = cmdTopic;
+    g_discDoc["state_topic"] = stateTopic;
+    g_discDoc["value_template"] = valTemplate;
+    g_discDoc["availability_topic"] = availTopic();
+    if (icon) g_discDoc["icon"] = icon;
 
-    JsonArray opts = doc["options"].to<JsonArray>();
+    JsonArray opts = g_discDoc["options"].to<JsonArray>();
     for (int i = 0; i < optionCount; i++) opts.add(options[i]);
 
-    populateDeviceBlock(doc["device"].to<JsonObject>());
+    populateDeviceBlock(g_discDoc["device"].to<JsonObject>());
 
-    String payload;
-    serializeJson(doc, payload);
-    mqtt.beginPublish(topic.c_str(), payload.length(), true);
-    mqtt.print(payload);
-    mqtt.endPublish();
+    _discSerializeAndPublish(mqtt, topic);
 }
 
 // ---- MQTT Implementation ----
@@ -1283,24 +1302,22 @@ void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
                 const WBConfig& bsCfg = configMgr.get();
                 String topic = bsCfg.haDiscoveryPrefix + "/binary_sensor/"
                              + bsCfg.haDeviceId + "/car_connected/config";
-                JsonDocument doc;
-                doc["name"] = "Car Connected";
-                doc["unique_id"] = bsCfg.haDeviceId + "_car_connected";
+                // Use the shared discovery buffer (task #105) instead
+                // of a fresh JsonDocument + String per call.
+                _discPrep();
+                g_discDoc["name"] = "Car Connected";
+                g_discDoc["unique_id"] = bsCfg.haDeviceId + "_car_connected";
                 // See publishDiscoveryEntity for the object_id ->
                 // default_entity_id migration rationale.
-                doc["default_entity_id"] = String("binary_sensor.") + bsCfg.haDeviceId + "_car_connected";
-                doc["state_topic"] = baseTopic() + "/car_connected";
-                doc["payload_on"] = "ON";
-                doc["payload_off"] = "OFF";
-                doc["device_class"] = "plug";
-                doc["availability_topic"] = availTopic();
-                doc["icon"] = "mdi:ev-plug-type2";
-                populateDeviceBlock(doc["device"].to<JsonObject>());
-                String pl;
-                serializeJson(doc, pl);
-                _client->beginPublish(topic.c_str(), pl.length(), true);
-                _client->print(pl);
-                _client->endPublish();
+                g_discDoc["default_entity_id"] = String("binary_sensor.") + bsCfg.haDeviceId + "_car_connected";
+                g_discDoc["state_topic"] = baseTopic() + "/car_connected";
+                g_discDoc["payload_on"] = "ON";
+                g_discDoc["payload_off"] = "OFF";
+                g_discDoc["device_class"] = "plug";
+                g_discDoc["availability_topic"] = availTopic();
+                g_discDoc["icon"] = "mdi:ev-plug-type2";
+                populateDeviceBlock(g_discDoc["device"].to<JsonObject>());
+                _discSerializeAndPublish(*_client, topic);
             }
             break;
         case wb_disc::EntityKind::NOOP:
