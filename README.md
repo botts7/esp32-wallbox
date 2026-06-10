@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/branding/logo.png" alt="Wallbox Gateway" width="600">
+</p>
+
 # ESP32 Wallbox BLE Gateway
 
 > **Local BLE → MQTT gateway for the Wallbox Pulsar MAX. Full Home Assistant control with zero cloud, in ~$15 of hardware.**
