@@ -4,7 +4,7 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [3.0.0] - 2026-06-08
+## [3.0.0] - 2026-06-12
 
 The platform release. Three changes worth a major-version bump:
 
@@ -75,6 +75,33 @@ The platform release. Three changes worth a major-version bump:
   HA automations + the dashboard share one code path.
 
 ### Fixed
+
+- **`/info` and `/sessions` served an empty body (0 bytes).** The two
+  largest pages (~34 KB) silently returned `Content-Length: 0`:
+  `req->send(code, type, String)` copies the whole body into the
+  response's own buffer, so two ~40 KB blocks had to be live at once,
+  and the second allocation failed on the fragmented heap. Pages
+  ≤ 32 KB were unaffected, which is why it hid until a full page
+  sweep. Now served via a pull-based filler (`_sendHtmlPage`) that
+  hands the built `String` to a `shared_ptr` and `memcpy`s slices on
+  demand — no second copy. Applied to all seven HTML page builders.
+
+### Stability (rc1 → rc8)
+
+The release-candidate series hardened the async foundations under
+sustained load. Validated at 68 h continuous uptime on a Pulsar Plus
+(1 sub-second MQTT reconnect, 0 WiFi, 0 BLE, 0 main-task stalls);
+live charge / pause / resume confirmed to mirror the official app.
+
+- **BAPI response ownership refactor.** Responses move through the
+  drain path as `shared_ptr<String>` — no copies between the BLE and
+  web/MQTT tasks.
+- **Pre-rendered MQTT discovery payloads** into a shared buffer — no
+  per-publish reallocation flood on the discovery burst.
+- **Cross-task mutex** around the cached status/realtime JSON so the
+  web and BLE tasks can't read a half-written buffer.
+- **WDT-restore leak fixed** in the OTA sync early-return paths.
+- **AsyncTCP task high-water mark** surfaced in `/api/diag/runtime`.
 
 - **Schedule writes** were silently broken since v2.1.0 — the BAPI
   shape diverged from what newer firmware expects. Now uses `s_sch`
