@@ -25,6 +25,7 @@
 #include <esp_heap_caps.h>  // heap_caps_get_largest_free_block for /api/health
 #include <WiFi.h>
 #include <functional>
+#include <memory>
 
 // File-scope (global namespace) externs for the shared CSS/JS
 // literals defined in wb_web.cpp. MUST live outside namespace
@@ -184,6 +185,34 @@ static bool _checkHeapHeadroom(AsyncWebServerRequest* req, size_t need) {
     (void)target;
     req->send(res);
     return false;
+}
+
+// --- Large-HTML-page send helper ---
+//
+// req->send(200, "text/html", bigString) forwards body.c_str() to the
+// const char* overload, which builds an AsyncBasicResponse that COPIES
+// the whole string into its own buffer. That means two ~40 KB blocks
+// must be live at once. On the fragmented heap the second allocation
+// fails for the largest pages (/info 34 KB, /sessions 35 KB) and the
+// response goes out with Content-Length 0 — a silent failure (observed
+// v3.0.0: builder returns 34429 bytes, client receives 0).
+//
+// Instead we hand ownership of the already-built String to a shared_ptr
+// captured by a pull-based filler. AsyncTCP memcpy's slices out on
+// demand; no second full-size allocation ever happens. Pull-based, so
+// unlike AsyncResponseStream's push cbuf (which tripped the task WDT
+// under load — see task #103) the filler just copies from a complete
+// buffer and returns immediately. WDT-safe by construction.
+static void _sendHtmlPage(AsyncWebServerRequest* req, String&& html) {
+    auto body = std::make_shared<String>(std::move(html));
+    const size_t len = body->length();
+    req->send(req->beginResponse("text/html", len,
+        [body](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+            size_t remaining = body->length() - index;
+            size_t n = remaining < maxLen ? remaining : maxLen;
+            if (n) memcpy(buf, body->c_str() + index, n);
+            return n;
+        }));
 }
 
 // --- Auth helper ---
@@ -570,7 +599,7 @@ static void _registerHtmlPages() {
     // identical.
     _async.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkHeapHeadroom(req, 36000)) return;
-        req->send(200, "text/html", wb_buildDashboardPage());
+        _sendHtmlPage(req, wb_buildDashboardPage());
     });
 
     // GET /config — config UI. No auth gate on the page itself
@@ -578,7 +607,7 @@ static void _registerHtmlPages() {
     // for setting up auth in the first place).
     _async.on("/config", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkHeapHeadroom(req, 24000)) return;
-        req->send(200, "text/html", wb_buildConfigPage());
+        _sendHtmlPage(req, wb_buildConfigPage());
     });
 
     // GET /setup — first-time onboarding wizard. Same page builder as
@@ -587,40 +616,39 @@ static void _registerHtmlPages() {
     // dance, or to update creds without diving into /config's tabs).
     _async.on("/setup", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkHeapHeadroom(req, 30000)) return;
-        req->send(200, "text/html", wb_buildSetupPage());
+        _sendHtmlPage(req, wb_buildSetupPage());
     });
 
-    // GET /info — diagnostics + charger info. Heap-guarded so we
-    // 503 + serve the busy page if the contiguous heap block isn't
-    // big enough for the 40 KB pre-reserve. Streaming via
-    // AsyncResponseStream was tried and reverted (task-watchdog
-    // crashes under concurrent load — its cbuf-backed write blocks
-    // the AsyncTCP task too long). See task #103 for the proper
-    // non-blocking chunked-response refactor planned for v3.1.
+    // GET /info — diagnostics + charger info. The largest page (~34 KB).
+    // Heap-guarded so we 503 + serve the busy page if the contiguous
+    // block isn't big enough for the single 40 KB build. Served via
+    // _sendHtmlPage (pull-based filler) so there's no second full-size
+    // copy — that copy is what silently truncated this page to 0 bytes
+    // before the fix (req->send(code,type,String) duplicates the body).
     _async.on("/info", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkHeapHeadroom(req, 40000)) return;
         wb_health::setBreadcrumbPath("/info");
-        req->send(200, "text/html", wb_buildInfoPage());
+        _sendHtmlPage(req, wb_buildInfoPage());
     });
 
     // GET /sessions — charging sessions heatmap.
     _async.on("/sessions", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkHeapHeadroom(req, 20000)) return;
-        req->send(200, "text/html", wb_buildSessionsPage());
+        _sendHtmlPage(req, wb_buildSessionsPage());
     });
 
     // GET /ota — firmware update page. Auth required.
     _async.on("/ota", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
         if (!_checkHeapHeadroom(req, 20000)) return;
-        req->send(200, "text/html", wb_buildOtaPage());
+        _sendHtmlPage(req, wb_buildOtaPage());
     });
 
     // GET /logs — auto-refreshing log viewer. Auth required.
     _async.on("/logs", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
         if (!_checkHeapHeadroom(req, 16000)) return;
-        req->send(200, "text/html", wb_buildLogsPage());
+        _sendHtmlPage(req, wb_buildLogsPage());
     });
 
     // GET /settings/body.gz — pre-gzipped PROGMEM blob (task #75).
@@ -651,7 +679,7 @@ static void _registerHtmlPages() {
     // need chunked encoding here.
     _async.on("/settings", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
-        req->send(200, "text/html", wb_buildSettingsPage());
+        _sendHtmlPage(req, wb_buildSettingsPage());
     });
 }
 
