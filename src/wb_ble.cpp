@@ -466,20 +466,14 @@ void WallboxBLE::_connect() {
             // disconnect needed.
             svc = otherSvc;
         } else {
-            Log.printf("[BLE] Service %s not found\n", _svcUUID.c_str());
-            _client->disconnect();
-            _state = State::ERROR;
-            esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+            _enterConfigMismatch("Service UUID");
             return;
         }
     }
 
     _chr = svc->getCharacteristic(_chrUUID.c_str());
     if (!_chr) {
-        Log.println("[BLE] Characteristic not found");
-        _client->disconnect();
-        _state = State::ERROR;
-        esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+        _enterConfigMismatch("Write characteristic UUID");
         return;
     }
 
@@ -490,10 +484,7 @@ void WallboxBLE::_connect() {
     if (_txChrUUID.length() > 0) {
         notifyChr = svc->getCharacteristic(_txChrUUID.c_str());
         if (!notifyChr) {
-            Log.printf("[BLE] TX/notify char %s not found\n", _txChrUUID.c_str());
-            _client->disconnect();
-            _state = State::ERROR;
-            esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+            _enterConfigMismatch("Notify characteristic UUID");
             return;
         }
         Log.println("[BLE] Using dual-char mode (separate notify characteristic)");
@@ -839,6 +830,19 @@ void WallboxBLE::_disconnect() {
     _rssiLastSample = 0;
     _seenBapiThisConnection = false;  // re-enable raw-RX logging for next connect
     _lastTimeSyncMs = 0;   // force a Wtime push on the next reconnect
+}
+
+void WallboxBLE::_enterConfigMismatch(const char* what) {
+    Log.printf("[BLE] %s not found in the charger's GATT — this is a "
+               "config mismatch, not a dropout.\n", what);
+    Log.printf("[BLE] Check Charger BLE UUIDs at /config. Backing off %us "
+               "so the dashboard stays responsive.\n",
+               (unsigned)(CONFIG_MISMATCH_BACKOFF_MS / 1000));
+    if (_client) _client->disconnect();
+    _chr = nullptr;
+    _state = State::ERROR;
+    _connectBackoff = CONFIG_MISMATCH_BACKOFF_MS;
+    esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
 }
 
 bool WallboxBLE::_authenticate() {

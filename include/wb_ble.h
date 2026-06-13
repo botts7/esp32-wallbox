@@ -254,6 +254,13 @@ private:
     void _connect();
     void _disconnect();
     bool _authenticate();
+    // A configured service/characteristic UUID genuinely absent from the
+    // charger's GATT topology is a *config* error, not a transient drop —
+    // retrying fast won't help and the scan/connect storm starves WiFi so
+    // the user can't even reach /config to fix the UUIDs (gambys #12).
+    // Disconnect, enter ERROR, and back off hard so the dashboard stays
+    // responsive. Caller returns after this.
+    void _enterConfigMismatch(const char* what);
     static void _notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_t len, bool isNotify);
 
     static WallboxBLE* _instance;
@@ -286,6 +293,10 @@ private:
     // Reconnect timing
     uint32_t _lastConnectAttempt = 0;
     uint32_t _connectBackoff = 2000;
+    // Backoff applied when a configured UUID isn't in the GATT topology
+    // (config mismatch). Long, because only a /config edit will fix it —
+    // fast retries just starve WiFi and the web UI.
+    static const uint32_t CONFIG_MISMATCH_BACKOFF_MS = 60000;
 
     // Pause window (for releasing BLE to official app)
     uint32_t _pausedUntil = 0;
