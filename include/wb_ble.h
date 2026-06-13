@@ -160,6 +160,7 @@ public:
     void copyCachedMeter(String& out, uint32_t& seq);
     void copyCachedSettings(String& out, uint32_t& seq);
     void copyCachedNotifications(String& out, uint32_t& seq);
+    void copyCachedLse(String& out, uint32_t& seq);
 
     // Stats
     uint32_t txCount() const { return _txCount; }
@@ -337,9 +338,9 @@ private:
     // longer blocks main loop iterations.
     SemaphoreHandle_t _cacheMutex = nullptr;
     String   _cachedStatusJson, _cachedRealtimeJson, _cachedMeterJson;
-    String   _cachedSettingsJson, _cachedNotificationsJson;
+    String   _cachedSettingsJson, _cachedNotificationsJson, _cachedLseJson;
     uint32_t _seqStatus = 0,   _seqRealtime = 0, _seqMeter = 0;
-    uint32_t _seqSettings = 0, _seqNotifications = 0;
+    uint32_t _seqSettings = 0, _seqNotifications = 0, _seqLse = 0;
     // Poll timers (BLE-task local)
     uint32_t _lastStatusPoll = 0, _lastRealtimePoll = 0, _lastNotifPoll = 0;
     uint32_t _statusPollMs = 10000, _realtimePollMs = 30000;

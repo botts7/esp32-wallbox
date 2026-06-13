@@ -38,7 +38,7 @@ static uint32_t lastGatewayPublish = 0;
 // seq we last published so we only publish on advances.
 static String lastStatus, lastRealtime;  // kept around for webServer.updateCache contract
 static uint32_t _lastSeqStatus = 0, _lastSeqRealtime = 0, _lastSeqMeter = 0;
-static uint32_t _lastSeqSettings = 0, _lastSeqNotifications = 0;
+static uint32_t _lastSeqSettings = 0, _lastSeqNotifications = 0, _lastSeqLse = 0;
 
 static void publishGatewayInfo();  // forward decl — defined below
 
@@ -89,6 +89,17 @@ static void publishCachedNotificationsIfNew() {
     if (seq != 0 && seq != _lastSeqNotifications && !resp.isEmpty()) {
         _lastSeqNotifications = seq;
         wallboxMQTT.publishResponse("notifications", resp);
+    }
+}
+static void publishCachedLseIfNew() {
+    String resp; uint32_t seq = 0;
+    wallboxBLE.copyCachedLse(resp, seq);
+    // The cached JSON already has user_id stripped at the BLE layer, so
+    // this raw publish is PII-safe.
+    if (seq != 0 && seq != _lastSeqLse && !resp.isEmpty()) {
+        _lastSeqLse = seq;
+        wallboxMQTT.publishResponse("r_lse", resp);
+        wbws::broadcast("lse", resp);
     }
 }
 
@@ -534,6 +545,7 @@ void loop() {
         publishCachedMeterIfNew();
         publishCachedSettingsIfNew();
         publishCachedNotificationsIfNew();
+        publishCachedLseIfNew();
 
         uint32_t now = millis();
         if (now - lastGatewayPublish >= 60000) {

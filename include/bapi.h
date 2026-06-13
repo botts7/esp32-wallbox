@@ -73,6 +73,7 @@ constexpr const char* MET_GET_GROUNDING  = "r_wel";   // grounding status
 constexpr const char* MET_GET_V2H        = "g_pwi";   // vehicle-to-home
 constexpr const char* MET_GET_METER      = "r_dca";   // power meter status
 constexpr const char* MET_GET_NOTIFS     = "r_not";   // notifications
+constexpr const char* MET_GET_LSE        = "r_lse";   // live-session energy feed
 constexpr const char* MET_GET_GSM        = "gmsta";   // GSM status
 constexpr const char* MET_GET_NETWORKS   = "gnsta";   // networks status
 constexpr const char* MET_GET_MOBILE     = "gmcon";   // mobile connectivity

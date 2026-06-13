@@ -69,7 +69,7 @@ private:
     // Lifting these out of the per-iteration switch means we don't
     // re-walk configMgr or rebuild the same Strings 60 times.
     struct DiscoveryTopics {
-        String sTopic, rTopic, gTopic, mTopic, nTopic, setTopic;
+        String sTopic, rTopic, gTopic, mTopic, nTopic, setTopic, lseTopic;
         String cmdCurrent, cmdCharging, cmdLock, cmdReboot;
         String cmdAutolockEnable, cmdAutolockTime;
         String cmdEcoMode, cmdEcoPower;

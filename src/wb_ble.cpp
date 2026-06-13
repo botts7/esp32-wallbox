@@ -1285,6 +1285,21 @@ void WallboxBLE::_pollStatus() {
     if (_state != State::CONNECTED) return;
     String meter = _sendCommandDirect(bapi::MET_GET_METER);
     if (!meter.isEmpty()) _storeCache(_cachedMeterJson, _seqMeter, meter);
+    // Live-session energy feed (solar/grid split, surplus, control mode).
+    if (_state != State::CONNECTED) return;
+    String lse = _sendCommandDirect(bapi::MET_GET_LSE);
+    if (!lse.isEmpty()) {
+        // r_lse carries the Wallbox account user_id — strip it before
+        // caching so it can never reach an MQTT topic, the WS feed, or an
+        // HTTP consumer. The cache is the single source for all of them.
+        JsonDocument d;
+        if (deserializeJson(d, lse) == DeserializationError::Ok) {
+            if (d["r"].is<JsonObject>()) d["r"].remove("user_id");
+            String clean;
+            serializeJson(d, clean);
+            _storeCache(_cachedLseJson, _seqLse, clean);
+        }
+    }
 }
 
 void WallboxBLE::_pollRealtime() {
@@ -1419,6 +1434,13 @@ void WallboxBLE::copyCachedMeter(String& out, uint32_t& seq) {
     if (!_cacheMutex) { out = ""; seq = 0; return; }
     if (xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         out = _cachedMeterJson; seq = _seqMeter;
+        xSemaphoreGive(_cacheMutex);
+    } else { out = ""; seq = 0; }
+}
+void WallboxBLE::copyCachedLse(String& out, uint32_t& seq) {
+    if (!_cacheMutex) { out = ""; seq = 0; return; }
+    if (xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        out = _cachedLseJson; seq = _seqLse;
         xSemaphoreGive(_cacheMutex);
     } else { out = ""; seq = 0; }
 }

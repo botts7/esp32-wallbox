@@ -34,7 +34,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 59;
+static const size_t kDiscoveryCount = 64;
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -84,6 +84,7 @@ enum class TopicSlot : uint8_t {
     METER,              // response/meter -> _discTopics.mTopic
     NOTIFS,             // response/notifications -> _discTopics.nTopic
     SETTINGS,           // wallbox/settings -> _discTopics.setTopic
+    LSE,                // response/r_lse -> _discTopics.lseTopic
     CMD_CURRENT,
     CMD_CHARGING,
     CMD_LOCK,
@@ -778,6 +779,7 @@ void WallboxMQTT::sendDiscovery() {
     _discTopics.mTopic   = baseTopic() + "/response/meter";
     _discTopics.nTopic   = baseTopic() + "/response/notifications";
     _discTopics.setTopic = baseTopic() + "/settings";
+    _discTopics.lseTopic = baseTopic() + "/response/r_lse";
 
     String cPrefix = cmdPrefix();
     _discTopics.cmdCurrent       = cPrefix + "current";
@@ -1197,6 +1199,36 @@ const DiscoveryEntry kEntries[] = {
                nullptr, nullptr, nullptr, nullptr,
                TopicSlot::CMD_RESUME_SCHEDULE, 0,0,0, nullptr,
                nullptr, nullptr, nullptr, 0 },
+
+    // ----- Group N: live-session energy (r_lse) entities (cases 59-63) -----
+    // Backed by response/r_lse, published with user_id stripped at the BLE
+    // layer. Per-session counters reset when a new session starts, so they
+    // are MEASUREMENT not total_increasing.
+
+    /* 59 */ { EntityKind::SENSOR, "green_energy_session", "Green Energy (Session)", "mdi:solar-power",
+               TopicSlot::LSE, "{{ value_json.r.green_energy | round(2) }}",
+               "kWh", "energy", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 60 */ { EntityKind::SENSOR, "grid_energy_session", "Grid Energy (Session)", "mdi:transmission-tower",
+               TopicSlot::LSE, "{{ value_json.r.grid_energy | round(2) }}",
+               "kWh", "energy", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 61 */ { EntityKind::SENSOR, "surplus_power", "Solar Surplus Power", "mdi:solar-power-variant",
+               TopicSlot::LSE, "{{ value_json.r.active_feature.surplus_power | round(2) }}",
+               "kW", "power", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 62 */ { EntityKind::SENSOR, "active_feature", "Active Feature", "mdi:cog-outline",
+               TopicSlot::LSE, "{{ value_json.r.active_feature.feature }}",
+               nullptr, nullptr, "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 63 */ { EntityKind::SENSOR, "control_mode", "Control Mode", "mdi:tune-variant",
+               TopicSlot::LSE, "{{ value_json.r.control_mode }}",
+               nullptr, nullptr, "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 };
 
 const size_t kEntryCount = sizeof(kEntries) / sizeof(kEntries[0]);
@@ -1243,6 +1275,7 @@ void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
             case wb_disc::TopicSlot::METER:            return _discTopics.mTopic.c_str();
             case wb_disc::TopicSlot::NOTIFS:           return _discTopics.nTopic.c_str();
             case wb_disc::TopicSlot::SETTINGS:         return _discTopics.setTopic.c_str();
+            case wb_disc::TopicSlot::LSE:              return _discTopics.lseTopic.c_str();
             case wb_disc::TopicSlot::CMD_CURRENT:      return _discTopics.cmdCurrent.c_str();
             case wb_disc::TopicSlot::CMD_CHARGING:     return _discTopics.cmdCharging.c_str();
             case wb_disc::TopicSlot::CMD_LOCK:         return _discTopics.cmdLock.c_str();
