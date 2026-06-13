@@ -81,6 +81,35 @@ static const char* _kindStr(Kind kind) {
     return "?";
 }
 
+// Monotonic boot sequence. The event ring is NVS-backed and survives
+// reboots by design (you can see history across restarts), but every
+// event only carried a per-boot uptime `start`, so the /info "Events
+// this boot" view couldn't tell a fresh event from one left over from
+// three boots ago (it showed a +20 min BLE event at +58 h uptime).
+// Stamp each event with the boot it happened in; consumers compare it
+// to the summary's `boot` to show this-boot-only. Bumped lazily on the
+// first diag activity of the boot — no init hook needed.
+static uint32_t _bootSeq = 0;
+static bool     _bootSeqLoaded = false;
+
+static uint32_t _currentBootSeq() {
+    if (_bootSeqLoaded) return _bootSeq;
+    Preferences p;
+    if (p.begin(NVS_NS, false)) {
+        _bootSeq = p.getUInt("boot_seq", 0) + 1;
+        p.putUInt("boot_seq", _bootSeq);
+        p.end();
+    }
+    _bootSeqLoaded = true;
+    return _bootSeq;
+}
+
+// Disconnects whose downtime began inside the boot-settling window are
+// expected noise (DHCP lease, first broker handshake, the HA discovery
+// publish burst) — not a runtime fault. Flag them so consumers can
+// de-emphasise rather than alarm on them.
+static const uint32_t BOOT_SETTLE_S = 60;
+
 static void appendEvent(uint32_t startS, uint32_t durationS, Kind kind) {
     JsonDocument doc;
     load(doc);
@@ -89,6 +118,8 @@ static void appendEvent(uint32_t startS, uint32_t durationS, Kind kind) {
     e["start"] = startS;
     e["dur"]   = durationS;
     e["kind"]  = _kindStr(kind);
+    e["boot"]  = _currentBootSeq();
+    if (startS < BOOT_SETTLE_S) e["settle"] = true;  // boot-window noise
     while ((int)arr.size() > MAX_EVENTS) arr.remove(0);
     store(doc);
 }
@@ -219,6 +250,10 @@ String toJson() {
     out["mqtt_last_at_s"]   = _mqttLastReconnect;
     out["wifi_last_at_s"]   = _wifiLastReconnect;
     out["uptime_s"]         = millis() / 1000;  // for "this boot vs prior" split on /info
+    // Current boot id. Events carry the boot they happened in, so a
+    // consumer shows "this boot" = events where event.boot == this, and
+    // de-emphasises any event with settle:true (boot-window noise).
+    out["boot"]             = _currentBootSeq();
     JsonArray events = out["events"].to<JsonArray>();
     for (int i = (int)arr.size() - 1; i >= 0; i--) {
         events.add(arr[i]);
