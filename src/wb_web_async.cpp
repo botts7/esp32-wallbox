@@ -1021,6 +1021,10 @@ static void _registerJsonBodyRoutes() {
 static bool   _asyncOtaError        = false;
 static bool   _asyncOtaShouldReboot = false;
 static size_t _asyncOtaTotalSize    = 0;
+// Set by the body handler when a non-multipart (raw) body hits /api/ota.
+// A real OTA is multipart/form-data and is dispatched to the upload
+// handler; anything reaching the body handler is malformed.
+static bool   _asyncOtaRawRejected  = false;
 
 static void _registerOtaRoute() {
     _async.on("/api/ota", HTTP_POST,
@@ -1028,6 +1032,17 @@ static void _registerOtaRoute() {
         // (or fails). Examines the file-static result vars below and
         // sends the appropriate response.
         [](AsyncWebServerRequest* req) {
+            // Raw/malformed POST (no multipart part): the upload handler
+            // never ran, so without this the empty-upload path would send
+            // a misleading 200 "OK". Return 415 instead. (Reset the flag
+            // for the next request.)
+            if (_asyncOtaRawRejected) {
+                _asyncOtaRawRejected = false;
+                req->send(415, "application/json",
+                    "{\"error\":\"OTA requires multipart/form-data with a "
+                    "'firmware' file part; raw request bodies are rejected\"}");
+                return;
+            }
             if (_asyncOtaError) {
                 if (otaRetryAfterSec > 0) {
                     AsyncWebServerResponse* res = req->beginResponse(503,
@@ -1208,6 +1223,19 @@ static void _registerOtaRoute() {
                     _asyncOtaError = true;
                 }
             }
+        },
+        // bodyHandler — fires ONLY for non-multipart request bodies. A
+        // multipart upload is dispatched to the upload handler above and
+        // never reaches here (see ESPAsyncWebServer WebRequest.cpp: a
+        // multipart body goes through _parseMultipartPostByte, a raw body
+        // through handleBody). So any body landing here is a raw/malformed
+        // POST. Flag it on the first chunk; the request handler turns that
+        // into a 415. The bytes still stream through harmlessly (they're
+        // not buffered), but the firmware Update path never touches them.
+        [](AsyncWebServerRequest* req, uint8_t* data, size_t len,
+           size_t index, size_t total) {
+            (void)req; (void)data; (void)len; (void)total;
+            if (index == 0) _asyncOtaRawRejected = true;
         }
     );
 }
