@@ -1880,6 +1880,29 @@ function buildScheduleTimeline(schedules){
   legend.innerHTML=lg||'<span style=\"color:var(--text3)\">All schedules disabled</span>';
   wrap.style.display='block';
 }
+// Render the schedule list + timeline from an array (read shape: days
+// bitmask, start/stop strings). Split out of loadSchedules so the
+// optimistic paths (toggle/delete) can redraw instantly from the cached
+// allSchedules without a BLE round-trip.
+function renderSchedules(sc){
+  var l=document.getElementById('sch-list');if(!l)return;
+  allSchedules=sc;
+  try{buildScheduleTimeline(sc)}catch(e){console.error('timeline failed',e)}
+  if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules yet. Tap + Add New to create one.</div>';return}
+  var html='';
+  sc.forEach(function(s){
+    var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS_M[b]+' ';
+    var t1=utcToLocal(s.start),t2=utcToLocal(s.stop);
+    var lim=(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A';
+    var ek=(s.target&&s.target.type==1)?(s.target.value/1000)+' kWh':'';
+    var badge=s.enabled?'<span class=\"badge badge-success\">On</span>':'<span class=\"badge badge-warning\">Off</span>';
+    var togIcon=s.enabled?'⏸':'▶';
+    var togColor=s.enabled?'var(--warning)':'var(--success)';
+    var togTitle=s.enabled?'Pause this schedule':'Resume this schedule';
+    html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" – "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" · "+lim+(ek?' · '+ek:'')+" · #"+s.sid+"</div></div><div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' title='"+togTitle+"' style='padding:6px 10px;font-size:.85em;color:"+togColor+"' onclick='toggleSchedule("+s.sid+")'>"+togIcon+"</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>✎</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>✖</button></div></div></div>";
+  });
+  l.innerHTML=html;
+}
 function loadSchedules(_retry){
   // _retry: undefined = first attempt, true = the auto-retry. We retry
   // once after a brief settle when the BAPI call times out or the
@@ -1901,27 +1924,24 @@ function loadSchedules(_retry){
       if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
       l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return
     }
-    allSchedules=sc;
-    try{buildScheduleTimeline(sc)}catch(e){console.error('timeline failed',e)}
-    if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules yet. Tap + Add New to create one.</div>';return}
-    var html='';
-    sc.forEach(function(s){
-      var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS_M[b]+' ';
-      var t1=utcToLocal(s.start),t2=utcToLocal(s.stop);
-      var lim=(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A';
-      var ek=(s.target&&s.target.type==1)?(s.target.value/1000)+' kWh':'';
-      var badge=s.enabled?'<span class=\"badge badge-success\">On</span>':'<span class=\"badge badge-warning\">Off</span>';
-      // Toggle icon: pause when On (one tap to disable), play when Off
-      var togIcon=s.enabled?'\u23F8':'\u25B6';
-      var togColor=s.enabled?'var(--warning)':'var(--success)';
-      var togTitle=s.enabled?'Pause this schedule':'Resume this schedule';
-      html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" \u2013 "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" \u00B7 "+lim+(ek?' \u00B7 '+ek:'')+" \u00B7 #"+s.sid+"</div></div><div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' title='"+togTitle+"' style='padding:6px 10px;font-size:.85em;color:"+togColor+"' onclick='toggleSchedule("+s.sid+")'>"+togIcon+"</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>\u270E</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>\u2716</button></div></div></div>";
-    });
-    l.innerHTML=html;
+    renderSchedules(sc);
   }).catch(function(e){
     if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
     l.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>'
   });
+}
+// Schedule writes (s_sch / clr_sch) are async: the BAPI call returns
+// "pending" and the BLE task applies it a beat later. Calling
+// loadSchedules() immediately races that pending write — the r_schs
+// read-back hits a busy BLE mutex, returns null, and stalls ~1.5s on the
+// retry. Worse, several writes in a row (e.g. a delete = clr_sch +
+// rewrites) burst past the rate limiter (429) and each read-back races.
+// Instead, reconcile ONCE on a debounced timer so the write(s) land
+// first and rapid operations coalesce into a single read-back.
+var _schReconcileTimer=null;
+function scheduleReconcile(){
+  if(_schReconcileTimer)clearTimeout(_schReconcileTimer);
+  _schReconcileTimer=setTimeout(function(){_schReconcileTimer=null;loadSchedules()},3000);
 }
 function newSchedule(){
   editingSid=null;
@@ -1949,7 +1969,10 @@ function toggleSchedule(sid){
   fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(JSON.stringify({schedules:[entry]})),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
     if(r&&r.error){toast(r.error,'error');return}
     toast('Schedule #'+sid+' '+verb,'success');
-    loadSchedules();
+    // optimistic: flip the cached flag + redraw now; reconcile shortly
+    var cs=allSchedules.find(function(x){return x.sid===sid});if(cs)cs.enabled=newEn;
+    renderSchedules(allSchedules);
+    scheduleReconcile();
   }).catch(function(e){toast('Error: '+(e.message||e),'error')});
 }
 function editSchedule(sid){
@@ -2014,7 +2037,9 @@ function saveSch(){
     if(r&&r.error){toast(r.error,'error');return}
     toast('Schedule #'+sid+' '+verb,'success');
     cancelEdit();
-    loadSchedules();
+    // Async write — reconcile on a debounced timer so the read-back
+    // doesn't race the still-pending s_sch (which stalls on busy BLE).
+    scheduleReconcile();
   }).catch(function(e){toast('Error: '+(e.message||e),'error')});
 }
 function deleteSchedule(sid){
@@ -2023,13 +2048,17 @@ function deleteSchedule(sid){
 function doDeleteSchedule(sid){
   var keep=allSchedules.filter(function(s){return s.sid!==sid});
   toast('Deleting schedule #'+sid+'...','info');
+  // Optimistic: drop the row + redraw now so it feels instant. The
+  // clr_sch + rewrite below runs in the background; the debounced
+  // reconcile confirms (or corrects, on error) the true state.
+  renderSchedules(keep.slice());
   fetch('/api/command?action=bapi&met=clr_sch&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(c){
     // Abort if clr_sch errored — if the clear succeeded but the
     // restore writes fail, user loses all schedules.
     if(c&&c.error){toast(c.error,'error');loadSchedules();return}
     var i=0;
     function next(){
-      if(i>=keep.length){toast('Deleted','success');loadSchedules();return}
+      if(i>=keep.length){toast('Deleted','success');scheduleReconcile();return}
       var s=keep[i++];
       // s_sch on fw 6.11.x expects integer start/stop, a bit-array
       // for days, and the par.schedules[] wrapper (see buildSchEntry).
