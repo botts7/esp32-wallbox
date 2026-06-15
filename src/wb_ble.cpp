@@ -543,17 +543,29 @@ void WallboxBLE::_connect() {
     // prompt. We do this BEFORE CCCD subscription rather than as
     // a fallback so the first-write authorisation is in place
     // from the start of the session.
-    Log.println("[BLE] Initiating SMP encryption (proactive pair)...");
-    bool secureOk = _client->secureConnection();
-    if (secureOk) {
-        Log.println("[BLE] Encryption established");
-        // NimBLE 1.4.1 can return before bond info fully lands —
-        // small delay matches the fallback path's behaviour.
-        delay(200);
+    //
+    // Skip it entirely for Zentri: the original Pulsar (FW 375, no PIN)
+    // speaks an unauthenticated indicate-handshake — its own app never
+    // bonds. Forcing SMP there returns ENOTCONN (err 0x07) and, worse,
+    // appears to corrupt the ATT link: with the pairing attempt present,
+    // gambys's Device Info read came back empty and BAPI went silent,
+    // whereas the earlier build without it read the module info cleanly
+    // (#12). So for Zentri we go straight to the handshake.
+    if (!zentri) {
+        Log.println("[BLE] Initiating SMP encryption (proactive pair)...");
+        bool secureOk = _client->secureConnection();
+        if (secureOk) {
+            Log.println("[BLE] Encryption established");
+            // NimBLE 1.4.1 can return before bond info fully lands —
+            // small delay matches the fallback path's behaviour.
+            delay(200);
+        } else {
+            Log.printf("[BLE] secureConnection() failed (err 0x%02x) — "
+                       "continuing unpaired; writes may be rejected\n",
+                       _client->getLastError());
+        }
     } else {
-        Log.printf("[BLE] secureConnection() failed (err 0x%02x) — "
-                   "continuing unpaired; writes may be rejected\n",
-                   _client->getLastError());
+        Log.println("[BLE] Zentri: skipping SMP pair (unauthenticated handshake protocol)");
     }
 
     bool notifyOk;
