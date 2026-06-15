@@ -514,6 +514,25 @@ void WallboxBLE::_connect() {
         Log.println("[BLE] Using dual-char mode (separate notify characteristic)");
     }
 
+    // Zentri AMS detection — the original (pre-BGX, no-WiFi) Pulsar uses a
+    // Zentri AMS Bluetooth module instead of u-blox (MAX) or BGX13P (Plus).
+    // It will not accept BAPI writes or stream responses until the host
+    // performs an indicate-handshake on a dedicated characteristic; the
+    // charger then replies with a 0x01 "ready" indication and opens the
+    // BAPI channel (gambys #12 — confirmed against both the official app's
+    // BLE capture and his gateway serial log: "Write failed — connection
+    // may be dead" right after a clean connect). Detected purely by the
+    // presence of the handshake characteristic, which neither MAX (u-blox)
+    // nor Plus/Copper/Quasar (BGX) expose — so this path is inert on every
+    // charger we've shipped support for.
+    static const char* ZENTRI_HS_UUID = "20b9794f-da1a-4d14-8014-a0fb9cefb2f7";
+    NimBLERemoteCharacteristic* zentriHs = svc->getCharacteristic(ZENTRI_HS_UUID);
+    const bool zentri = (zentriHs != nullptr);
+    if (zentri) {
+        Log.println("[BLE] Zentri AMS peripheral detected (20b9794f present) "
+                    "— using indicate-handshake path");
+    }
+
     // 3.0 schedule-write fix attempt: proactively pair/encrypt
     // before subscribing for notifies. jagheterfredrik's HACS
     // reference always pairs on connect, and the live Pulsar MAX
@@ -537,19 +556,48 @@ void WallboxBLE::_connect() {
                    _client->getLastError());
     }
 
-    // Subscribe to notifications — if CCCD write is rejected, encrypt and retry
-    bool notifyOk = notifyChr->canNotify() && notifyChr->registerForNotify(_notifyCb);
-    if (!notifyOk && notifyChr->canNotify()) {
-        Log.println("[BLE] CCCD rejected, trying SMP encryption...");
-        delay(200);
-        if (_client->secureConnection()) {
-            Log.println("[BLE] Encrypted, retrying notifications...");
-            // NimBLE 1.4.1 can return from secureConnection() before bond
-            // info fully lands — give it a moment before the CCCD retry
+    bool notifyOk;
+    if (zentri) {
+        // Zentri handshake. registerForNotify(cb, notifications) writes the
+        // CCCD: notifications=false → indications (0x0002), the mode the
+        // official app uses on this module.
+        //
+        // Step 1 — enable indications on the handshake characteristic. This
+        // is the trigger: the charger replies with a 0x01 "ready" indication
+        // (it lands in _notifyCb like any other frame; the BAPI parser
+        // ignores the lone byte) and only then opens the command channel.
+        bool hsOk = zentriHs->canIndicate() && zentriHs->registerForNotify(_notifyCb, false);
+        if (!hsOk && zentriHs->canNotify())
+            hsOk = zentriHs->registerForNotify(_notifyCb, true);
+        Log.printf("[BLE] Zentri handshake (20b9794f) %s — waiting for ready\n",
+                   hsOk ? "subscribed" : "SUBSCRIBE FAILED");
+        delay(600);  // allow the charger to emit the 0x01 ready indication
+
+        // Step 2 — subscribe the response characteristic for INDICATIONS
+        // (the app streams BAPI via indicate here, not notify). Fall back to
+        // notify if the char can't indicate, so a mis-mapped config still
+        // has a chance.
+        notifyOk = notifyChr->canIndicate() && notifyChr->registerForNotify(_notifyCb, false);
+        if (!notifyOk && notifyChr->canNotify()) {
+            Log.println("[BLE] Zentri: indicate subscribe failed, falling back to notify");
+            notifyOk = notifyChr->registerForNotify(_notifyCb, true);
+        }
+        if (notifyOk) Log.println("[BLE] Zentri channel subscriptions enabled (indicate)");
+    } else {
+        // Subscribe to notifications — if CCCD write is rejected, encrypt and retry
+        notifyOk = notifyChr->canNotify() && notifyChr->registerForNotify(_notifyCb);
+        if (!notifyOk && notifyChr->canNotify()) {
+            Log.println("[BLE] CCCD rejected, trying SMP encryption...");
             delay(200);
-            notifyOk = notifyChr->registerForNotify(_notifyCb);
-        } else {
-            Log.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
+            if (_client->secureConnection()) {
+                Log.println("[BLE] Encrypted, retrying notifications...");
+                // NimBLE 1.4.1 can return from secureConnection() before bond
+                // info fully lands — give it a moment before the CCCD retry
+                delay(200);
+                notifyOk = notifyChr->registerForNotify(_notifyCb);
+            } else {
+                Log.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
+            }
         }
     }
     if (!notifyOk) {
