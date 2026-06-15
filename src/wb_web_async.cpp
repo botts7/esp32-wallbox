@@ -351,6 +351,20 @@ static void _registerReadOnlyRoutes() {
         req->send(res);
     });
 
+    // GET /api/diag/gatt — GATT topology captured at the last connect
+    // (services + chars + properties). Feeds the Compatibility Report so
+    // users can map a new charger without nRF Connect.
+    _async.on("/api/diag/gatt", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        String topo;
+        wallboxBLE.copyGattTopology(topo);
+        if (topo.isEmpty()) topo = "(no topology captured yet — connect to the charger first)\n";
+        AsyncWebServerResponse* res = req->beginResponse(200, "text/plain", topo);
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
     // GET /api/boot/history — last ~10 boot reasons.
     _async.on("/api/boot/history", HTTP_GET,
               [](AsyncWebServerRequest* req) {

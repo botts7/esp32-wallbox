@@ -2757,6 +2757,15 @@ String wb_buildInfoPage() {
 </div>
 
 <div class='card'>
+  <div class='card-header'><span class='card-icon'>&#x1F4CB;</span><h2>Compatibility Report</h2></div>
+  <p class='help' style='margin-top:0'>Got a charger model that isn't fully working? Generate a report and paste it into a GitHub issue so support can be added. Probes the charger (read-only) + captures its BLE layout. Takes ~30s.</p>
+  <button class='btn btn-outline' id='cr-btn' style='width:100%' onclick='genCompat()'>&#x1F4CB; Generate Compatibility Report</button>
+  <div id='cr-prog' style='margin-top:8px;font-size:.82em;color:var(--text3);display:none'></div>
+  <textarea id='cr-out' style='display:none;width:100%;height:220px;margin-top:10px;font-family:monospace;font-size:.74em;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px' readonly></textarea>
+  <button class='btn' id='cr-copy' style='width:100%;margin-top:8px;display:none' onclick='var t=document.getElementById("cr-out");t.select();document.execCommand("copy");toast("Report copied — paste into a GitHub issue","success")'>&#x1F4CB; Copy report</button>
+</div>
+
+<div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F4E1;</span><h2>Raw BAPI</h2></div>
   <div style='display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end'>
     <div><label>Method</label><select id='bm' style='margin:0'>
@@ -2974,6 +2983,66 @@ var OCPP_LABELS={chid:'Charger ID',e:'Enabled',pw:'Password',u:'Server URL',ws:'
 var NET_LABELS={channel:'WiFi Channel',dns1:'DNS Primary',dns2:'DNS Secondary',gateway:'Gateway',ip:'IP Address',netmask:'Subnet Mask',mac:'MAC Address',ssid:'Network Name',rssi:'Signal (dBm)',signal:'Signal',status:'Status',type:'Connection Type'};
 function Q(m,l){var r=document.getElementById('qr');r.style.display='block';r.innerHTML="<span class='spinner'></span>"+l+"...";fetch('/api/command?action=bapi&met='+m+'&par=null&wait=12000',{signal:AbortSignal.timeout(13000)}).then(function(x){return x.json()}).then(function(d){if(d.error){r.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}var v=d.r||d;var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var ws={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi Status',typeof v==='number'?(ws[v]||'Code '+v):''+v)}else if(m==='r_not'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');else v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('#'+(i+1),n.message||n.msg||JSON.stringify(n));h+="</div>"})}else{h+=row('Notifications',typeof v==='number'?(v===0?'None':''+v):''+v)}}else if(m==='g_ocpp'){var lb=OCPP_LABELS;if(typeof v==='object'){for(var k in v){var lbl=lb[k]||k;var val=v[k];if(val===null||val===undefined||val==='')val='<span style="color:var(--text3)">Not set</span>';else if(typeof val==='number'&&(k==='e'||k==='connected'))val=val?'Yes':'No';h+=row(lbl,val)}}else{h+=row('OCPP',v===1?'Connected':v===0?'Not configured':'Code '+v)}}else if(m==='gnsta'){if(Array.isArray(v)&&v.length>0){var n=v[0];var lb=NET_LABELS;for(var k in n){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=n[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else if(typeof v==='object'&&!Array.isArray(v)){var lb=NET_LABELS;for(var k in v){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else{h+=row('Network',''+v)}}else if(m==='gupdc'){if(typeof v==='object'){if(v.update)h+=row('Update Available','<span style="color:var(--success)">Yes</span>');else h+=row('Update Available','No');if(v.version||v.current)h+=row('Current Version',v.version||v.current||'Unknown');if(v.latest||v.new_version)h+=row('Latest Version',v.latest||v.new_version||'Unknown')}else{h+=row('Firmware',typeof v==='number'?(v===0?'Up to date':'Update available ('+v+')'):''+v)}}else if(m==='r_not'){if(typeof v==='object'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('Notification '+(i+1),n.message||n.msg||n.text||JSON.stringify(n));if(n.timestamp||n.ts)h+=row('Time',new Date((n.timestamp||n.ts)*1000).toLocaleString());h+="</div>"})}else{for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});h+=row(lbl,typeof v[k]==='object'?JSON.stringify(v[k]):v[k])}}}else{h+=row('Notifications',v===0?'None':''+v)}}else if(typeof v==='object'){for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(typeof val==='boolean')val=val?'Yes':'No';else if(typeof val==='object')val=JSON.stringify(val);h+=row(lbl,val)}}else{h+=row(l,v)}r.innerHTML=h}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'})}
 function B(){var m=document.getElementById('bm').value,r=document.getElementById('br');r.style.display='block';r.textContent='Sending '+m+'...';fetch('/api/command?action=bapi&met='+encodeURIComponent(m)+'&par=null&wait=12000',{signal:AbortSignal.timeout(13000)}).then(function(x){return x.json()}).then(function(d){r.textContent=JSON.stringify(d,null,2)}).catch(function(e){r.textContent='Error: '+e.message})}
+// Self-serve Compatibility Report: probes a READ-ONLY set of BAPI methods
+// (never writes — no clr_sch/s_sch/w_cha) + captures the charger's BLE
+// GATT layout, into a copy-pasteable block for a GitHub issue. The
+// app.js fetch queue serialises /api/command and retries 429, so firing
+// these sequentially paces itself within the rate limit.
+function genCompat(){
+  var btn=document.getElementById('cr-btn'),prog=document.getElementById('cr-prog'),
+      out=document.getElementById('cr-out'),copy=document.getElementById('cr-copy');
+  btn.disabled=true;prog.style.display='block';out.style.display='none';copy.style.display='none';
+  // read-only probes only
+  var METHODS=['fw_v_','r_dat','r_sta','r_dca','r_schs','g_ecos','g_alo','g_psh','g_phsw','g_tzn','r_not','r_ses','r_lse','read_pin','r_wel','g_mac','g_ocpp'];
+  var lines=[],results=[];
+  function probe(i){
+    if(i>=METHODS.length){finish();return}
+    var m=METHODS[i];prog.textContent='Probing '+m+' ('+(i+1)+'/'+METHODS.length+')...';
+    fetch('/api/command?action=bapi&met='+m+'&par=null&wait=8000',{signal:AbortSignal.timeout(12000)})
+      .then(function(x){return x.json()}).then(function(d){
+        var v;
+        if(d&&d.error){v='ERR sub'+(d.error.subcode!==undefined?d.error.subcode:'?')+' '+(d.error.message||'');}
+        else if(d&&d.status==='pending'){v='pending (no reply in 8s)';}
+        else if(d&&typeof d==='object'){v='ok';}  // {r:...} or a flat object (e.g. g_mac)
+        else{v='?';}
+        results.push('  '+m.padEnd(9,' ')+' '+v);
+      }).catch(function(e){results.push('  '+m.padEnd(9,' ')+' fetch-fail: '+(e.message||e));})
+      .then(function(){probe(i+1)});
+  }
+  function finish(){
+    prog.textContent='Fetching device info + BLE layout...';
+    Promise.all([
+      fetch('/api/status').then(function(r){return r.json()}).catch(function(){return{}}),
+      fetch('/api/diag/gatt').then(function(r){return r.text()}).catch(function(){return '(gatt unavailable)'}),
+      fetch('/api/boot/history').then(function(r){return r.json()}).catch(function(){return{}})
+    ]).then(function(a){
+      var s=a[0]||{},gatt=a[1]||'',boot=a[2]||{};
+      var L=[];
+      L.push('### Wallbox Gateway — Compatibility Report');
+      L.push('');
+      L.push('**Charger:** '+(s.chg_project||'?')+'  (model: fill in, e.g. Pulsar MAX / Plus / Copper SB)');
+      L.push('**Charger firmware:** '+(s.chg_app_fw||'?'));
+      L.push('**BLE module:** '+(s.dev_mfg||'?')+' '+(s.dev_model||'')+' (fw '+(s.dev_fw||'?')+')');
+      L.push('**Gateway firmware:** '+(boot.current_fw||'?'));
+      L.push('');
+      L.push('**BAPI read-method support:**');
+      L.push('```');
+      results.forEach(function(r){L.push(r)});
+      L.push('```');
+      L.push('');
+      L.push('**GATT topology:**');
+      L.push('```');
+      L.push(gatt.trim()||'(none captured — reboot + reconnect, then regenerate)');
+      L.push('```');
+      L.push('');
+      L.push('**What works / what doesn’t:** (describe — e.g. connects but no data, schedules won’t delete, etc.)');
+      out.value=L.join('\n');
+      out.style.display='block';copy.style.display='block';prog.style.display='none';
+      btn.disabled=false;
+    });
+  }
+  probe(0);
+}
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
 </script>
 </div>

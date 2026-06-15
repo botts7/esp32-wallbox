@@ -161,6 +161,10 @@ public:
     void copyCachedSettings(String& out, uint32_t& seq);
     void copyCachedNotifications(String& out, uint32_t& seq);
     void copyCachedLse(String& out, uint32_t& seq);
+    // GATT topology captured at the last connect (services + chars +
+    // properties), for the self-serve Compatibility Report so users can
+    // map a new charger without nRF Connect.
+    void copyGattTopology(String& out);
 
     // Stats
     uint32_t txCount() const { return _txCount; }
@@ -339,6 +343,7 @@ private:
     SemaphoreHandle_t _cacheMutex = nullptr;
     String   _cachedStatusJson, _cachedRealtimeJson, _cachedMeterJson;
     String   _cachedSettingsJson, _cachedNotificationsJson, _cachedLseJson;
+    String   _gattTopology;   // captured at connect for the compat report
     uint32_t _seqStatus = 0,   _seqRealtime = 0, _seqMeter = 0;
     uint32_t _seqSettings = 0, _seqNotifications = 0, _seqLse = 0;
     // Poll timers (BLE-task local)

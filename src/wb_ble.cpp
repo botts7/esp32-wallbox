@@ -406,8 +406,13 @@ void WallboxBLE::_connect() {
         std::vector<NimBLERemoteService*>* svcs = _client->getServices(true);
         if (svcs) {
             Log.printf("[BLE] GATT topology: %u service(s)\n", (unsigned)svcs->size());
+            // Also accumulate into _gattTopology so the Compatibility
+            // Report can show it long after this connect log scrolls off.
+            String topo;
+            topo.reserve(512);
             for (auto* s : *svcs) {
                 Log.printf("[BLE]   svc %s\n", s->getUUID().toString().c_str());
+                topo += "svc " + String(s->getUUID().toString().c_str()) + "\n";
                 std::vector<NimBLERemoteCharacteristic*>* chars = s->getCharacteristics(true);
                 if (!chars) continue;
                 for (auto* c : *chars) {
@@ -420,7 +425,15 @@ void WallboxBLE::_connect() {
                     Log.printf("[BLE]     chr %s  [%s]\n",
                         c->getUUID().toString().c_str(),
                         props.length() ? props.c_str() : "-");
+                    topo += "  chr " + String(c->getUUID().toString().c_str())
+                          + " [" + (props.length() ? props : String("-")) + "]\n";
                 }
+            }
+            if (_cacheMutex && xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+                _gattTopology = topo;
+                xSemaphoreGive(_cacheMutex);
+            } else {
+                _gattTopology = topo;  // best-effort if mutex unavailable
             }
         }
     }
@@ -1454,6 +1467,13 @@ void WallboxBLE::copyCachedLse(String& out, uint32_t& seq) {
         out = _cachedLseJson; seq = _seqLse;
         xSemaphoreGive(_cacheMutex);
     } else { out = ""; seq = 0; }
+}
+void WallboxBLE::copyGattTopology(String& out) {
+    if (!_cacheMutex) { out = _gattTopology; return; }
+    if (xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        out = _gattTopology;
+        xSemaphoreGive(_cacheMutex);
+    } else { out = ""; }
 }
 void WallboxBLE::copyCachedSettings(String& out, uint32_t& seq) {
     if (!_cacheMutex) { out = ""; seq = 0; return; }
