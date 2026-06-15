@@ -203,19 +203,14 @@ No wiring, sensors, or peripherals needed — just the ESP32.
 
 ### 🪄 One-click install (Chrome / Edge)
 
-Plug the ESP32-S3 in via USB, then click the button below. The browser
-handles erase + flash of all three files at the correct offsets — no
-terminal, no esptool, no manual offsets.
+Plug the ESP32-S3 in via USB, then open the web installer and click
+**Install**. The browser handles erase + flash of all three files at the
+correct offsets — no terminal, no esptool, no manual offsets.
 
-<!-- HTML below renders the install button on GitHub-rendered Markdown via raw HTML pass-through.
-     If GitHub strips it, the link still works as a manual fallback. -->
-<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+### 👉 [Open the Wallbox Gateway web installer](https://botts7.github.io/esp32-wallbox/)
 
-<p>
-  <esp-web-install-button manifest="https://github.com/botts7/esp32-wallbox/releases/latest/download/install.json">
-    <span slot="unsupported">⚠️ ESP Web Tools needs Chrome or Edge — see <a href="INSTALL.md">INSTALL.md</a> for other options.</span>
-  </esp-web-install-button>
-</p>
+> Needs desktop **Chrome** or **Edge** (Web Serial). Safari / Firefox can't
+> flash — see [INSTALL.md](INSTALL.md) for other options.
 
 After flashing:
 

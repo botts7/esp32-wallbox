@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wallbox Gateway — Web Installer</title>
+  <meta name="description" content="Flash the Wallbox Gateway firmware to an ESP32-S3 straight from your browser — no terminal, no esptool.">
+  <style>
+    :root { --bg:#0e1116; --card:#161b22; --border:#2d333b; --text:#e6edf3; --muted:#9198a1; --accent:#2f81f7; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+           background:var(--bg); color:var(--text); line-height:1.5; }
+    .wrap { max-width:640px; margin:0 auto; padding:48px 20px; }
+    h1 { font-size:1.7rem; margin:0 0 4px; }
+    .sub { color:var(--muted); margin:0 0 32px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:24px; margin-bottom:20px; }
+    .card h2 { font-size:1.05rem; margin:0 0 12px; }
+    ol { margin:0; padding-left:20px; }
+    ol li { margin:6px 0; }
+    .install { text-align:center; padding:28px 24px; }
+    .note { color:var(--muted); font-size:.9rem; margin-top:14px; }
+    a { color:var(--accent); }
+    .browser { background:#1f2430; border:1px solid var(--border); border-radius:8px; padding:10px 14px; font-size:.9rem; color:var(--muted); margin-top:16px; }
+    code { background:#1f2430; border-radius:4px; padding:1px 5px; font-size:.85em; }
+    footer { text-align:center; color:var(--muted); font-size:.85rem; margin-top:8px; }
+  </style>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🔌 Wallbox Gateway — Web Installer</h1>
+    <p class="sub">Local BLE → MQTT bridge for Wallbox Pulsar chargers. No cloud, full Home Assistant control.</p>
+
+    <div class="card install">
+      <h2>One-click install</h2>
+      <esp-web-install-button manifest="https://github.com/botts7/esp32-wallbox/releases/latest/download/install.json">
+        <span slot="unsupported">⚠️ Your browser doesn't support Web Serial — use desktop <strong>Chrome</strong> or <strong>Edge</strong>.</span>
+        <span slot="not-allowed">⚠️ This page must be served over HTTPS to flash.</span>
+      </esp-web-install-button>
+      <p class="note">Flashes the latest release — bootloader, partitions and firmware at the correct offsets, with a full erase. Takes about a minute.</p>
+      <div class="browser">Needs desktop <strong>Chrome</strong> or <strong>Edge</strong> (Web Serial). Safari and Firefox can't flash — see the
+        <a href="https://github.com/botts7/esp32-wallbox/blob/main/INSTALL.md">manual install guide</a>.</div>
+    </div>
+
+    <div class="card">
+      <h2>Before you click</h2>
+      <ol>
+        <li>Plug the ESP32-S3 into this computer with a USB-C <em>data</em> cable (not charge-only).</li>
+        <li>Click <strong>Install</strong> and pick the serial port that appears.</li>
+        <li>When flashing finishes, the gateway starts a <code>Wallbox-Setup</code> Wi-Fi hotspot — join it to configure Wi-Fi, MQTT and your charger.</li>
+      </ol>
+      <p class="note">After the first flash, all future updates are over-the-air from the gateway's own web UI — no cable needed.</p>
+    </div>
+
+    <footer>
+      <a href="https://github.com/botts7/esp32-wallbox">Project on GitHub</a> ·
+      <a href="https://github.com/botts7/esp32-wallbox/blob/main/INSTALL.md">Manual install</a>
+    </footer>
+  </div>
+</body>
+</html>

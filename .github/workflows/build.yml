@@ -58,6 +58,33 @@ jobs:
             .pio/build/esp32s3/partitions.bin
             .pio/build/esp32s3/SHA256SUMS.txt
 
+      - name: Generate ESP Web Tools manifest
+        if: github.event_name == 'release'
+        run: |
+          # The README one-click installer points its esp-web-install-button
+          # at releases/latest/download/install.json. ESP Web Tools resolves
+          # the part paths relative to the manifest, so they match the .bin
+          # asset names attached below. Version comes from the release tag.
+          cat > .pio/build/esp32s3/install.json <<EOF
+          {
+            "name": "Wallbox Gateway",
+            "version": "${GITHUB_REF_NAME#v}",
+            "funding_url": "https://github.com/botts7/esp32-wallbox",
+            "new_install_prompt_erase": true,
+            "builds": [
+              {
+                "chipFamily": "ESP32-S3",
+                "parts": [
+                  { "path": "bootloader.bin", "offset": 0 },
+                  { "path": "partitions.bin", "offset": 32768 },
+                  { "path": "firmware.bin", "offset": 65536 }
+                ]
+              }
+            ]
+          }
+          EOF
+          cat .pio/build/esp32s3/install.json
+
       - name: Attach to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
@@ -67,3 +94,4 @@ jobs:
             .pio/build/esp32s3/bootloader.bin
             .pio/build/esp32s3/partitions.bin
             .pio/build/esp32s3/SHA256SUMS.txt
+            .pio/build/esp32s3/install.json
