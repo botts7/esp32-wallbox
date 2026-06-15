@@ -542,12 +542,13 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
                  "if(T)T.textContent=BOOT_TITLE;"
                  "if(H)H.textContent=BOOT_HINT;"
              "}"
-             "if(d.state==='connected'){"
-                 // 100% then fade out — reset mode so the next time
-                 // the overlay reappears (e.g. after a reboot) it
-                 // starts fresh in boot mode.
-                 "setTimeout(function(){hide();mode='boot'},600)"
-             "}else if(mode==='boot'){show()}"
+             // BLE state updates the progress bar + the BLE bar only — it
+             // does NOT show/hide the overlay. A charger that's off or out
+             // of range is a normal state (shown in the BLE bar) and must
+             // never block the whole UI. Overlay visibility is driven by
+             // gateway reachability (WS open/closed) in the watchdog below.
+             // (peter-mcc #13: gateway out of BLE range showed a perpetual
+             // "Wallbox Gateway is starting" overlay even though it was up.)
          "});}"
          // Watchdog: only fires after WS has been confirmed open at
          // least once (wasOpen starts false). A genuine open→closed
@@ -556,8 +557,15 @@ static String htmlHead(const char* title = "Wallbox Gateway") {
          // title back to 'Wallbox Gateway is starting'.
          "var wasOpen=false;setInterval(function(){"
              "var on=window.wbws&&window.wbws.isOpen();"
-             "if(on)wasOpen=true;"
-             "else if(wasOpen){"
+             "if(on){"
+                 "wasOpen=true;"
+                 // Gateway is reachable (WS open) — hide the boot/reconnect
+                 // overlay, regardless of whether BLE has reached the
+                 // charger. Leave 'nav' mode alone (a page transition is in
+                 // progress). This is what un-sticks a gateway that's up but
+                 // out of BLE range (peter-mcc #13).
+                 "if(mode!=='nav'){hide();mode='boot';}"
+             "}else if(wasOpen){"
                  "mode='reconnect';"
                  "if(T)T.textContent='Reconnecting to gateway';"
                  "if(S)S.textContent='Please wait\xE2\x80\xA6';"
@@ -2886,6 +2894,10 @@ function loadDiag(){
       }
       if(typeof h2.tokens==='number')h+=row('Rate-limit tokens',h2.tokens+' / 4');
       if(typeof h2.heap_free==='number')h+=row('Heap free',(h2.heap_free/1024).toFixed(1)+' KB');
+      // Lifetime worst-case heap dip — the number HA surfaces. A low
+      // watermark explains slow/failed page renders under pressure.
+      if(typeof h2.heap_min_ever==='number'){var hm=h2.heap_min_ever;var hcol=hm<20000?'#ef4444':(hm<40000?'#f59e0b':'var(--text)');h+=row('Heap min watermark',"<span style='color:"+hcol+"'>"+(hm/1024).toFixed(1)+' KB'+(hm<20000?' &#x26A0;':'')+"</span>");}
+      if(typeof h2.heap_largest==='number')h+=row('Largest free block',(h2.heap_largest/1024).toFixed(1)+' KB');
     }
     // Existing disconnect counters / events.
     h+=_sect('Reconnect counters');

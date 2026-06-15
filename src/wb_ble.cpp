@@ -27,7 +27,18 @@ static const char* PLUS_TXC_UUID = "a73e9a10-628f-4494-a099-12efaf72258f";
 class WBClientCallbacks : public NimBLEClientCallbacks {
     uint32_t onPassKeyRequest() override {
         uint32_t pk = wallboxBLE.blePasskey();
-        Log.println("[BLE] SMP passkey request — sending configured PIN");
+        if (pk == 0) {
+            // Charger asked for a passkey but none is configured — pairing
+            // will fail and any encrypted-link-gated write (e.g. the BGX
+            // stream-mode switch on FW 6.11.26+) will be rejected, leaving
+            // every BAPI command silently timing out. Point the user at the
+            // fix rather than the generic message. (mvanlijden #11)
+            Log.println("[BLE] SMP passkey requested but none configured — "
+                        "set the Bluetooth Passcode in /config -> Charger BLE "
+                        "(it's the 6-digit code shown in the Wallbox app).");
+        } else {
+            Log.println("[BLE] SMP passkey request — sending configured PIN");
+        }
         return pk;
     }
     bool onConfirmPIN(uint32_t pin) override {
