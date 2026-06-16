@@ -49,6 +49,13 @@ class WBClientCallbacks : public NimBLEClientCallbacks {
         Log.printf("[BLE] SMP auth complete: encrypted=%d bonded=%d\n",
             desc->sec_state.encrypted, desc->sec_state.bonded);
     }
+    // Log the HCI disconnect reason so we can tell WHY a link drops — e.g.
+    // 0x08 supervision timeout, 0x13 remote-terminated, 0x16 local-terminated,
+    // 0x3d MIC failure (auth). Diagnostic for the Zentri ~17s drop (#12),
+    // useful on every charger. getLastError() holds the reason after a drop.
+    void onDisconnect(NimBLEClient* pClient) override {
+        Log.printf("[BLE] Disconnected — HCI reason 0x%02x\n", pClient->getLastError());
+    }
 };
 static WBClientCallbacks _secCallbacks;
 
