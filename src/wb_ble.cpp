@@ -519,9 +519,10 @@ void WallboxBLE::_connect() {
     // It will not accept BAPI writes or stream responses until the host
     // performs an indicate-handshake on a dedicated characteristic; the
     // charger then replies with a 0x01 "ready" indication and opens the
-    // BAPI channel (gambys #12 — confirmed against both the official app's
-    // BLE capture and his gateway serial log: "Write failed — connection
-    // may be dead" right after a clean connect). Detected purely by the
+    // BAPI channel (gambys #12 — confirmed from his gateway serial log:
+    // "Write failed — connection may be dead" right after a clean connect,
+    // with the module's own GATT showing the handshake characteristic).
+    // Detected purely by the
     // presence of the handshake characteristic, which neither MAX (u-blox)
     // nor Plus/Copper/Quasar (BGX) expose — so this path is inert on every
     // charger we've shipped support for.
@@ -531,6 +532,16 @@ void WallboxBLE::_connect() {
     if (zentri) {
         Log.println("[BLE] Zentri AMS peripheral detected (20b9794f present) "
                     "— using indicate-handshake path");
+        // Route command writes to the handshake characteristic. On this
+        // module the configured write char (1cce1ea8) rejects the first
+        // BAPI write ("Write failed — connection may be dead"), whereas
+        // 20b9794f carries write + write-no-response + notify + indicate
+        // all on one char — the likely command path. Inbound frames on
+        // either char still land in _notifyCb and are logged.
+        if (zentriHs->canWrite() || zentriHs->canWriteNoResponse()) {
+            _chr = zentriHs;
+            Log.println("[BLE] Zentri: routing command writes to 20b9794f");
+        }
     }
 
     // 3.0 schedule-write fix attempt: proactively pair/encrypt
