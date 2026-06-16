@@ -2045,34 +2045,31 @@ function saveSch(){
 function deleteSchedule(sid){
   confirm2('Delete schedule #'+sid+'?',function(){doDeleteSchedule(sid)});
 }
+// Delete one schedule with the charger's native delete: clr_sch takes
+// par {"sid":[<ids>]} (the `sid` key holds an ARRAY). Returns {"r":0}
+// synchronously. Earlier clr_sch attempts failed only because the param
+// was the wrong shape (scalar sid / "sids" plural / null) — the correct
+// form deletes cleanly without any clear-all + rewrite dance.
 function doDeleteSchedule(sid){
-  var keep=allSchedules.filter(function(s){return s.sid!==sid});
   toast('Deleting schedule #'+sid+'...','info');
-  // Optimistic: drop the row + redraw now so it feels instant. The
-  // clr_sch + rewrite below runs in the background; the debounced
-  // reconcile confirms (or corrects, on error) the true state.
-  renderSchedules(keep.slice());
-  fetch('/api/command?action=bapi&met=clr_sch&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(c){
-    // Abort if clr_sch errored — if the clear succeeded but the
-    // restore writes fail, user loses all schedules.
-    if(c&&c.error){toast(c.error,'error');loadSchedules();return}
-    var i=0;
-    function next(){
-      if(i>=keep.length){toast('Deleted','success');scheduleReconcile();return}
-      var s=keep[i++];
-      // s_sch on fw 6.11.x expects integer start/stop, a bit-array
-      // for days, and the par.schedules[] wrapper (see buildSchEntry).
-      var entry=buildSchEntry(i-1,s.start,s.stop,s.days,s.enabled,s.mcr,s.type||0,s.target,s.repeat||1);
-      var p=JSON.stringify({schedules:[entry]});
-      fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
-        if(r&&r.error){toast(r.error,'error');loadSchedules();return}
-        next();
-      }).catch(function(e){toast('Error: '+(e.message||e),'error');loadSchedules()});
-    }
-    next();
-  }).catch(function(e){toast('Error: '+e.message,'error');loadSchedules()});
+  // Optimistic: drop the row now so it feels instant; reconcile confirms.
+  renderSchedules(allSchedules.filter(function(s){return s.sid!==sid}));
+  fetch('/api/command?action=bapi&met=clr_sch&par='+encodeURIComponent(JSON.stringify({sid:[sid]})),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+    if(r&&r.error){toast(r.error,'error');loadSchedules();return}
+    toast('Schedule #'+sid+' deleted','success');
+    scheduleReconcile();
+  }).catch(function(e){toast('Error: '+(e.message||e),'error');loadSchedules()});
 }
-function delSch(){confirm2('Delete ALL schedules?',function(){fetch('/api/command?action=bapi&met=clr_sch&par=null').then(function(x){return x.json()}).then(function(){toast('All schedules deleted','success');loadSchedules()}).catch(function(e){toast('Error: '+e.message,'error')})});}
+// Delete ALL = clr_sch with every current sid in the array.
+function delSch(){confirm2('Delete ALL schedules?',function(){
+  var sids=allSchedules.map(function(s){return s.sid});
+  if(!sids.length){toast('No schedules to delete','info');return}
+  toast('Deleting all schedules...','info');
+  fetch('/api/command?action=bapi&met=clr_sch&par='+encodeURIComponent(JSON.stringify({sid:sids})),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+    if(r&&r.error){toast(r.error,'error');loadSchedules();return}
+    toast('All schedules deleted','success');scheduleReconcile();
+  }).catch(function(e){toast('Error: '+(e.message||e),'error');loadSchedules()});
+});}
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
 var _pauseTimer=null;
 function fmtMmSs(s){var m=Math.floor(s/60),ss=s%60;return m+':'+(ss<10?'0':'')+ss}
