@@ -4,6 +4,42 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.0.1] - 2026-06-16
+
+Patch release: schedule delete finally works, a real one-click web
+installer, plus robustness + diagnostics fixes on top of 3.0.0.
+
+### Fixed
+
+- **Schedule delete.** Deleting a schedule now uses the charger's native
+  `clr_sch` with `{"sid":[N]}` (the `sid` key takes an array) instead of the
+  old clear-all-then-rewrite, which silently failed on charger fw 6.11.x.
+  Single delete and delete-all both work; verified on hardware.
+- **Web installer.** Replaced the inline README install button (GitHub
+  strips the script, so it never rendered) with a hosted GitHub Pages
+  installer, and serve the manifest + firmware same-origin to fix a CORS
+  "Failed to download manifest" error. ESP32-S3 boards only.
+- **Boot overlay** no longer gated on the BLE-to-charger link, so a gateway
+  that's up on WiFi but out of charger range no longer looks dead.
+- **/api/ota** rejects raw (non-multipart) POSTs with 415 instead of a
+  misleading 200.
+- **BLE UUID config-mismatch** backs off hard so the web UI stays
+  responsive instead of fail-looping.
+- Cross-boot event attribution: boot-settle flag + per-boot id so
+  early-boot reconnect events stop looking like faults.
+
+### Added
+
+- **One-click Compatibility Report** (Info → Tools): a read-only probe that
+  captures the charger's BAPI method support + BLE GATT layout into a
+  paste-ready block, so new charger models can be mapped without the
+  hardware in hand.
+- **r_lse live-session sensors** over MQTT: per-session solar vs grid kWh
+  split, surplus power, active feature, control mode (5 discovery entities).
+- **/info diagnostics:** heap min-ever watermark + largest free block.
+- Optimistic schedule UI with debounced reconcile (faster saves, avoids 429
+  bursts).
+
 ## [3.0.0] - 2026-06-12
 
 The platform release. Three changes worth a major-version bump:
