@@ -27,6 +27,13 @@
 
 ### Recent releases
 
+- **3.0.1** — schedule **delete** now works (was silently broken — uses
+  the charger's native `clr_sch` array form); a real one-click **web
+  installer** at [botts7.github.io/esp32-wallbox](https://botts7.github.io/esp32-wallbox/)
+  (Chrome/Edge, no esptool); one-click **Compatibility Report** (Info →
+  Tools) for mapping new charger models; `r_lse` live-session sensors
+  (per-session solar vs grid kWh split, surplus power); heap-watermark
+  diagnostics on `/info`; boot overlay no longer gated on the BLE link.
 - **3.0.0** — async webserver everywhere (10-step migration);
   WebSocket push channel for live dashboard state at `ws://host/ws`;
   4-step **setup wizard** at `/setup` for first-time onboarding;
