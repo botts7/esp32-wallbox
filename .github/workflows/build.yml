@@ -17,6 +17,10 @@ on:
   release:
     types: [created]
 
+# Needed for softprops/action-gh-release to attach assets to the release.
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
