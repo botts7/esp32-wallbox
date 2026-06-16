@@ -514,34 +514,21 @@ void WallboxBLE::_connect() {
         Log.println("[BLE] Using dual-char mode (separate notify characteristic)");
     }
 
-    // Zentri AMS detection — the original (pre-BGX, no-WiFi) Pulsar uses a
-    // Zentri AMS Bluetooth module instead of u-blox (MAX) or BGX13P (Plus).
-    // It will not accept BAPI writes or stream responses until the host
-    // performs an indicate-handshake on a dedicated characteristic; the
-    // charger then replies with a 0x01 "ready" indication and opens the
-    // BAPI channel (gambys #12 — confirmed from his gateway serial log:
-    // "Write failed — connection may be dead" right after a clean connect,
-    // with the module's own GATT showing the handshake characteristic).
-    // Detected purely by the
-    // presence of the handshake characteristic, which neither MAX (u-blox)
-    // nor Plus/Copper/Quasar (BGX) expose — so this path is inert on every
-    // charger we've shipped support for.
-    static const char* ZENTRI_HS_UUID = "20b9794f-da1a-4d14-8014-a0fb9cefb2f7";
-    NimBLERemoteCharacteristic* zentriHs = svc->getCharacteristic(ZENTRI_HS_UUID);
-    const bool zentri = (zentriHs != nullptr);
+    // Zentri TruConnect detection — the original (pre-BGX, no-WiFi) Pulsar
+    // uses a Zentri AMS module running the TruConnect serial-over-BLE profile
+    // (service 175f8f23), not u-blox (MAX) or BGX13P (Plus). TruConnect has a
+    // MODE characteristic (20b9794f) that selects STREAM_MODE (1, transparent
+    // passthrough) vs command modes — the same idea as the Plus's BGX
+    // mode-switch. Commands go to the RX char (the configured write char,
+    // 1cce1ea8); responses arrive on the TX char (the configured notify char,
+    // cacc07ff). Detected by the MODE char's presence, which neither MAX
+    // (u-blox) nor Plus/Copper/Quasar (BGX) expose — so this path is inert on
+    // every charger we've shipped support for.
+    static const char* ZENTRI_MODE_UUID = "20b9794f-da1a-4d14-8014-a0fb9cefb2f7";
+    NimBLERemoteCharacteristic* zentriMode = svc->getCharacteristic(ZENTRI_MODE_UUID);
+    const bool zentri = (zentriMode != nullptr);
     if (zentri) {
-        Log.println("[BLE] Zentri AMS peripheral detected (20b9794f present) "
-                    "— using indicate-handshake path");
-        // Route command writes to the handshake characteristic. On this
-        // module the configured write char (1cce1ea8) rejects the first
-        // BAPI write ("Write failed — connection may be dead"), whereas
-        // 20b9794f carries write + write-no-response + notify + indicate
-        // all on one char — the likely command path. Inbound frames on
-        // either char still land in _notifyCb and are logged.
-        if (zentriHs->canWrite() || zentriHs->canWriteNoResponse()) {
-            _chr = zentriHs;
-            Log.println("[BLE] Zentri: routing command writes to 20b9794f");
-        }
+        Log.println("[BLE] Zentri TruConnect peripheral detected (20b9794f mode char present)");
     }
 
     // 3.0 schedule-write fix attempt: proactively pair/encrypt
@@ -555,13 +542,13 @@ void WallboxBLE::_connect() {
     // a fallback so the first-write authorisation is in place
     // from the start of the session.
     //
-    // Skip it entirely for Zentri: the original Pulsar (FW 375, no PIN)
-    // speaks an unauthenticated indicate-handshake — its own app never
-    // bonds. Forcing SMP there returns ENOTCONN (err 0x07) and, worse,
-    // appears to corrupt the ATT link: with the pairing attempt present,
-    // gambys's Device Info read came back empty and BAPI went silent,
-    // whereas the earlier build without it read the module info cleanly
-    // (#12). So for Zentri we go straight to the handshake.
+    // Skip it entirely for Zentri: the original Pulsar (FW 375, no PIN) runs
+    // unauthenticated TruConnect — its own app never bonds. Forcing SMP there
+    // returns ENOTCONN (err 0x07) and, worse, corrupts the ATT link: with the
+    // pairing attempt present, gambys's Device Info read came back empty and
+    // BAPI went silent, whereas the build without it read the module info
+    // cleanly (#12). So for Zentri we skip pairing and go straight to the
+    // TruConnect stream-mode switch below.
     if (!zentri) {
         Log.println("[BLE] Initiating SMP encryption (proactive pair)...");
         bool secureOk = _client->secureConnection();
@@ -581,31 +568,13 @@ void WallboxBLE::_connect() {
 
     bool notifyOk;
     if (zentri) {
-        // Zentri handshake. registerForNotify(cb, notifications) writes the
-        // CCCD: notifications=false → indications (0x0002), the mode the
-        // official app uses on this module.
-        //
-        // Step 1 — enable indications on the handshake characteristic. This
-        // is the trigger: the charger replies with a 0x01 "ready" indication
-        // (it lands in _notifyCb like any other frame; the BAPI parser
-        // ignores the lone byte) and only then opens the command channel.
-        bool hsOk = zentriHs->canIndicate() && zentriHs->registerForNotify(_notifyCb, false);
-        if (!hsOk && zentriHs->canNotify())
-            hsOk = zentriHs->registerForNotify(_notifyCb, true);
-        Log.printf("[BLE] Zentri handshake (20b9794f) %s — waiting for ready\n",
-                   hsOk ? "subscribed" : "SUBSCRIBE FAILED");
-        delay(600);  // allow the charger to emit the 0x01 ready indication
-
-        // Step 2 — subscribe the response characteristic for INDICATIONS
-        // (the app streams BAPI via indicate here, not notify). Fall back to
-        // notify if the char can't indicate, so a mis-mapped config still
-        // has a chance.
-        notifyOk = notifyChr->canIndicate() && notifyChr->registerForNotify(_notifyCb, false);
-        if (!notifyOk && notifyChr->canNotify()) {
-            Log.println("[BLE] Zentri: indicate subscribe failed, falling back to notify");
-            notifyOk = notifyChr->registerForNotify(_notifyCb, true);
-        }
-        if (notifyOk) Log.println("[BLE] Zentri channel subscriptions enabled (indicate)");
+        // TruConnect TX (the notify char, cacc07ff) streams responses via
+        // notifications. Subscribe it (notify; indicate fallback). No
+        // SMP-retry path — Zentri is unauthenticated and pairing corrupts it.
+        notifyOk = notifyChr->canNotify() && notifyChr->registerForNotify(_notifyCb, true);
+        if (!notifyOk && notifyChr->canIndicate())
+            notifyOk = notifyChr->registerForNotify(_notifyCb, false);
+        if (notifyOk) Log.println("[BLE] Zentri TX subscribed (notifications)");
     } else {
         // Subscribe to notifications — if CCCD write is rejected, encrypt and retry
         notifyOk = notifyChr->canNotify() && notifyChr->registerForNotify(_notifyCb);
@@ -632,6 +601,23 @@ void WallboxBLE::_connect() {
     }
 
     Log.println("[BLE] Notifications enabled");
+
+    // Zentri TruConnect stream-mode switch — the pre-BGX equivalent of the
+    // BGX block below. Write STREAM_MODE (1) to the MODE characteristic so
+    // the module passes our BAPI bytes transparently to the Wallbox MCU
+    // (writes on the RX char -> MCU, MCU -> notifications on the TX char).
+    // Without this the module sits in command mode and BAPI writes are
+    // swallowed (gambys #12: every write failed, nothing streamed back).
+    if (zentri) {
+        uint8_t streamMode = 0x01;  // 1 = STREAM_MODE per Zentri TruConnect
+        if (zentriMode->writeValue(&streamMode, 1, true) ||
+            zentriMode->writeValue(&streamMode, 1, false)) {
+            Log.println("[BLE] Zentri switched to STREAM_MODE — BAPI passthrough enabled");
+            delay(200);  // let the module honour the mode change before first write
+        } else {
+            Log.println("[BLE] Zentri STREAM_MODE write failed — BAPI may not pass through");
+        }
+    }
 
     // BGX13P / BGXSS stream-mode switch.
     // Pulsar Plus (and Copper SB / Quasar) use a Silicon Labs BGX13P module
