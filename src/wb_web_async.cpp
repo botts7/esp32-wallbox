@@ -17,6 +17,7 @@
 #include "_gen_settings_body_gz.h"  // pre-gzipped /settings body (task #75)
 #include "_gen_info_body_gz.h"      // pre-gzipped /info body (v3.1 #103)
 #include "_gen_dashboard_body_gz.h" // pre-gzipped "/" dashboard body (v3.1 #103)
+#include "_gen_sessions_body_gz.h"  // pre-gzipped /sessions body (v3.1 #103)
 #include "wb_health.h"     // OTA admission guard (step I)
 #include "wb_ws.h"         // AsyncWebSocket handler (#82 migration)
 #include "wb_watchdog.h"   // wb_wdt::extendTo/restore for OTA flash erase
@@ -679,9 +680,23 @@ static void _registerHtmlPages() {
         _sendHtmlPage(req, wb_buildInfoPage());
     });
 
-    // GET /sessions — charging sessions heatmap.
+    // GET /sessions/body.gz — pre-gzipped /sessions body (v3.1 #103). PROGMEM,
+    // no heap. MUST register BEFORE /sessions: AsyncWebServer prefix-matches a
+    // path-bearing URI, so /sessions would otherwise swallow /sessions/body.gz.
+    _async.on("/sessions/body.gz", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        AsyncWebServerResponse* res = req->beginResponse_P(200, "text/html",
+            (const uint8_t*)SESS_BODY_GZ, SESS_BODY_GZ_LEN);
+        res->addHeader("Content-Encoding", "gzip");
+        res->addHeader("Cache-Control", "no-store");
+        res->addHeader("X-Uncompressed-Bytes", String((unsigned long)SESS_BODY_RAW_LEN));
+        req->send(res);
+    });
+
+    // GET /sessions — charging sessions heatmap. Now a ~2 KB shell that
+    // fetches /sessions/body.gz from PROGMEM (v3.1 #103), so the old 20 KB
+    // heap guard is gone — /sessions no longer 503s under heap pressure.
     _async.on("/sessions", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (!_checkHeapHeadroom(req, 20000)) return;
         _sendHtmlPage(req, wb_buildSessionsPage());
     });
 

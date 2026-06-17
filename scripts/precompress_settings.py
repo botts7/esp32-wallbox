@@ -30,6 +30,7 @@ PAGES = [
     ("PRECOMPRESS_SETTINGS_BODY",  "include/_gen_settings_body_gz.h",  "SETTINGS"),
     ("PRECOMPRESS_INFO_BODY",      "include/_gen_info_body_gz.h",      "INFO"),
     ("PRECOMPRESS_DASHBOARD_BODY", "include/_gen_dashboard_body_gz.h", "DASH"),
+    ("PRECOMPRESS_SESSIONS_BODY",  "include/_gen_sessions_body_gz.h",  "SESS"),
 ]
 
 

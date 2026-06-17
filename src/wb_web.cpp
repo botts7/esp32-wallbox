@@ -12,6 +12,7 @@
 #include "_gen_settings_body_gz.h"  // build-time gzipped /settings body (task #75)
 #include "_gen_info_body_gz.h"      // build-time gzipped /info body (v3.1 #103)
 #include "_gen_dashboard_body_gz.h" // build-time gzipped "/" dashboard body (v3.1 #103)
+#include "_gen_sessions_body_gz.h"  // build-time gzipped /sessions body (v3.1 #103)
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -3306,11 +3307,32 @@ static void handleNotFound() {
 // ========== PAGE: Sessions Heatmap (/sessions) ==========
 // 3.0 task #78: extracted body so the async server can call it.
 String wb_buildSessionsPage() {
-    // Pre-reserve to avoid heap-fragmentation panics.
-    String page;
-    page.reserve(20000);
-    page += htmlHead("Sessions");
+    // v3.1 (#103): the ~20 KB sessions body is precompressed to
+    // /sessions/body.gz at build time (the #if 0 block below +
+    // scripts/precompress_settings.py), so the gateway only builds this tiny
+    // shell — no 20 KB String reserve, no heap-fragmentation panic. The body
+    // is pure static (session data is fetched client-side), so the shell just
+    // fetches the gz and injects it (re-executing its <script> tags).
+    String page = htmlHead("Sessions");
     page += R"HTML(
+<div class='loading' id='sess-stub'><div class='ld-spin'></div>Loading Sessions...</div>
+<div id='sess-body'></div>
+<script>
+fetch('/sessions/body.gz',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()}).then(function(html){var t=document.getElementById('sess-body');t.innerHTML=html;t.querySelectorAll('script').forEach(function(o){var s=document.createElement('script');if(o.src)s.src=o.src;else s.textContent=o.textContent;o.parentNode.replaceChild(s,o)});var st=document.getElementById('sess-stub');if(st)st.remove()}).catch(function(e){var st=document.getElementById('sess-stub');if(st)st.innerHTML='<span style="color:#ef4444">Failed to load Sessions: '+(e.message||e)+'</span>'});
+</script>
+)HTML";
+    page += htmlFoot("/settings");
+    return page;
+}
+
+// ---- /sessions page body — source-of-truth for /sessions/body.gz ----
+// Never compiled. scripts/precompress_settings.py extracts the R"HTML literal
+// between the markers, gzips it into include/_gen_sessions_body_gz.h, and the
+// /sessions/body.gz endpoint serves the bytes with Content-Encoding: gzip.
+// Pure static — session data is fetched client-side, nothing spliced in.
+#if 0
+// PRECOMPRESS_SESSIONS_BODY_BEGIN
+static const char* SESS_BODY_SOURCE = R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading...</div>
 <div id='pg' style='display:none'>
 <h1>&#x1F4CA; Charging Sessions<span id='sess-total' style='font-size:.55em;vertical-align:middle;margin-left:10px;padding:3px 9px;border-radius:10px;background:rgba(59,130,246,.12);color:var(--accent);font-weight:500;display:none'></span></h1>
@@ -3706,9 +3728,8 @@ document.getElementById('ld').style.display='none';document.getElementById('pg')
 loadSessions2();
 </script>
 )HTML";
-    page += htmlFoot("/settings");
-    return page;
-}
+// PRECOMPRESS_SESSIONS_BODY_END
+#endif
 
 static void handleSessionsPage() {
     http.send(200, "text/html", wb_buildSessionsPage());
@@ -4391,6 +4412,15 @@ static void registerRoutes() {
             String((unsigned long)DASH_BODY_RAW_LEN));
         http.send_P(200, "text/html",
             (const char*)DASH_BODY_GZ, DASH_BODY_GZ_LEN);
+    });
+    http.on("/sessions/body.gz", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Content-Encoding", "gzip");
+        http.sendHeader("Cache-Control", "no-store");
+        http.sendHeader("X-Uncompressed-Bytes",
+            String((unsigned long)SESS_BODY_RAW_LEN));
+        http.send_P(200, "text/html",
+            (const char*)SESS_BODY_GZ, SESS_BODY_GZ_LEN);
     });
     http.on("/manifest.json", handleManifest);
     http.on("/sw.js", handleServiceWorker);
