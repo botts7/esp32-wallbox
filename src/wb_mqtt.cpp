@@ -23,12 +23,41 @@ static PubSubClient mqttClient(wifiClient);
 // publishDiscoverySelect signature.
 static const char* kEcoOptions[]  = {"Off", "Full Green (Solar Only)", "Solar + Grid"};
 static const char* kHaloOptions[] = {"Off", "Low", "Medium", "High"};
+// Comprehensive common IANA zones. The HA select rejects (and log-spams on)
+// any value the charger reports that isn't in this list, so it must cover the
+// zones users actually run — the curated 16-zone list missed Europe/Amsterdam
+// and most others (#14). This is the populated-region set; exotic zones are
+// still possible but rare.
 static const char* kTzOptions[]   = {
-    "Australia/Sydney", "Australia/Melbourne", "Australia/Brisbane", "Australia/Perth",
-    "Europe/London", "Europe/Paris", "Europe/Berlin", "Europe/Madrid",
-    "America/New_York", "America/Chicago", "America/Los_Angeles",
-    "Asia/Tokyo", "Asia/Shanghai", "Asia/Singapore",
-    "Pacific/Auckland", "UTC"
+    "UTC",
+    // Europe
+    "Europe/London", "Europe/Dublin", "Europe/Lisbon", "Europe/Madrid",
+    "Europe/Paris", "Europe/Brussels", "Europe/Amsterdam", "Europe/Berlin",
+    "Europe/Zurich", "Europe/Rome", "Europe/Vienna", "Europe/Prague",
+    "Europe/Warsaw", "Europe/Copenhagen", "Europe/Stockholm", "Europe/Oslo",
+    "Europe/Helsinki", "Europe/Athens", "Europe/Bucharest", "Europe/Sofia",
+    "Europe/Budapest", "Europe/Belgrade", "Europe/Kyiv", "Europe/Moscow",
+    "Europe/Istanbul",
+    // Americas
+    "America/New_York", "America/Chicago", "America/Denver",
+    "America/Los_Angeles", "America/Phoenix", "America/Anchorage",
+    "America/Toronto", "America/Vancouver", "America/Halifax",
+    "America/Mexico_City", "America/Bogota", "America/Lima",
+    "America/Santiago", "America/Sao_Paulo", "America/Argentina/Buenos_Aires",
+    // Asia / Middle East
+    "Asia/Tokyo", "Asia/Seoul", "Asia/Shanghai", "Asia/Hong_Kong",
+    "Asia/Taipei", "Asia/Singapore", "Asia/Kuala_Lumpur", "Asia/Bangkok",
+    "Asia/Jakarta", "Asia/Ho_Chi_Minh", "Asia/Manila", "Asia/Kolkata",
+    "Asia/Karachi", "Asia/Dubai", "Asia/Tehran", "Asia/Jerusalem",
+    "Asia/Riyadh",
+    // Africa
+    "Africa/Casablanca", "Africa/Algiers", "Africa/Cairo", "Africa/Lagos",
+    "Africa/Nairobi", "Africa/Johannesburg",
+    // Australia / Pacific
+    "Australia/Perth", "Australia/Darwin", "Australia/Brisbane",
+    "Australia/Adelaide", "Australia/Sydney", "Australia/Melbourne",
+    "Australia/Hobart", "Pacific/Auckland", "Pacific/Fiji",
+    "Pacific/Honolulu"
 };
 
 // Total number of discovery entities the state machine publishes.
@@ -219,7 +248,7 @@ bool         g_discReserved = false;
 
 void _discPrep() {
     if (!g_discReserved) {
-        g_discPayload.reserve(1024);
+        g_discPayload.reserve(2048);  // timezone select payload is ~2 KB (#14)
         g_discReserved = true;
     }
     g_discDoc.clear();
@@ -1049,7 +1078,8 @@ const DiscoveryEntry kEntries[] = {
                TopicSlot::SETTINGS, "{{ value_json.timezone | default('UTC') }}",
                nullptr, nullptr, nullptr, nullptr,
                TopicSlot::CMD_TIMEZONE, 0,0,0, nullptr,
-               nullptr, nullptr, kTzOptions, 16 },
+               nullptr, nullptr, kTzOptions,
+               (int)(sizeof(kTzOptions) / sizeof(kTzOptions[0])) },
 
     // ----- Group 5: charger details from gTopic (cases 33-45) -----
 
@@ -1207,12 +1237,15 @@ const DiscoveryEntry kEntries[] = {
 
     /* 59 */ { EntityKind::SENSOR, "green_energy_session", "Green Energy (Session)", "mdi:solar-power",
                TopicSlot::LSE, "{{ value_json.r.green_energy | round(2) }}",
-               "kWh", "energy", "measurement", nullptr,
+               // total_increasing (not measurement): HA rejects measurement for
+               // device_class energy; per-session kWh resets each session and
+               // accumulates within it, which total_increasing models (#14).
+               "kWh", "energy", "total_increasing", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
     /* 60 */ { EntityKind::SENSOR, "grid_energy_session", "Grid Energy (Session)", "mdi:transmission-tower",
                TopicSlot::LSE, "{{ value_json.r.grid_energy | round(2) }}",
-               "kWh", "energy", "measurement", nullptr,
+               "kWh", "energy", "total_increasing", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
     /* 61 */ { EntityKind::SENSOR, "surplus_power", "Solar Surplus Power", "mdi:solar-power-variant",
