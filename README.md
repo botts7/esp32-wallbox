@@ -27,6 +27,10 @@
 
 ### Recent releases
 
+- **3.0.4** — heap-pressure relief (#103): `/info`, `/dashboard` and
+  `/sessions` now serve a small shell + a build-time-gzipped body from
+  PROGMEM instead of building a big String per request, raising the
+  heap-min watermark from ~15 KB to ~43 KB on a busy gateway.
 - **3.0.3** — Home Assistant MQTT fixes (#14): the timezone select now
   covers all major IANA zones (e.g. `Europe/Amsterdam` was missing), and the
   per-session green/grid energy sensors use `total_increasing` so HA stops

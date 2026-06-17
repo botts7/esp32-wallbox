@@ -4,6 +4,24 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.0.4] - 2026-06-17
+
+Patch release — heap-pressure relief on the largest web pages (#103).
+
+### Changed
+
+- **`/info`, `/dashboard` and `/sessions` no longer build a large HTML String
+  per request.** Each page's body is now precompressed (gzip) into PROGMEM at
+  build time and served from `/<page>/body.gz` (`Content-Encoding: gzip`); the
+  page itself is a tiny shell that fetches and injects it. This removes the
+  20–40 KB contiguous allocation those pages needed on every load — which,
+  under concurrent BLE/MQTT activity, could drive the heap toward the danger
+  zone (a gateway was observed at a ~15 KB heap-min watermark on 3.0.x). The
+  realistic heap-min watermark now sits at ~43 KB. `/settings` already used
+  this approach since 2.8.0; this extends it to the other three large pages.
+  Pages are served `Cache-Control: no-store` and the service worker is
+  network-only, so there's no post-OTA stale-page risk.
+
 ## [3.0.3] - 2026-06-17
 
 Patch release — fixes two Home Assistant MQTT-discovery issues reported in #14.
