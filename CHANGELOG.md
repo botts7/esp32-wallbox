@@ -4,6 +4,29 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.0.2] - 2026-06-17
+
+Patch release — fixes a post-OTA stale-page problem that could make a fixed
+gateway look broken (e.g. schedule delete appearing to fail because the
+browser was running pre-update JS).
+
+### Fixed
+
+- **HTML pages are no longer cached.** They were served with no
+  `Cache-Control`, so the browser / installed PWA / service worker cached
+  them and kept serving stale JS after an OTA — a gateway already updated to
+  the fixed firmware would still run the old code (most visibly, the old
+  broken schedule delete). Pages now send `Cache-Control: no-store`.
+- **Stale open tabs auto-reload after an OTA.** The page compares its
+  baked-in firmware version against the gateway's live version (on focus +
+  every 60 s) and reloads if they differ, so an already-open tab picks up
+  new firmware without a manual hard-refresh. (No-ops on matching firmware.)
+- **Schedule-delete feedback.** Delete no longer optimistically drops the
+  row (which made a failed/timed-out delete look like it half-worked). The
+  row stays until the charger confirms; success/error/timeout each show a
+  clear toast and reload to the true state, with a specific "charger busy,
+  try again" message on timeout.
+
 ## [3.0.1] - 2026-06-16
 
 Patch release: schedule delete finally works, a real one-click web
