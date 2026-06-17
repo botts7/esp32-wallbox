@@ -49,12 +49,18 @@ class WBClientCallbacks : public NimBLEClientCallbacks {
         Log.printf("[BLE] SMP auth complete: encrypted=%d bonded=%d\n",
             desc->sec_state.encrypted, desc->sec_state.bonded);
     }
-    // Log the HCI disconnect reason so we can tell WHY a link drops — e.g.
-    // 0x08 supervision timeout, 0x13 remote-terminated, 0x16 local-terminated,
-    // 0x3d MIC failure (auth). Diagnostic for the Zentri ~17s drop (#12),
-    // useful on every charger. getLastError() holds the reason after a drop.
+    // #12 NOTE: the single-arg onDisconnect (NimBLE 1.4.x) does NOT receive the
+    // HCI disconnect reason, and the library discards event->disconnect.reason
+    // without storing it in m_lastErr (see NimBLEClient.cpp BLE_GAP_EVENT_
+    // DISCONNECT). So getLastError() here is the last *GATT* error (e.g. a
+    // failed write rc), NOT the disconnect reason — the earlier "HCI reason"
+    // label was wrong. The REAL HCI reason now prints from NimBLE's own log
+    // ("<tag>: disconnect; reason=N, <string>") because the diagnostic build
+    // sets CONFIG_NIMBLE_CPP_LOG_LEVEL=3. We still log the last GATT error as
+    // context (it's often the rc of the write that immediately preceded the drop).
     void onDisconnect(NimBLEClient* pClient) override {
-        Log.printf("[BLE] Disconnected — HCI reason 0x%02x\n", pClient->getLastError());
+        Log.printf("[BLE] Disconnected — last GATT err=%d (real HCI reason in the "
+                   "NimBLE 'disconnect; reason=' line)\n", pClient->getLastError());
     }
 };
 static WBClientCallbacks _secCallbacks;
@@ -1239,8 +1245,23 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
 
     // Write — try without response first, fallback to with response
     if (!_chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), false)) {
+        int rcNoRsp = _client ? _client->getLastError() : -1;
         if (!_chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), true)) {
-            Log.printf("[BLE] Write failed for %s — connection may be dead\n", met);
+            // #12 diagnostic: the guard above proved the link was alive, so this
+            // write is being *refused*, not failing on a dead link. Log WHY.
+            // getLastError() holds the real GATT write rc here (the write path
+            // sets m_lastErr). Decode: 261/0x105 = BLE_HS_ATT_ERR(5) insufficient
+            // auth, 271/0x10f = ATT(15) insufficient encryption (char needs the
+            // SMP link we skip for Zentri); 7 = ENOTCONN; 6 = ENOMEM (TX bufs);
+            // framelen > mtu => fragmentation. char= tells us which characteristic.
+            int rcRsp = _client ? _client->getLastError() : -1;
+            Log.printf("[BLE] Write failed for %s — rc_norsp=%d rc_rsp=%d mtu=%d "
+                       "framelen=%u connected=%d char=%s\n",
+                       met, rcNoRsp, rcRsp,
+                       _client ? (int)_client->getMTU() : -1,
+                       (unsigned)framed.length(),
+                       (_client && _client->isConnected()) ? 1 : 0,
+                       _chr ? _chr->getUUID().toString().c_str() : "?");
             _state = State::DISCONNECTED;
             _chr = nullptr;
             if (_cmdMutex) xSemaphoreGive(_cmdMutex);
