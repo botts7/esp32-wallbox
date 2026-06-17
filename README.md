@@ -27,6 +27,11 @@
 
 ### Recent releases
 
+- **3.0.2** — fixes a post-OTA stale-page problem: HTML pages now send
+  `Cache-Control: no-store` (browsers/PWAs were caching old JS after an
+  update), open tabs auto-reload when the gateway's firmware version
+  changes, and schedule-delete feedback is now honest (row stays until the
+  charger confirms; clear success/error/timeout toasts).
 - **3.0.1** — schedule **delete** now works (was silently broken — uses
   the charger's native `clr_sch` array form); a real one-click **web
   installer** at [botts7.github.io/esp32-wallbox](https://botts7.github.io/esp32-wallbox/)
