@@ -2991,11 +2991,14 @@ function loadDiag(){
     if(d.wifi_last_at_s)h+=row('Last WiFi reconnect',fmtUptime(d.wifi_last_at_s)+' after boot');
     if(d.events&&d.events.length){
       // Split this-boot vs prior by the event's boot id (d.boot is the
-      // current boot). The old heuristic compared e.start to curUp, which
-      // mislabelled a prior-boot event whose start was below the current
-      // uptime as "this boot". Fall back to that heuristic only if the
-      // firmware is old enough not to stamp boot ids.
-      function isThisBoot(e){return (typeof e.boot==='number'&&typeof d.boot==='number')?e.boot===d.boot:e.start<=curUp;}
+      // current boot). When the summary HAS a boot id, an event WITHOUT one
+      // predates boot-stamping (recorded by old firmware, still in NVS) → it's
+      // a prior boot, not this one. The earlier fallback (e.start<=curUp)
+      // mislabelled those leftover events as "this boot" (#13: counters showed
+      // 0 reconnects this boot while the list showed 8 old events). Only use
+      // the start-heuristic when the firmware is so old it stamps no boot id in
+      // the summary at all.
+      function isThisBoot(e){return (typeof d.boot==='number')?(typeof e.boot==='number'&&e.boot===d.boot):(e.start<=curUp);}
       function evRow(e,dim){var kc=e.kind==='ble'?'#a78bfa':(e.kind==='wifi'?'#34d399':'#22d3ee');var tag=e.settle?' <span style="color:var(--text3)">· boot-settle</span>':'';return '<div style="font-family:monospace;font-size:.78em;margin:2px 0'+(dim?';opacity:.55':'')+'"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+(dim?' of that boot':'')+', down '+fmtDur(e.dur)+tag+'</div>';}
       var thisBoot=d.events.filter(isThisBoot);
       var prior=d.events.filter(function(e){return !isThisBoot(e);});
