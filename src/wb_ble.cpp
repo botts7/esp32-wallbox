@@ -536,6 +536,16 @@ void WallboxBLE::_connect() {
     const bool zentri = (zentriMode != nullptr);
     if (zentri) {
         Log.println("[BLE] Zentri TruConnect peripheral detected (20b9794f mode char present)");
+        // Relax connection params for this module. The default (latency 2,
+        // 3 s supervision timeout, set above for MAX/Plus) is aggressive; on
+        // the older Zentri the link drops ~15-17 s in regardless of signal
+        // (#12). Drop slave latency to 0 (no skipped events) and widen the
+        // supervision timeout to 6 s so a brief stall doesn't tear the link
+        // down before BAPI gets through. Zentri-only — MAX/Plus keep the
+        // default above. (Confirm against the HCI disconnect reason: this
+        // targets 0x08 supervision-timeout drops.)
+        _client->updateConnParams(24, 40, 0, 600);  // 30-50ms, latency 0, 6s timeout
+        Log.println("[BLE] Zentri: relaxed conn params (latency 0, 6s supervision)");
     }
 
     // 3.0 schedule-write fix attempt: proactively pair/encrypt
