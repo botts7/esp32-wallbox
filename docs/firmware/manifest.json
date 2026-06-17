@@ -1,6 +1,6 @@
 {
   "name": "Wallbox Gateway",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "funding_url": "https://github.com/botts7/esp32-wallbox",
   "new_install_prompt_erase": true,
   "builds": [
