@@ -15,6 +15,7 @@
 #include <ArduinoJson.h>
 #include <esp_task_wdt.h>  // TWDT feed during long xTaskNotifyWait slices
 #include "_gen_settings_body_gz.h"  // pre-gzipped /settings body (task #75)
+#include "_gen_info_body_gz.h"      // pre-gzipped /info body (v3.1 #103)
 #include "wb_health.h"     // OTA admission guard (step I)
 #include "wb_ws.h"         // AsyncWebSocket handler (#82 migration)
 #include "wb_watchdog.h"   // wb_wdt::extendTo/restore for OTA flash erase
@@ -641,14 +642,23 @@ static void _registerHtmlPages() {
         _sendHtmlPage(req, wb_buildSetupPage());
     });
 
-    // GET /info — diagnostics + charger info. The largest page (~34 KB).
-    // Heap-guarded so we 503 + serve the busy page if the contiguous
-    // block isn't big enough for the single 40 KB build. Served via
-    // _sendHtmlPage (pull-based filler) so there's no second full-size
-    // copy — that copy is what silently truncated this page to 0 bytes
-    // before the fix (req->send(code,type,String) duplicates the body).
+    // GET /info/body.gz — pre-gzipped /info body (v3.1 #103). PROGMEM, no
+    // heap. MUST register BEFORE /info: AsyncWebServer prefix-matches a
+    // path-bearing URI, so /info would otherwise swallow /info/body.gz.
+    _async.on("/info/body.gz", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        AsyncWebServerResponse* res = req->beginResponse_P(200, "text/html",
+            (const uint8_t*)INFO_BODY_GZ, INFO_BODY_GZ_LEN);
+        res->addHeader("Content-Encoding", "gzip");
+        res->addHeader("Cache-Control", "no-store");
+        res->addHeader("X-Uncompressed-Bytes", String((unsigned long)INFO_BODY_RAW_LEN));
+        req->send(res);
+    });
+
+    // GET /info — now just a tiny shell that fetches /info/body.gz above, so
+    // the old 40 KB build + heap guard are gone (v3.1 #103). The body never
+    // becomes a runtime String — it streams from PROGMEM.
     _async.on("/info", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (!_checkHeapHeadroom(req, 40000)) return;
         wb_health::setBreadcrumbPath("/info");
         _sendHtmlPage(req, wb_buildInfoPage());
     });

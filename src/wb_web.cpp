@@ -10,6 +10,7 @@
 #include "wb_ws.h"
 #include "wb_mqtt.h"
 #include "_gen_settings_body_gz.h"  // build-time gzipped /settings body (task #75)
+#include "_gen_info_body_gz.h"      // build-time gzipped /info body (v3.1 #103)
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -2688,24 +2689,32 @@ static void handleConfig() {
 // ========== PAGE 4: Info (/info) ==========
 // 3.0 task #78: extracted body so the async server can call it.
 String wb_buildInfoPage() {
-    // Pre-reserve the final ~34 KB so the String += chain doesn't churn
-    // the heap with growing-and-copying reallocations under concurrent
-    // BLE response parsing on another task. Reproducer: /info + r_dca
-    // poll racing -> panic. 40 KB reserve gives a single contiguous
-    // block with headroom. Streaming via AsyncResponseStream was tried
-    // first as the "root-cause fix" but its cbuf-backed writes block
-    // the AsyncTCP task long enough under concurrent load to trip the
-    // task watchdog (5 captured task-watchdog crashes, path=/info,
-    // loop_count <250). Reverted; heap-pressure guard in the async
-    // handler covers the rest. A proper non-blocking chunked-response
-    // refactor is tracked for v3.1 (task #103).
-    String page;
-    page.reserve(40000);
-    page += htmlHead("Info");
-    // CSRF token needed by interactive JS (e.g. clearDiag) — injected
-    // here so the page-body raw string can stay static.
-    page += "<script>window.WB_CSRF='" + csrfToken + "';</script>";
+    // v3.1 (#103): the ~40 KB /info body is precompressed to /info/body.gz at
+    // build time (the #if 0 block below + scripts/precompress_settings.py), so
+    // the gateway only builds this tiny shell — no big String alloc, no heap-
+    // pressure dip on /info. The shell injects window.WB_CSRF + window.WB_FW
+    // (the only two server values the body needs) then fetches the gz body.
+    String page = htmlHead("Info");
+    page += "<script>window.WB_CSRF='" + csrfToken + "';window.WB_FW='" WB_VERSION "';</script>";
     page += R"HTML(
+<div class='loading' id='info-stub'><div class='ld-spin'></div>Loading Info...</div>
+<div id='info-body'></div>
+<script>
+fetch('/info/body.gz',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()}).then(function(html){var t=document.getElementById('info-body');t.innerHTML=html;t.querySelectorAll('script').forEach(function(o){var s=document.createElement('script');if(o.src)s.src=o.src;else s.textContent=o.textContent;o.parentNode.replaceChild(s,o)});var st=document.getElementById('info-stub');if(st)st.remove()}).catch(function(e){var st=document.getElementById('info-stub');if(st)st.innerHTML='<span style="color:#ef4444">Failed to load Info: '+(e.message||e)+'</span>'});
+</script>
+)HTML";
+    page += htmlFoot("/info");
+    return page;
+}
+
+// ---- /info page body — source-of-truth for /info/body.gz ----
+// Never compiled. scripts/precompress_settings.py extracts the R"HTML literal
+// between the markers, gzips it into include/_gen_info_body_gz.h, and the
+// /info/body.gz endpoint serves the bytes with Content-Encoding: gzip. The
+// body reads window.WB_CSRF and window.WB_FW (set by the shell above).
+#if 0
+// PRECOMPRESS_INFO_BODY_BEGIN
+static const char* INFO_BODY_SOURCE = R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Info...</div>
 <div id='pg' style='display:none'>
 <h1>&#x2139; Gateway Info</h1>
@@ -2833,7 +2842,7 @@ function infoTab(n){
 }
 try{var n=parseInt(localStorage.getItem('wb-info-tab')||'0',10);if(n>=0&&n<3)infoTab(n)}catch(e){}
 </script>
-<p style='text-align:center;color:var(--text3);font-size:.75em;margin-top:16px'>Wallbox BLE Gateway )HTML" WB_VERSION R"HTML(</p>
+<p style='text-align:center;color:var(--text3);font-size:.75em;margin-top:16px'>Wallbox BLE Gateway <span id='__fw'></span></p>
 
 <script>
 function _sect(title){return "<div style='margin-top:10px;color:var(--text3);font-size:.72em;text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border);padding-bottom:3px;margin-bottom:4px;font-weight:600'>"+title+"</div>"}
@@ -3059,13 +3068,13 @@ function genCompat(){
   }
   probe(0);
 }
+var __fw=document.getElementById('__fw');if(__fw)__fw.textContent=window.WB_FW||'';
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
 </script>
 </div>
 )HTML";
-    page += htmlFoot("/info");
-    return page;
-}
+// PRECOMPRESS_INFO_BODY_END
+#endif
 
 static void handleInfo() {
     http.send(200, "text/html", wb_buildInfoPage());
@@ -4346,6 +4355,15 @@ static void registerRoutes() {
             String((unsigned long)SETTINGS_BODY_RAW_LEN));
         http.send_P(200, "text/html",
             (const char*)SETTINGS_BODY_GZ, SETTINGS_BODY_GZ_LEN);
+    });
+    http.on("/info/body.gz", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Content-Encoding", "gzip");
+        http.sendHeader("Cache-Control", "no-store");
+        http.sendHeader("X-Uncompressed-Bytes",
+            String((unsigned long)INFO_BODY_RAW_LEN));
+        http.send_P(200, "text/html",
+            (const char*)INFO_BODY_GZ, INFO_BODY_GZ_LEN);
     });
     http.on("/manifest.json", handleManifest);
     http.on("/sw.js", handleServiceWorker);
