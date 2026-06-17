@@ -49,6 +49,13 @@ class WBClientCallbacks : public NimBLEClientCallbacks {
         Log.printf("[BLE] SMP auth complete: encrypted=%d bonded=%d\n",
             desc->sec_state.encrypted, desc->sec_state.bonded);
     }
+    // NimBLE 1.4.x's single-arg onDisconnect doesn't receive the HCI reason
+    // (the library discards event->disconnect.reason and never stores it in
+    // m_lastErr), so getLastError() here is the last GATT error — often the rc
+    // of the write that preceded the drop. Logged as context.
+    void onDisconnect(NimBLEClient* pClient) override {
+        Log.printf("[BLE] Disconnected — last GATT err=%d\n", pClient->getLastError());
+    }
 };
 static WBClientCallbacks _secCallbacks;
 
@@ -514,6 +521,33 @@ void WallboxBLE::_connect() {
         Log.println("[BLE] Using dual-char mode (separate notify characteristic)");
     }
 
+    // Zentri TruConnect detection — the original (pre-BGX, no-WiFi) Pulsar
+    // uses a Zentri AMS module running the TruConnect serial-over-BLE profile
+    // (service 175f8f23), not u-blox (MAX) or BGX13P (Plus). TruConnect has a
+    // MODE characteristic (20b9794f) that selects STREAM_MODE (1, transparent
+    // passthrough) vs command modes — the same idea as the Plus's BGX
+    // mode-switch. Commands go to the RX char (the configured write char,
+    // 1cce1ea8); responses arrive on the TX char (the configured notify char,
+    // cacc07ff). Detected by the MODE char's presence, which neither MAX
+    // (u-blox) nor Plus/Copper/Quasar (BGX) expose — so this path is inert on
+    // every charger we've shipped support for.
+    static const char* ZENTRI_MODE_UUID = "20b9794f-da1a-4d14-8014-a0fb9cefb2f7";
+    NimBLERemoteCharacteristic* zentriMode = svc->getCharacteristic(ZENTRI_MODE_UUID);
+    const bool zentri = (zentriMode != nullptr);
+    if (zentri) {
+        Log.println("[BLE] Zentri TruConnect peripheral detected (20b9794f mode char present)");
+        // Relax connection params for this module. The default (latency 2,
+        // 3 s supervision timeout, set above for MAX/Plus) is aggressive; on
+        // the older Zentri the link drops ~15-17 s in regardless of signal
+        // (#12). Drop slave latency to 0 (no skipped events) and widen the
+        // supervision timeout to 6 s so a brief stall doesn't tear the link
+        // down before BAPI gets through. Zentri-only — MAX/Plus keep the
+        // default above. (Confirm against the HCI disconnect reason: this
+        // targets 0x08 supervision-timeout drops.)
+        _client->updateConnParams(24, 40, 0, 600);  // 30-50ms, latency 0, 6s timeout
+        Log.println("[BLE] Zentri: relaxed conn params (latency 0, 6s supervision)");
+    }
+
     // 3.0 schedule-write fix attempt: proactively pair/encrypt
     // before subscribing for notifies. jagheterfredrik's HACS
     // reference always pairs on connect, and the live Pulsar MAX
@@ -524,32 +558,55 @@ void WallboxBLE::_connect() {
     // prompt. We do this BEFORE CCCD subscription rather than as
     // a fallback so the first-write authorisation is in place
     // from the start of the session.
-    Log.println("[BLE] Initiating SMP encryption (proactive pair)...");
-    bool secureOk = _client->secureConnection();
-    if (secureOk) {
-        Log.println("[BLE] Encryption established");
-        // NimBLE 1.4.1 can return before bond info fully lands —
-        // small delay matches the fallback path's behaviour.
-        delay(200);
+    //
+    // Skip it entirely for Zentri: the original Pulsar (FW 375, no PIN) runs
+    // unauthenticated TruConnect — its own app never bonds. Forcing SMP there
+    // returns ENOTCONN (err 0x07) and, worse, corrupts the ATT link: with the
+    // pairing attempt present, gambys's Device Info read came back empty and
+    // BAPI went silent, whereas the build without it read the module info
+    // cleanly (#12). So for Zentri we skip pairing and go straight to the
+    // TruConnect stream-mode switch below.
+    if (!zentri) {
+        Log.println("[BLE] Initiating SMP encryption (proactive pair)...");
+        bool secureOk = _client->secureConnection();
+        if (secureOk) {
+            Log.println("[BLE] Encryption established");
+            // NimBLE 1.4.1 can return before bond info fully lands —
+            // small delay matches the fallback path's behaviour.
+            delay(200);
+        } else {
+            Log.printf("[BLE] secureConnection() failed (err 0x%02x) — "
+                       "continuing unpaired; writes may be rejected\n",
+                       _client->getLastError());
+        }
     } else {
-        Log.printf("[BLE] secureConnection() failed (err 0x%02x) — "
-                   "continuing unpaired; writes may be rejected\n",
-                   _client->getLastError());
+        Log.println("[BLE] Zentri: skipping SMP pair (unauthenticated handshake protocol)");
     }
 
-    // Subscribe to notifications — if CCCD write is rejected, encrypt and retry
-    bool notifyOk = notifyChr->canNotify() && notifyChr->registerForNotify(_notifyCb);
-    if (!notifyOk && notifyChr->canNotify()) {
-        Log.println("[BLE] CCCD rejected, trying SMP encryption...");
-        delay(200);
-        if (_client->secureConnection()) {
-            Log.println("[BLE] Encrypted, retrying notifications...");
-            // NimBLE 1.4.1 can return from secureConnection() before bond
-            // info fully lands — give it a moment before the CCCD retry
+    bool notifyOk;
+    if (zentri) {
+        // TruConnect TX (the notify char, cacc07ff) streams responses via
+        // notifications. Subscribe it (notify; indicate fallback). No
+        // SMP-retry path — Zentri is unauthenticated and pairing corrupts it.
+        notifyOk = notifyChr->canNotify() && notifyChr->registerForNotify(_notifyCb, true);
+        if (!notifyOk && notifyChr->canIndicate())
+            notifyOk = notifyChr->registerForNotify(_notifyCb, false);
+        if (notifyOk) Log.println("[BLE] Zentri TX subscribed (notifications)");
+    } else {
+        // Subscribe to notifications — if CCCD write is rejected, encrypt and retry
+        notifyOk = notifyChr->canNotify() && notifyChr->registerForNotify(_notifyCb);
+        if (!notifyOk && notifyChr->canNotify()) {
+            Log.println("[BLE] CCCD rejected, trying SMP encryption...");
             delay(200);
-            notifyOk = notifyChr->registerForNotify(_notifyCb);
-        } else {
-            Log.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
+            if (_client->secureConnection()) {
+                Log.println("[BLE] Encrypted, retrying notifications...");
+                // NimBLE 1.4.1 can return from secureConnection() before bond
+                // info fully lands — give it a moment before the CCCD retry
+                delay(200);
+                notifyOk = notifyChr->registerForNotify(_notifyCb);
+            } else {
+                Log.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
+            }
         }
     }
     if (!notifyOk) {
@@ -561,6 +618,30 @@ void WallboxBLE::_connect() {
     }
 
     Log.println("[BLE] Notifications enabled");
+
+    // Zentri TruConnect stream-mode switch — the pre-BGX equivalent of the
+    // BGX block below. Write STREAM_MODE (1) to the MODE characteristic so
+    // the module passes our BAPI bytes transparently to the Wallbox MCU
+    // (writes on the RX char -> MCU, MCU -> notifications on the TX char).
+    // Without this the module sits in command mode and BAPI writes are
+    // swallowed (gambys #12: every write failed, nothing streamed back).
+    if (zentri) {
+        uint8_t streamMode = 0x01;  // 1 = STREAM_MODE per Zentri TruConnect
+        if (zentriMode->writeValue(&streamMode, 1, true) ||
+            zentriMode->writeValue(&streamMode, 1, false)) {
+            Log.println("[BLE] Zentri switched to STREAM_MODE — BAPI passthrough enabled");
+            delay(200);  // let the module honour the mode change before first write
+        } else {
+            Log.println("[BLE] Zentri STREAM_MODE write failed — BAPI may not pass through");
+        }
+
+        // The Zentri AMS caps the ATT MTU at the 23-byte default and never
+        // negotiates up (confirmed #12 — it stayed 23 after a 2s wait), so
+        // BAPI frames (~41 B) can't go out in one write. We don't wait or work
+        // around it here: the write path (_sendCommandDirect) reads the live
+        // MTU and fragments each frame into (mtu-3) chunks to fit. Just note it.
+        Log.printf("[BLE] Zentri MTU: %u (writes fragment to fit)\n", _client->getMTU());
+    }
 
     // BGX13P / BGXSS stream-mode switch.
     // Pulsar Plus (and Copper SB / Quasar) use a Silicon Labs BGX13P module
@@ -1163,15 +1244,50 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
 
     Log.printf("[BLE] TX %s\n", met);
 
-    // Write — try without response first, fallback to with response
-    if (!_chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), false)) {
-        if (!_chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), true)) {
-            Log.printf("[BLE] Write failed for %s — connection may be dead\n", met);
-            _state = State::DISCONNECTED;
-            _chr = nullptr;
-            if (_cmdMutex) xSemaphoreGive(_cmdMutex);
-            return "";
+    // Write the framed BAPI command. On a small-MTU link the frame can exceed
+    // the single-write payload (mtu-3); NimBLE would then fall back to a long/
+    // prepared write, which a serial-over-BLE stream char rejects — and which,
+    // on an auth error, internally calls secureConnection() and corrupts the
+    // unauthenticated Zentri link. So fragment large frames into (mtu-3) chunks
+    // with write-no-response, exactly as a serial stream expects (the module
+    // reassembles the byte stream). Frames that fit take the normal path, so
+    // MAX/Plus (MTU 247) are unchanged. #12: gambys's log confirmed the Zentri
+    // TruConnect module caps MTU at the 23-byte default while frames are ~41 B.
+    const uint8_t* wp = (const uint8_t*)framed.c_str();
+    size_t wlen = framed.length();
+    uint16_t curMtu = _client ? _client->getMTU() : 23;
+    size_t maxChunk = (curMtu > 3) ? (size_t)(curMtu - 3) : 20;
+    bool writeOk = true;
+
+    if (wlen <= maxChunk) {
+        // Fits in one ATT write — original behaviour (no-response, then with).
+        if (!_chr->writeValue(wp, wlen, false))
+            writeOk = _chr->writeValue(wp, wlen, true);
+    } else {
+        // Fragment: write-no-response in mtu-sized chunks, paced so the
+        // controller TX buffer can't overrun (no per-chunk ACK on a stream).
+        size_t off = 0;
+        while (off < wlen && writeOk) {
+            size_t n = (wlen - off < maxChunk) ? (wlen - off) : maxChunk;
+            writeOk = _chr->writeValue(wp + off, n, false);
+            off += n;
+            if (off < wlen) delay(8);
         }
+        if (writeOk)
+            Log.printf("[BLE] TX %s fragmented: %u bytes in %u-byte chunks (mtu=%u)\n",
+                       met, (unsigned)wlen, (unsigned)maxChunk, curMtu);
+    }
+
+    if (!writeOk) {
+        Log.printf("[BLE] Write failed for %s — mtu=%d framelen=%u connected=%d char=%s\n",
+                   met, _client ? (int)_client->getMTU() : -1,
+                   (unsigned)framed.length(),
+                   (_client && _client->isConnected()) ? 1 : 0,
+                   _chr ? _chr->getUUID().toString().c_str() : "?");
+        _state = State::DISCONNECTED;
+        _chr = nullptr;
+        if (_cmdMutex) xSemaphoreGive(_cmdMutex);
+        return "";
     }
     _txCount++;
 
