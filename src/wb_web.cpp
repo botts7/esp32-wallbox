@@ -4396,7 +4396,7 @@ static void registerRoutes() {
             (const char*)SETTINGS_BODY_GZ, SETTINGS_BODY_GZ_LEN);
     });
     http.on("/info/body.gz", []() {
-        if (!checkAuth()) return;
+        // No auth — /info is an open page; its body must be open too. (#103)
         http.sendHeader("Content-Encoding", "gzip");
         http.sendHeader("Cache-Control", "no-store");
         http.sendHeader("X-Uncompressed-Bytes",
@@ -4405,7 +4405,7 @@ static void registerRoutes() {
             (const char*)INFO_BODY_GZ, INFO_BODY_GZ_LEN);
     });
     http.on("/dashboard/body.gz", []() {
-        if (!checkAuth()) return;
+        // No auth — the "/" dashboard is an open page; its body must be too. (#103)
         http.sendHeader("Content-Encoding", "gzip");
         http.sendHeader("Cache-Control", "no-store");
         http.sendHeader("X-Uncompressed-Bytes",
@@ -4414,7 +4414,7 @@ static void registerRoutes() {
             (const char*)DASH_BODY_GZ, DASH_BODY_GZ_LEN);
     });
     http.on("/sessions/body.gz", []() {
-        if (!checkAuth()) return;
+        // No auth — /sessions is an open page; its body must be open too. (#103)
         http.sendHeader("Content-Encoding", "gzip");
         http.sendHeader("Cache-Control", "no-store");
         http.sendHeader("X-Uncompressed-Bytes",

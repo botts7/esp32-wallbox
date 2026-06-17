@@ -633,7 +633,9 @@ static void _registerHtmlPages() {
     // PROGMEM, no heap. "/" only exact-matches, so order vs "/" is moot, but
     // it lives with the other body.gz routes for clarity.
     _async.on("/dashboard/body.gz", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (!_checkAuth(req)) return;
+        // No auth gate — the "/" dashboard shell is open (view without login),
+        // so its body must be too, else an unauthenticated viewer gets the
+        // shell but a 401 on the fetch and a blank page. (#103 regression fix.)
         AsyncWebServerResponse* res = req->beginResponse_P(200, "text/html",
             (const uint8_t*)DASH_BODY_GZ, DASH_BODY_GZ_LEN);
         res->addHeader("Content-Encoding", "gzip");
@@ -663,7 +665,8 @@ static void _registerHtmlPages() {
     // heap. MUST register BEFORE /info: AsyncWebServer prefix-matches a
     // path-bearing URI, so /info would otherwise swallow /info/body.gz.
     _async.on("/info/body.gz", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (!_checkAuth(req)) return;
+        // No auth gate — /info is an open page (same as before #103), so its
+        // body must be open too or the open shell can't load it. (regression fix)
         AsyncWebServerResponse* res = req->beginResponse_P(200, "text/html",
             (const uint8_t*)INFO_BODY_GZ, INFO_BODY_GZ_LEN);
         res->addHeader("Content-Encoding", "gzip");
@@ -684,7 +687,8 @@ static void _registerHtmlPages() {
     // no heap. MUST register BEFORE /sessions: AsyncWebServer prefix-matches a
     // path-bearing URI, so /sessions would otherwise swallow /sessions/body.gz.
     _async.on("/sessions/body.gz", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (!_checkAuth(req)) return;
+        // No auth gate — /sessions is an open page, so its body must be open
+        // too or the open shell can't load it. (#103 regression fix)
         AsyncWebServerResponse* res = req->beginResponse_P(200, "text/html",
             (const uint8_t*)SESS_BODY_GZ, SESS_BODY_GZ_LEN);
         res->addHeader("Content-Encoding", "gzip");
