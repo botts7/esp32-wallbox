@@ -2061,14 +2061,23 @@ function deleteSchedule(sid){
 // was the wrong shape (scalar sid / "sids" plural / null) — the correct
 // form deletes cleanly without any clear-all + rewrite dance.
 function doDeleteSchedule(sid){
+  // Not optimistic: keep the row until the charger confirms, so a failed or
+  // timed-out delete gives honest feedback instead of the row vanishing then
+  // reappearing. Always reload after (success or fail) to show the true state.
   toast('Deleting schedule #'+sid+'...','info');
-  // Optimistic: drop the row now so it feels instant; reconcile confirms.
-  renderSchedules(allSchedules.filter(function(s){return s.sid!==sid}));
   fetch('/api/command?action=bapi&met=clr_sch&par='+encodeURIComponent(JSON.stringify({sid:[sid]})),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
-    if(r&&r.error){toast(r.error,'error');loadSchedules();return}
+    if(r&&r.error){
+      var m=(r.error&&r.error.message)?r.error.message:'rejected by charger';
+      toast('Delete failed: '+m,'error');loadSchedules();return;
+    }
     toast('Schedule #'+sid+' deleted','success');
-    scheduleReconcile();
-  }).catch(function(e){toast('Error: '+(e.message||e),'error');loadSchedules()});
+    loadSchedules();
+  }).catch(function(e){
+    var msg=String((e&&e.message)||e||'');
+    var to=(e&&e.name==='TimeoutError')||/abort|timed?\s*out/i.test(msg);
+    toast(to?'Delete timed out — charger busy, try again':'Delete error: '+msg,'error');
+    loadSchedules();
+  });
 }
 // Delete ALL = clr_sch with every current sid in the array.
 function delSch(){confirm2('Delete ALL schedules?',function(){

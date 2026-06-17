@@ -206,13 +206,21 @@ static bool _checkHeapHeadroom(AsyncWebServerRequest* req, size_t need) {
 static void _sendHtmlPage(AsyncWebServerRequest* req, String&& html) {
     auto body = std::make_shared<String>(std::move(html));
     const size_t len = body->length();
-    req->send(req->beginResponse("text/html", len,
+    AsyncWebServerResponse* res = req->beginResponse("text/html", len,
         [body](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
             size_t remaining = body->length() - index;
             size_t n = remaining < maxLen ? remaining : maxLen;
             if (n) memcpy(buf, body->c_str() + index, n);
             return n;
-        }));
+        });
+    // Never cache the HTML pages. Without this the browser/PWA/service-worker
+    // heuristically caches the page and serves stale JS after an OTA — which
+    // is how a user kept hitting the old schedule-delete (clr_sch null) on a
+    // gateway already updated to the fixed firmware. The page JS itself is
+    // tiny relative to the gzipped /settings body; no-store costs nothing
+    // here and guarantees a fresh page every load.
+    res->addHeader("Cache-Control", "no-store");
+    req->send(res);
 }
 
 // --- Auth helper ---
