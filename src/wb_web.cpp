@@ -11,6 +11,7 @@
 #include "wb_mqtt.h"
 #include "_gen_settings_body_gz.h"  // build-time gzipped /settings body (task #75)
 #include "_gen_info_body_gz.h"      // build-time gzipped /info body (v3.1 #103)
+#include "_gen_dashboard_body_gz.h" // build-time gzipped "/" dashboard body (v3.1 #103)
 #include "bapi.h"
 #include <WiFi.h>
 #include <WebServer.h>
@@ -1157,14 +1158,32 @@ static String normalizeMAC(const String& raw) {
 // 3.0 task #78: extracted body of handleDashboard(). Non-static so
 // the async server can call it. Sync handler trampolines through.
 String wb_buildDashboardPage() {
-    // Pre-reserve to avoid heap-fragmentation panics under concurrent
-    // BLE response parsing — same root cause as the /info crash.
-    // Observed size ~32 KB; 36 KB reserves a single contiguous block
-    // with comfortable headroom.
-    String page;
-    page.reserve(36000);
-    page += htmlHead("Dashboard");
+    // v3.1 (#103): the ~32 KB dashboard body is precompressed to
+    // /dashboard/body.gz at build time (the #if 0 block below +
+    // scripts/precompress_settings.py), so the gateway only builds this tiny
+    // shell — no 36 KB String reserve, no heap-fragmentation panic on "/".
+    // The body is pure static (no server values), so the shell just fetches
+    // the gz and injects it (re-executing its <script> tags).
+    String page = htmlHead("Dashboard");
     page += R"HTML(
+<div class='loading' id='dash-stub'><div class='ld-spin'></div>Loading Dashboard...</div>
+<div id='dash-body'></div>
+<script>
+fetch('/dashboard/body.gz',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()}).then(function(html){var t=document.getElementById('dash-body');t.innerHTML=html;t.querySelectorAll('script').forEach(function(o){var s=document.createElement('script');if(o.src)s.src=o.src;else s.textContent=o.textContent;o.parentNode.replaceChild(s,o)});var st=document.getElementById('dash-stub');if(st)st.remove()}).catch(function(e){var st=document.getElementById('dash-stub');if(st)st.innerHTML='<span style="color:#ef4444">Failed to load Dashboard: '+(e.message||e)+'</span>'});
+</script>
+)HTML";
+    page += htmlFoot("/");
+    return page;
+}
+
+// ---- "/" dashboard body — source-of-truth for /dashboard/body.gz ----
+// Never compiled. scripts/precompress_settings.py extracts the R"HTML literal
+// between the markers, gzips it into include/_gen_dashboard_body_gz.h, and the
+// /dashboard/body.gz endpoint serves the bytes with Content-Encoding: gzip.
+// Pure static — no server values spliced in.
+#if 0
+// PRECOMPRESS_DASHBOARD_BODY_BEGIN
+static const char* DASH_BODY_SOURCE = R"HTML(
 <div class='loading' id='ld'><div class='ld-spin'></div>Loading Dashboard...</div>
 <div id='pg' style='display:none'>
 <h1>&#x26A1; Wallbox</h1>
@@ -1328,9 +1347,8 @@ updateBleHealth();setInterval(updateBleHealth,15000);
 </script>
 </div>
 )HTML";
-    page += htmlFoot("/");
-    return page;
-}
+// PRECOMPRESS_DASHBOARD_BODY_END
+#endif
 
 static void handleDashboard() {
     http.send(200, "text/html", wb_buildDashboardPage());
@@ -4364,6 +4382,15 @@ static void registerRoutes() {
             String((unsigned long)INFO_BODY_RAW_LEN));
         http.send_P(200, "text/html",
             (const char*)INFO_BODY_GZ, INFO_BODY_GZ_LEN);
+    });
+    http.on("/dashboard/body.gz", []() {
+        if (!checkAuth()) return;
+        http.sendHeader("Content-Encoding", "gzip");
+        http.sendHeader("Cache-Control", "no-store");
+        http.sendHeader("X-Uncompressed-Bytes",
+            String((unsigned long)DASH_BODY_RAW_LEN));
+        http.send_P(200, "text/html",
+            (const char*)DASH_BODY_GZ, DASH_BODY_GZ_LEN);
     });
     http.on("/manifest.json", handleManifest);
     http.on("/sw.js", handleServiceWorker);

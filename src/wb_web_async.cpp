@@ -16,6 +16,7 @@
 #include <esp_task_wdt.h>  // TWDT feed during long xTaskNotifyWait slices
 #include "_gen_settings_body_gz.h"  // pre-gzipped /settings body (task #75)
 #include "_gen_info_body_gz.h"      // pre-gzipped /info body (v3.1 #103)
+#include "_gen_dashboard_body_gz.h" // pre-gzipped "/" dashboard body (v3.1 #103)
 #include "wb_health.h"     // OTA admission guard (step I)
 #include "wb_ws.h"         // AsyncWebSocket handler (#82 migration)
 #include "wb_watchdog.h"   // wb_wdt::extendTo/restore for OTA flash erase
@@ -621,8 +622,23 @@ static void _registerHtmlPages() {
     // portal-only). Match that to keep sync vs async behavior
     // identical.
     _async.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
-        if (!_checkHeapHeadroom(req, 36000)) return;
+        // v3.1 (#103): the dashboard is now a ~2 KB shell that fetches
+        // /dashboard/body.gz from PROGMEM, so the old 36 KB heap guard is
+        // gone — "/" no longer 503s under heap pressure.
         _sendHtmlPage(req, wb_buildDashboardPage());
+    });
+
+    // GET /dashboard/body.gz — pre-gzipped "/" dashboard body (v3.1 #103).
+    // PROGMEM, no heap. "/" only exact-matches, so order vs "/" is moot, but
+    // it lives with the other body.gz routes for clarity.
+    _async.on("/dashboard/body.gz", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        AsyncWebServerResponse* res = req->beginResponse_P(200, "text/html",
+            (const uint8_t*)DASH_BODY_GZ, DASH_BODY_GZ_LEN);
+        res->addHeader("Content-Encoding", "gzip");
+        res->addHeader("Cache-Control", "no-store");
+        res->addHeader("X-Uncompressed-Bytes", String((unsigned long)DASH_BODY_RAW_LEN));
+        req->send(res);
     });
 
     // GET /config — config UI. No auth gate on the page itself
