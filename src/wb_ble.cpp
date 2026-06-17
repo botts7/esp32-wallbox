@@ -640,6 +640,23 @@ void WallboxBLE::_connect() {
         } else {
             Log.println("[BLE] Zentri STREAM_MODE write failed — BAPI may not pass through");
         }
+
+        // #12: gambys's diagnostic log showed mtu=23 (the default) when the
+        // first BAPI write (framelen 41) went out — too big for one ATT write,
+        // so NimBLE falls back to a long/prepared write the TruConnect stream
+        // char can't do. We request 247 globally (NimBLEDevice::setMTU in
+        // main.cpp) and MAX negotiates up, but on Zentri we skip SMP and reach
+        // the first write fast — the async MTU exchange may not have completed.
+        // Wait briefly for it so frames fit a single clean write. Log the MTU
+        // reached: if it rises, timing was the cause (this is the fix); if it
+        // stays 23, the module caps there and we'll fragment writes next.
+        uint16_t mtuAtSwitch = _client->getMTU();
+        uint32_t mtuWaitStart = millis();
+        while (_client->getMTU() <= 23 && (millis() - mtuWaitStart) < 2000) {
+            delay(50);
+        }
+        Log.printf("[BLE] Zentri MTU after connect: %u (was %u at STREAM_MODE switch)\n",
+                   _client->getMTU(), mtuAtSwitch);
     }
 
     // BGX13P / BGXSS stream-mode switch.
