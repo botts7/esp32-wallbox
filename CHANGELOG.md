@@ -4,6 +4,23 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.0.3] - 2026-06-17
+
+Patch release — fixes two Home Assistant MQTT-discovery issues reported in #14.
+
+### Fixed
+
+- **Timezone list now covers all major IANA zones.** The charger-time
+  timezone select only offered 16 curated zones, so many regions (e.g.
+  `Europe/Amsterdam`) couldn't be selected at all. Expanded to ~75 IANA
+  zones and made the discovery option count self-sizing so it can't silently
+  truncate again. (#14)
+- **Session-energy sensors no longer error in Home Assistant.**
+  `green_energy_session` and `grid_energy_session` were published with
+  `state_class: measurement`, which HA rejects for an `energy` device class
+  (the entities showed as unavailable/errored). Changed to
+  `total_increasing`. (#14)
+
 ## [3.0.2] - 2026-06-17
 
 Patch release — fixes a post-OTA stale-page problem that could make a fixed

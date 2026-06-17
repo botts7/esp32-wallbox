@@ -27,6 +27,10 @@
 
 ### Recent releases
 
+- **3.0.3** — Home Assistant MQTT fixes (#14): the timezone select now
+  covers all major IANA zones (e.g. `Europe/Amsterdam` was missing), and the
+  per-session green/grid energy sensors use `total_increasing` so HA stops
+  rejecting them.
 - **3.0.2** — fixes a post-OTA stale-page problem: HTML pages now send
   `Cache-Control: no-store` (browsers/PWAs were caching old JS after an
   update), open tabs auto-reload when the gateway's firmware version
