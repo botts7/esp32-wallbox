@@ -620,6 +620,16 @@ static String htmlFoot(const char* activePath) {
     navItem("/logs", SVG_LOGS, "Logs");
     h += "</nav>"
          "<script>if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(function(){});</script>"
+         // Auto-reload a stale page after an OTA. The page is served with the
+         // firmware version baked in (B); after an OTA the gateway reboots
+         // with a new version, but an already-open tab keeps running the old
+         // JS. On focus + every 60s, compare B to the live version and reload
+         // if it changed — so users get the new UI without a manual hard-
+         // refresh. ('dev' builds skip it to avoid churn.)
+         "<script>(function(){var B='" WB_VERSION "';if(B==='dev')return;"
+         "function c(){fetch('/api/boot/history',{cache:'no-store'}).then(function(r){return r.json()})"
+         ".then(function(d){if(d&&d.current_fw&&d.current_fw!==B){location.reload()}}).catch(function(){})}"
+         "window.addEventListener('focus',c);setInterval(c,60000);})();</script>"
          "<script>(function(){var r=function(){document.body.classList.add('ready')};if(document.readyState==='interactive'||document.readyState==='complete')r();else document.addEventListener('DOMContentLoaded',r)})();</script>"
          "</body></html>";
     return h;
