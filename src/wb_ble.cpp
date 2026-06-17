@@ -1260,30 +1260,50 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
 
     Log.printf("[BLE] TX %s\n", met);
 
-    // Write — try without response first, fallback to with response
-    if (!_chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), false)) {
-        int rcNoRsp = _client ? _client->getLastError() : -1;
-        if (!_chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), true)) {
-            // #12 diagnostic: the guard above proved the link was alive, so this
-            // write is being *refused*, not failing on a dead link. Log WHY.
-            // getLastError() holds the real GATT write rc here (the write path
-            // sets m_lastErr). Decode: 261/0x105 = BLE_HS_ATT_ERR(5) insufficient
-            // auth, 271/0x10f = ATT(15) insufficient encryption (char needs the
-            // SMP link we skip for Zentri); 7 = ENOTCONN; 6 = ENOMEM (TX bufs);
-            // framelen > mtu => fragmentation. char= tells us which characteristic.
-            int rcRsp = _client ? _client->getLastError() : -1;
-            Log.printf("[BLE] Write failed for %s — rc_norsp=%d rc_rsp=%d mtu=%d "
-                       "framelen=%u connected=%d char=%s\n",
-                       met, rcNoRsp, rcRsp,
-                       _client ? (int)_client->getMTU() : -1,
-                       (unsigned)framed.length(),
-                       (_client && _client->isConnected()) ? 1 : 0,
-                       _chr ? _chr->getUUID().toString().c_str() : "?");
-            _state = State::DISCONNECTED;
-            _chr = nullptr;
-            if (_cmdMutex) xSemaphoreGive(_cmdMutex);
-            return "";
+    // Write the framed BAPI command. On a small-MTU link the frame can exceed
+    // the single-write payload (mtu-3); NimBLE would then fall back to a long/
+    // prepared write, which a serial-over-BLE stream char rejects — and which,
+    // on an auth error, internally calls secureConnection() and corrupts the
+    // unauthenticated Zentri link. So fragment large frames into (mtu-3) chunks
+    // with write-no-response, exactly as a serial stream expects (the module
+    // reassembles the byte stream). Frames that fit take the normal path, so
+    // MAX/Plus (MTU 247) are unchanged. #12: gambys's log confirmed the Zentri
+    // TruConnect module caps MTU at the 23-byte default while frames are ~41 B.
+    const uint8_t* wp = (const uint8_t*)framed.c_str();
+    size_t wlen = framed.length();
+    uint16_t curMtu = _client ? _client->getMTU() : 23;
+    size_t maxChunk = (curMtu > 3) ? (size_t)(curMtu - 3) : 20;
+    bool writeOk = true;
+
+    if (wlen <= maxChunk) {
+        // Fits in one ATT write — original behaviour (no-response, then with).
+        if (!_chr->writeValue(wp, wlen, false))
+            writeOk = _chr->writeValue(wp, wlen, true);
+    } else {
+        // Fragment: write-no-response in mtu-sized chunks, paced so the
+        // controller TX buffer can't overrun (no per-chunk ACK on a stream).
+        size_t off = 0;
+        while (off < wlen && writeOk) {
+            size_t n = (wlen - off < maxChunk) ? (wlen - off) : maxChunk;
+            writeOk = _chr->writeValue(wp + off, n, false);
+            off += n;
+            if (off < wlen) delay(8);
         }
+        if (writeOk)
+            Log.printf("[BLE] TX %s fragmented: %u bytes in %u-byte chunks (mtu=%u)\n",
+                       met, (unsigned)wlen, (unsigned)maxChunk, curMtu);
+    }
+
+    if (!writeOk) {
+        Log.printf("[BLE] Write failed for %s — mtu=%d framelen=%u connected=%d char=%s\n",
+                   met, _client ? (int)_client->getMTU() : -1,
+                   (unsigned)framed.length(),
+                   (_client && _client->isConnected()) ? 1 : 0,
+                   _chr ? _chr->getUUID().toString().c_str() : "?");
+        _state = State::DISCONNECTED;
+        _chr = nullptr;
+        if (_cmdMutex) xSemaphoreGive(_cmdMutex);
+        return "";
     }
     _txCount++;
 
