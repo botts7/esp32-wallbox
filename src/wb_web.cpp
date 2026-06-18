@@ -748,6 +748,7 @@ String wb_buildStatusJson() {
     json += ",\"ssid\":\"" + WiFi.SSID() + "\"";
     json += ",\"wifi_rssi\":" + String(WiFi.RSSI());
     json += ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"";
+    json += ",\"zentri\":" + String(wallboxBLE.isZentri() ? "true" : "false");
     json += ",\"rssi\":" + String(wallboxBLE.rssi());
     json += ",\"scan_rssi\":" + String(wallboxBLE.scanRSSI());
     json += ",\"tx\":" + String(wallboxBLE.txCount());
@@ -1914,12 +1915,12 @@ function buildScheduleTimeline(schedules){
 // bitmask, start/stop strings). Split out of loadSchedules so the
 // optimistic paths (toggle/delete) can redraw instantly from the cached
 // allSchedules without a BLE round-trip.
-function renderSchedules(sc){
+function renderSchedules(sc,readonly){
   var l=document.getElementById('sch-list');if(!l)return;
   allSchedules=sc;
   try{buildScheduleTimeline(sc)}catch(e){console.error('timeline failed',e)}
-  if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules yet. Tap + Add New to create one.</div>';return}
-  var html='';
+  if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules yet'+(readonly?'.':'. Tap + Add New to create one.')+'</div>';return}
+  var html=readonly?"<div style='font-size:.78em;color:var(--text3);margin-bottom:6px'>&#x1F4CB; View-only on this charger — schedule editing isn't supported on this firmware yet.</div>":'';
   sc.forEach(function(s){
     var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS_M[b]+' ';
     var t1=utcToLocal(s.start),t2=utcToLocal(s.stop);
@@ -1929,11 +1930,36 @@ function renderSchedules(sc){
     var togIcon=s.enabled?'⏸':'▶';
     var togColor=s.enabled?'var(--warning)':'var(--success)';
     var togTitle=s.enabled?'Pause this schedule':'Resume this schedule';
-    html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" – "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" · "+lim+(ek?' · '+ek:'')+" · #"+s.sid+"</div></div><div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' title='"+togTitle+"' style='padding:6px 10px;font-size:.85em;color:"+togColor+"' onclick='toggleSchedule("+s.sid+")'>"+togIcon+"</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>✎</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>✖</button></div></div></div>";
+    html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" – "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" · "+lim+(ek?' · '+ek:'')+" · #"+s.sid+"</div></div>"+(readonly?"":"<div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' title='"+togTitle+"' style='padding:6px 10px;font-size:.85em;color:"+togColor+"' onclick='toggleSchedule("+s.sid+")'>"+togIcon+"</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>✎</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>✖</button></div>")+"</div></div>";
   });
   l.innerHTML=html;
 }
+// #12: the original (Zentri) Pulsar's r_schs times out — it reads schedules
+// one slot at a time via r_sch (bare-int sid). Detect via /api/status and
+// dispatch: Zentri -> per-sid reader (view-only); everyone else -> r_schs array.
 function loadSchedules(_retry){
+  var l=document.getElementById('sch-list');if(l)l.innerHTML="<span class='spinner'></span> Loading...";
+  fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(x){return x.json()}).then(function(st){
+    if(st&&st.zentri){loadSchedulesZentri();}else{loadSchedulesArr(_retry);}
+  }).catch(function(){loadSchedulesArr(_retry);});
+}
+// Read the 4 fixed schedule slots (r_sch + bare-int sid 0..3) and normalize the
+// original Pulsar's {sid,start:"HHMM",stop:"HHMM",days,mcr,nrg} into the array
+// shape renderSchedules expects. View-only — write method not yet known.
+function loadSchedulesZentri(){
+  var l=document.getElementById('sch-list');if(!l)return;
+  var out=[],i=0;
+  (function next(){
+    if(i>3){renderSchedules(out,true);return;}
+    fetch('/api/command?action=bapi&met=r_sch&par='+i,{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){
+      var s=d&&d.r;
+      if(s&&typeof s.sid!=='undefined'&&(s.days||s.start!=='0000'||s.stop!=='0000')){
+        out.push({sid:s.sid,start:s.start,stop:s.stop,days:s.days,mcr:s.mcr,enabled:s.days?1:0,target:{type:s.nrg?1:0,value:s.nrg||0}});
+      }
+    }).catch(function(){}).then(function(){i++;next();});
+  })();
+}
+function loadSchedulesArr(_retry){
   // _retry: undefined = first attempt, true = the auto-retry. We retry
   // once after a brief settle when the BAPI call times out or the
   // gateway returns null (typically because the BLE mutex was busy

@@ -116,6 +116,11 @@ public:
         return _chargerModel == "plus" || _chargerModel == "copper"
             || _chargerModel == "quasar" || _chargerModel == "quasar2";
     }
+    // True once a Zentri TruConnect module (original no-WiFi Pulsar) is
+    // detected on connect (#12). The UI uses this to read schedules via the
+    // per-sid r_sch method (this firmware's r_schs times out) and show them
+    // view-only.
+    bool isZentri() const { return _isZentri; }
 
     // Responses
     String lastResponse() const { return _lastResponse; }
@@ -283,6 +288,7 @@ private:
     // via isConnected(). Without this the compiler may cache the read.
     volatile State _state = State::DISCONNECTED;
     bool _pinRequired = false;
+    bool _isZentri = false;  // set in _connect() when TruConnect module detected (#12)
 
     // Response handling
     bapi::ResponseParser _parser;

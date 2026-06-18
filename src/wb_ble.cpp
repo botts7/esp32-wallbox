@@ -534,6 +534,7 @@ void WallboxBLE::_connect() {
     static const char* ZENTRI_MODE_UUID = "20b9794f-da1a-4d14-8014-a0fb9cefb2f7";
     NimBLERemoteCharacteristic* zentriMode = svc->getCharacteristic(ZENTRI_MODE_UUID);
     const bool zentri = (zentriMode != nullptr);
+    _isZentri = zentri;  // surfaced via /api/status so the UI reads schedules per-sid (#12)
     if (zentri) {
         Log.println("[BLE] Zentri TruConnect peripheral detected (20b9794f mode char present)");
         // Relax connection params for this module. The default (latency 2,
