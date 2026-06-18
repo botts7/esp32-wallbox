@@ -1948,15 +1948,23 @@ function loadSchedules(_retry){
 // shape renderSchedules expects. View-only — write method not yet known.
 function loadSchedulesZentri(){
   var l=document.getElementById('sch-list');if(!l)return;
-  var out=[],i=0;
+  // Read slots sequentially (r_sch + bare-int sid) until the charger reports
+  // no more — an error or non-object reply for an out-of-range sid marks the
+  // end. This adapts to whatever slot count the firmware exposes rather than
+  // assuming 4. MAXSLOTS is just a safety backstop for a charger that returns
+  // empty (instead of erroring) past its last slot. Empty-but-valid slots
+  // (days 0, 00:00-00:00) are skipped but we keep reading past them.
+  var out=[],i=0,MAXSLOTS=16;
   (function next(){
-    if(i>3){renderSchedules(out,true);return;}
+    if(i>=MAXSLOTS){renderSchedules(out,true);return;}
     fetch('/api/command?action=bapi&met=r_sch&par='+i,{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){
-      var s=d&&d.r;
-      if(s&&typeof s.sid!=='undefined'&&(s.days||s.start!=='0000'||s.stop!=='0000')){
+      if(!d||d.error||!d.r||typeof d.r.sid==='undefined'){renderSchedules(out,true);return;}
+      var s=d.r;
+      if(s.days||s.start!=='0000'||s.stop!=='0000'){
         out.push({sid:s.sid,start:s.start,stop:s.stop,days:s.days,mcr:s.mcr,enabled:s.days?1:0,target:{type:s.nrg?1:0,value:s.nrg||0}});
       }
-    }).catch(function(){}).then(function(){i++;next();});
+      i++;next();
+    }).catch(function(){renderSchedules(out,true);});
   })();
 }
 function loadSchedulesArr(_retry){
