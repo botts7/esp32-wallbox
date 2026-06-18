@@ -1961,7 +1961,11 @@ function loadSchedulesZentri(){
       if(!d||d.error||!d.r||typeof d.r.sid==='undefined'){renderSchedules(out,true);return;}
       var s=d.r;
       if(s.days||s.start!=='0000'||s.stop!=='0000'){
-        out.push({sid:s.sid,start:s.start,stop:s.stop,days:s.days,mcr:s.mcr,enabled:s.days?1:0,target:{type:s.nrg?1:0,value:s.nrg||0}});
+        // This firmware's days bitmask is Sunday-first (bit0=Sun, confirmed:
+        // days:1 == Sundays). renderSchedules labels bits Monday-first
+        // (DAYS_M), so rotate Sun-first -> Mon-first: Sun(bit0)->bit6, Mon->bit0, etc.
+        var zd=0;for(var b=0;b<7;b++)if(s.days&(1<<b))zd|=(1<<((b+6)%7));
+        out.push({sid:s.sid,start:s.start,stop:s.stop,days:zd,mcr:s.mcr,enabled:s.days?1:0,target:{type:s.nrg?1:0,value:s.nrg||0}});
       }
       i++;next();
     }).catch(function(){renderSchedules(out,true);});
