@@ -1917,10 +1917,11 @@ function buildScheduleTimeline(schedules){
 // allSchedules without a BLE round-trip.
 function renderSchedules(sc,readonly){
   var l=document.getElementById('sch-list');if(!l)return;
+  var z=!!window._schZentri;  // original Pulsar: edit start/stop/days only, no toggle
   allSchedules=sc;
   try{buildScheduleTimeline(sc)}catch(e){console.error('timeline failed',e)}
   if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules yet'+(readonly?'.':'. Tap + Add New to create one.')+'</div>';return}
-  var html=readonly?"<div style='font-size:.78em;color:var(--text3);margin-bottom:6px'>&#x1F4CB; View-only on this charger — schedule editing isn't supported on this firmware yet.</div>":'';
+  var html=z?"<div style='font-size:.78em;color:var(--text3);margin-bottom:6px'>&#x2139; On this charger, schedules set start/stop/days only (no power or energy limit).</div>":(readonly?"<div style='font-size:.78em;color:var(--text3);margin-bottom:6px'>&#x1F4CB; View-only on this charger.</div>":'');
   sc.forEach(function(s){
     var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS_M[b]+' ';
     var t1=utcToLocal(s.start),t2=utcToLocal(s.stop);
@@ -1930,7 +1931,7 @@ function renderSchedules(sc,readonly){
     var togIcon=s.enabled?'⏸':'▶';
     var togColor=s.enabled?'var(--warning)':'var(--success)';
     var togTitle=s.enabled?'Pause this schedule':'Resume this schedule';
-    html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" – "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" · "+lim+(ek?' · '+ek:'')+" · #"+s.sid+"</div></div>"+(readonly?"":"<div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' title='"+togTitle+"' style='padding:6px 10px;font-size:.85em;color:"+togColor+"' onclick='toggleSchedule("+s.sid+")'>"+togIcon+"</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>✎</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>✖</button></div>")+"</div></div>";
+    html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" – "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" · "+lim+(ek?' · '+ek:'')+" · #"+s.sid+"</div></div>"+(readonly?"":"<div style='display:flex;gap:6px;flex-shrink:0'>"+(z?"":"<button class='btn btn-outline' title='"+togTitle+"' style='padding:6px 10px;font-size:.85em;color:"+togColor+"' onclick='toggleSchedule("+s.sid+")'>"+togIcon+"</button>")+"<button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>✎</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>✖</button></div>")+"</div></div>";
   });
   l.innerHTML=html;
 }
@@ -1940,8 +1941,8 @@ function renderSchedules(sc,readonly){
 function loadSchedules(_retry){
   var l=document.getElementById('sch-list');if(l)l.innerHTML="<span class='spinner'></span> Loading...";
   fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(x){return x.json()}).then(function(st){
-    if(st&&st.zentri){loadSchedulesZentri();}else{loadSchedulesArr(_retry);}
-  }).catch(function(){loadSchedulesArr(_retry);});
+    if(st&&st.zentri){window._schZentri=true;loadSchedulesZentri();}else{window._schZentri=false;loadSchedulesArr(_retry);}
+  }).catch(function(){window._schZentri=false;loadSchedulesArr(_retry);});
 }
 // Read the 4 fixed schedule slots (r_sch + bare-int sid 0..3) and normalize the
 // original Pulsar's {sid,start:"HHMM",stop:"HHMM",days,mcr,nrg} into the array
@@ -1956,9 +1957,9 @@ function loadSchedulesZentri(){
   // (days 0, 00:00-00:00) are skipped but we keep reading past them.
   var out=[],i=0,MAXSLOTS=16;
   (function next(){
-    if(i>=MAXSLOTS){renderSchedules(out,true);return;}
+    if(i>=MAXSLOTS){renderSchedules(out);return;}
     fetch('/api/command?action=bapi&met=r_sch&par='+i,{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){
-      if(!d||d.error||!d.r||typeof d.r.sid==='undefined'){renderSchedules(out,true);return;}
+      if(!d||d.error||!d.r||typeof d.r.sid==='undefined'){renderSchedules(out);return;}
       var s=d.r;
       if(s.days||s.start!=='0000'||s.stop!=='0000'){
         // This firmware's days bitmask is Sunday-first (bit0=Sun, confirmed:
@@ -1968,7 +1969,7 @@ function loadSchedulesZentri(){
         out.push({sid:s.sid,start:s.start,stop:s.stop,days:zd,mcr:s.mcr,enabled:s.days?1:0,target:{type:s.nrg?1:0,value:s.nrg||0}});
       }
       i++;next();
-    }).catch(function(){renderSchedules(out,true);});
+    }).catch(function(){renderSchedules(out);});
   })();
 }
 function loadSchedulesArr(_retry){
@@ -2021,6 +2022,7 @@ function newSchedule(){
   document.getElementById('se2').value='0';
   document.getElementById('sn').value='1';
   document.getElementById('sched-edit').style.display='block';
+  _schScopeForm();
   document.getElementById('sched-edit').scrollIntoView({behavior:'smooth',block:'start'});
 }
 // One-tap toggle for a schedule's enabled flag (the ⏸/▶ button in
@@ -2055,11 +2057,19 @@ function editSchedule(sid){
   document.getElementById('se2').value=(s.target&&s.target.type==1)?Math.round(s.target.value/1000):0;
   document.getElementById('sn').value=s.enabled?'1':'0';
   document.getElementById('sched-edit').style.display='block';
+  _schScopeForm();
   document.getElementById('sched-edit').scrollIntoView({behavior:'smooth',block:'start'});
 }
 function cancelEdit(){
   document.getElementById('sched-edit').style.display='none';
   editingSid=null;
+}
+// #12: the original Pulsar's w_sch write carries only start/stop/days, so hide
+// the Power/Energy-limit row and the Enabled selector in the editor for it.
+function _schScopeForm(){
+  var z=!!window._schZentri,sc=document.getElementById('sc'),sn=document.getElementById('sn');
+  try{if(sc&&sc.closest('.row'))sc.closest('.row').style.display=z?'none':''}catch(e){}
+  try{if(sn&&sn.parentNode)sn.parentNode.style.display=z?'none':''}catch(e){}
 }
 // Convert bitmask integer (bit 0=Mon..bit 6=Sun) to bit-array
 // [Mon,Tue,Wed,Thu,Fri,Sat,Sun]. The BAPI READ returns days as a
@@ -2077,7 +2087,30 @@ function buildSchEntry(sid,start,stop,days,enabled,mcr,type,target,repeat){
           mcr:mcr|0,type:type|0,enabled:enabled|0,
           target:target||{type:0,value:0},repeat:(repeat===undefined?1:repeat|0)}
 }
+// #12: original Pulsar schedule write — w_sch with a packed string
+// "<sid><startHHMM><stopHHMM><days3>": UTC times, a Sunday-first 3-digit day
+// bitmask, no power/energy fields. Insert/edit use the same call; the slot is
+// the sid. (Delete = the same slot all-zeroed, see doDeleteScheduleZentri.)
+function saveSchZentri(){
+  var st=localToUtc(document.getElementById('ss').value);  // "HHMM" UTC
+  var sp=localToUtc(document.getElementById('se').value);
+  var dForm=0;document.querySelectorAll('#sd input:checked').forEach(function(c){dForm+=parseInt(c.value)});
+  if(!dForm){toast('Select at least one day','error');return}
+  // form day bits are Monday-first; charger is Sunday-first -> Sun bit=(b+1)%7
+  var dZ=0;for(var b=0;b<7;b++)if(dForm&(1<<b))dZ|=(1<<((b+1)%7));
+  var sid;
+  if(editingSid!==null){sid=editingSid;}
+  else{var used={};allSchedules.forEach(function(s){used[s.sid]=1});sid=0;while(sid<4&&used[sid])sid++;if(sid>=4){toast('All 4 schedule slots are in use — edit or delete one first','error');return}}
+  var par=''+sid+st+sp+('00'+dZ).slice(-3);  // sid(1)+start(4)+stop(4)+days(3)
+  var verb=(editingSid!==null)?'updated':'added';
+  toast('Saving...','info');
+  fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(par),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+    if(r&&r.error){toast('Save failed (code '+(r.error&&r.error.code!==undefined?r.error.code:'?')+')','error');return}
+    toast('Schedule #'+sid+' '+verb,'success');cancelEdit();setTimeout(loadSchedules,1200);
+  }).catch(function(e){toast('Error: '+(e.message||e),'error')});
+}
 function saveSch(){
+  if(window._schZentri){saveSchZentri();return;}
   var st=localToUtc(document.getElementById('ss').value);
   var sp=localToUtc(document.getElementById('se').value);
   var d=0;document.querySelectorAll('#sd input:checked').forEach(function(c){d+=parseInt(c.value)});
@@ -2118,7 +2151,17 @@ function deleteSchedule(sid){
 // synchronously. Earlier clr_sch attempts failed only because the param
 // was the wrong shape (scalar sid / "sids" plural / null) — the correct
 // form deletes cleanly without any clear-all + rewrite dance.
+// #12: original Pulsar delete = w_sch with the slot's start/stop/days zeroed
+// ("<sid>00000000000"), which the charger reports back as an empty slot.
+function doDeleteScheduleZentri(sid){
+  toast('Deleting schedule #'+sid+'...','info');
+  fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(''+sid+'00000000000'),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+    if(r&&r.error){toast('Delete failed (code '+(r.error&&r.error.code!==undefined?r.error.code:'?')+')','error');loadSchedules();return;}
+    toast('Schedule #'+sid+' deleted','success');setTimeout(loadSchedules,1200);
+  }).catch(function(e){toast('Delete error: '+(e.message||e),'error');loadSchedules();});
+}
 function doDeleteSchedule(sid){
+  if(window._schZentri){doDeleteScheduleZentri(sid);return;}
   // Not optimistic: keep the row until the charger confirms, so a failed or
   // timed-out delete gives honest feedback instead of the row vanishing then
   // reappearing. Always reload after (success or fail) to show the true state.
