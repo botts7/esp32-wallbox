@@ -119,7 +119,7 @@ static void publishGatewayInfo() {
     // 1024 covers comfortably with no realloc. Flagged by audit
     // (task #108) — same antipattern as wb_buildInfoPage etc.
     String json;
-    json.reserve(1024);
+    json.reserve(1152);  // +reminder fields (#127) on top of the ~900 B base
     json = "{\"rssi\":";
     json += String(wallboxBLE.rssi());
     json += ",\"ble_state\":\"";
@@ -190,6 +190,15 @@ static void publishGatewayInfo() {
     json += ",\"dev_name\":\"" + wallboxBLE.deviceName() + "\"";
     json += ",\"chg_sn\":\"" + wallboxBLE.chargerSerial() + "\"";
     json += ",\"chg_mac\":\"" + wallboxBLE.chargerMac() + "\"";
+    // Charge-reminder engine (#127) — gateway-computed, consumed by the
+    // HA next_scheduled_charge + plug_reminder discovery entities.
+    {
+        uint32_t nsc = wallboxBLE.nextScheduledChargeEpoch();
+        json += nsc ? (",\"next_scheduled_charge\":" + String(nsc))
+                    : String(",\"next_scheduled_charge\":null");
+        json += ",\"plug_reminder\":";
+        json += wallboxBLE.plugReminderActive(configMgr.get().reminderLeadMin) ? "true" : "false";
+    }
     json += "}";
     wallboxMQTT.publishResponse("gateway", json);
 }

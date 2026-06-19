@@ -749,6 +749,19 @@ String wb_buildStatusJson() {
     json += ",\"wifi_rssi\":" + String(WiFi.RSSI());
     json += ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"";
     json += ",\"zentri\":" + String(wallboxBLE.isZentri() ? "true" : "false");
+    // #129: meter capability — surfaces hide grid/solar when false (charger
+    // has no Power Boost / Power Meter; e.g. the original Pulsar).
+    json += ",\"meter\":" + String(wallboxBLE.meterPresent() ? "true" : "false");
+    // Charge-reminder engine (#127): UTC epoch of the next enabled
+    // schedule (null when none / NTP not synced) + the plug-in nudge.
+    // All surfaces (dashboard banner, Integration, Add-on) read these.
+    {
+        uint32_t nsc = wallboxBLE.nextScheduledChargeEpoch();
+        json += nsc ? (",\"next_scheduled_charge\":" + String(nsc))
+                    : String(",\"next_scheduled_charge\":null");
+        json += ",\"plug_reminder\":" +
+                String(wallboxBLE.plugReminderActive(configMgr.get().reminderLeadMin) ? "true" : "false");
+    }
     json += ",\"rssi\":" + String(wallboxBLE.rssi());
     json += ",\"scan_rssi\":" + String(wallboxBLE.scanRSSI());
     json += ",\"tx\":" + String(wallboxBLE.txCount());
@@ -1194,9 +1207,10 @@ static const char* DASH_BODY_SOURCE = R"HTML(
 <div id='ble-health' style='display:none;border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em'></div>
 <div id='notif-bar' style='display:none;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#ef4444;cursor:pointer' onclick='showNotifs()'>&#x1F514; <span id='notif-count'></span> charger notification(s) — tap to view</div>
 <div id='paused-banner' style='display:none;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);border-radius:10px;padding:12px 14px;margin-bottom:10px;color:#f59e0b;font-size:.88em;line-height:1.4;align-items:center;gap:10px;flex-wrap:wrap'><span>&#x23F8;&#xFE0F; <strong>Schedules &amp; Eco Smart paused</strong> — manual override active.</span><button class='btn btn-outline' style='margin-left:auto;padding:6px 14px;font-size:.85em;width:auto;border-color:rgba(245,158,11,.5);color:#f59e0b' onclick='C("resume")'>&#x25B6;&#xFE0F; Resume Schedule</button></div>
+<div id='charge-reminder' style='display:none;border-radius:10px;padding:12px 14px;margin-bottom:10px;font-size:.88em;line-height:1.4'></div>
 <div id='notif-modal' style='display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:300;align-items:center;justify-content:center;padding:16px' onclick='if(event.target===this)this.style.display=\"none\"'><div id='notif-modal-inner' style='background:var(--card);border-radius:12px;max-width:480px;width:100%;max-height:80vh;overflow:auto;padding:16px'></div></div>
 
-<div class='card'>
+<div class='card' id='card-powerflow'>
   <div class='card-header'><span class='card-icon'>&#x26A1;</span><h2 style='margin:0;font-size:1em'>Power Flow</h2></div>
   <svg viewBox='0 0 360 130' style='display:block;width:100%;max-width:360px;margin:0 auto' role='img' aria-label='Live power flow Grid Charger Vehicle'>
     <defs><marker id='pf-arrow' viewBox='0 0 6 6' refX='5' refY='3' markerWidth='5' markerHeight='5' orient='auto'><path d='M0,0 L6,3 L0,6 z' fill='var(--accent)'/></marker></defs>
@@ -1221,8 +1235,8 @@ static const char* DASH_BODY_SOURCE = R"HTML(
     <div><label>Session Energy</label><div id='v-en' class='info-value'>--</div></div>
     <div><label>Max Current</label><div id='v-mc' class='info-value'>--</div></div>
     <div><label>Socket Lock</label><div id='v-lk' class='info-value'>--</div></div>
-    <div><label>Mains Voltage</label><div id='v-vt' class='info-value'>--</div></div>
-    <div><label title='Whole-house power from charger MID meter'>House Power</label><div id='v-gp' class='info-value'>--</div></div>
+    <div id='cell-vt'><label>Mains Voltage</label><div id='v-vt' class='info-value'>--</div></div>
+    <div id='cell-gp'><label title='Whole-house power from charger MID meter'>House Power</label><div id='v-gp' class='info-value'>--</div></div>
   </div>
 </div>
 
@@ -1323,6 +1337,7 @@ function _clearLive(){
   ['v-st','v-pw','v-cr','v-en','v-mc','v-lk','v-oc','v-vt','v-gp','pf-veh-kw','pf-grid-kw','pf-session'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent='--'});
   _pfState.cp=null;_pfState.en=null;_pfState.house=null;_pfRender();
   var pb=document.getElementById('paused-banner');if(pb)pb.style.display='none';
+  var cr=document.getElementById('charge-reminder');if(cr)cr.style.display='none';
   try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
 }
 function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
@@ -1343,7 +1358,44 @@ fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return 
 var _notifs=[];
 function loadNotifs(){fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.ble!=='connected')return;return fetch('/api/command?action=bapi&met=r_not&par=null',{signal:AbortSignal.timeout(10000)}).then(function(r){return r.json()}).then(function(d){var v=d.r;if(!Array.isArray(v))return;_notifs=v;var bar=document.getElementById('notif-bar');if(!bar)return;if(v.length>0){document.getElementById('notif-count').textContent=v.length;bar.style.display='block'}else{bar.style.display='none'}})}).catch(function(){})}
 function showNotifs(){var m=document.getElementById('notif-modal');var inner=document.getElementById('notif-modal-inner');var html="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0'>&#x1F514; Notifications</h3><button onclick='document.getElementById(\"notif-modal\").style.display=\"none\"' style='background:transparent;border:none;color:var(--text2);font-size:1.6em;cursor:pointer;line-height:1'>×</button></div>";if(!_notifs.length){html+="<div style='color:var(--text3)'>No notifications</div>"}else{_notifs.forEach(function(n,i){var msg=n.message||n.msg||n.text||JSON.stringify(n);var ts=(n.timestamp||n.ts)?new Date((n.timestamp||n.ts)*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ}):'';html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='font-weight:500;font-size:.9em'>#"+(i+1)+" "+msg+"</div>"+(ts?"<div style='font-size:.78em;color:var(--text3);margin-top:4px'>"+ts+"</div>":'')+"</div>"})}inner.innerHTML=html;m.style.display='flex'}
-function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
+function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){updateChargeReminder(s);applyMeterCapability(s.meter);var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
+// Charge-reminder banner (#127). Reads next_scheduled_charge (UTC epoch)
+// + plug_reminder from /api/status — both gateway-computed, no BAPI hop.
+// Piggybacks on updateBleHealth's existing /api/status fetch (no extra
+// request on the single-connection ESP). Times render in the charger's
+// timezone so they match the schedule editor.
+function fmtCharge(epoch){
+  try{return new Date(epoch*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ,weekday:'short',hour:'2-digit',minute:'2-digit'})}
+  catch(e){return new Date(epoch*1000).toLocaleString()}
+}
+// #129: hide grid/solar surfaces when the charger has no power meter
+// (Power Boost / Power Meter accessory absent — e.g. the original Pulsar).
+// meter===undefined (older firmware) is treated as present, so nothing
+// hides on a gateway that doesn't report the flag. Charging power stays
+// visible via the stats grid; only the grid-dependent bits hide.
+function applyMeterCapability(meter){
+  var hide=(meter===false);
+  ['card-powerflow','cell-vt','cell-gp'].forEach(function(id){
+    var el=document.getElementById(id);if(el)el.style.display=hide?'none':'';
+  });
+}
+function updateChargeReminder(s){
+  var b=document.getElementById('charge-reminder');if(!b)return;
+  // Don't trust plug/schedule state when the charger link is down.
+  if(!s||s.ble!=='connected'){b.style.display='none';return}
+  var nsc=s.next_scheduled_charge;
+  if(s.plug_reminder){
+    b.style.background='rgba(239,68,68,.10)';b.style.border='1px solid rgba(239,68,68,.35)';b.style.color='#ef4444';
+    b.innerHTML='&#x1F50C; <strong>Not plugged in</strong> — scheduled charge '+(nsc?'at '+fmtCharge(nsc):'due soon')+'. Connect the cable so it can start.';
+    b.style.display='block';
+  }else if(nsc){
+    b.style.background='rgba(59,130,246,.08)';b.style.border='1px solid rgba(59,130,246,.25)';b.style.color='var(--text2)';
+    b.innerHTML='&#x1F5D3;&#xFE0F; Next scheduled charge: <strong>'+fmtCharge(nsc)+'</strong>';
+    b.style.display='block';
+  }else{
+    b.style.display='none';
+  }
+}
 loadNotifs();setInterval(loadNotifs,60000);
 updateBleHealth();setInterval(updateBleHealth,15000);
 </script>
@@ -2490,6 +2542,7 @@ String wb_buildSetupPage() {
     page += "<input type='hidden' name='ble_txchr' value='" + cfg.bleTxChar + "'>";
     page += "<input type='hidden' name='poll_status' value='" + String(cfg.statusPollMs) + "'>";
     page += "<input type='hidden' name='poll_rt' value='" + String(cfg.realtimePollMs) + "'>";
+    page += "<input type='hidden' name='rem_lead' value='" + String(cfg.reminderLeadMin) + "'>";
     page += "<input type='hidden' name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'>";
     page += "<input type='hidden' name='ha_devid' value='" + cfg.haDeviceId + "'>";
 
@@ -2737,6 +2790,7 @@ String wb_buildConfigPage() {
     page += "<label>TX/Notify Char UUID (optional &mdash; leave blank for single-char Pulsar MAX)</label><input name='ble_txchr' value='" + cfg.bleTxChar + "' placeholder='Required for Pulsar Plus' style='font-size:12px;font-family:monospace'>";
     page += "<div class='row'><div><label>Status Poll (ms)</label><input name='poll_status' type='number' value='" + String(cfg.statusPollMs) + "'></div>";
     page += "<div><label>Realtime Poll (ms)</label><input name='poll_rt' type='number' value='" + String(cfg.realtimePollMs) + "'></div></div>";
+    page += "<div class='row'><div><label>Charge Reminder Lead (min)</label><input name='rem_lead' type='number' min='0' max='1440' value='" + String(cfg.reminderLeadMin) + "'><p class='help' style='margin:4px 0 0'>Minutes before a scheduled charge to flag \"not plugged in\". 0 disables.</p></div><div></div></div>";
     page += "<div class='row'><div><label>HA Prefix</label><input name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'></div>";
     page += "<div><label>Device ID</label><input name='ha_devid' value='" + cfg.haDeviceId + "'></div></div>";
     page += "</div></div>";
@@ -3229,6 +3283,10 @@ String wb_applySaveForm(std::function<String(const char*)> getArg) {
     }
     cfg.statusPollMs = getArg("poll_status").toInt();
     cfg.realtimePollMs = getArg("poll_rt").toInt();
+    // Charge reminder lead (#127). Guard on presence so a form that omits
+    // the field doesn't silently reset it to 0 (= feature disabled); an
+    // explicit "0" the user types still disables it.
+    if (getArg("rem_lead").length()) cfg.reminderLeadMin = getArg("rem_lead").toInt();
     cfg.haDiscoveryPrefix = getArg("ha_prefix"); cfg.haDeviceId = getArg("ha_devid");
     if (cfg.mqttPort == 0) cfg.mqttPort = 1883;
     if (cfg.statusPollMs < 1000) cfg.statusPollMs = 10000;
@@ -3316,6 +3374,7 @@ String wb_buildConfigExportJson() {
     d["auth_pass"]    = c.authPass.length() ? "***" : "";
     d["poll_status"]  = c.statusPollMs;
     d["poll_rt"]      = c.realtimePollMs;
+    d["rem_lead"]     = c.reminderLeadMin;
     d["ha_prefix"]    = c.haDiscoveryPrefix;
     d["ha_devid"]     = c.haDeviceId;
     String body;
@@ -3359,6 +3418,7 @@ ImportResult wb_applyConfigImport(const String& jsonBody) {
     take(d["auth_pass"],   c.authPass);
     if (d["poll_status"].is<uint32_t>()) c.statusPollMs = d["poll_status"].as<uint32_t>();
     if (d["poll_rt"].is<uint32_t>())     c.realtimePollMs = d["poll_rt"].as<uint32_t>();
+    if (d["rem_lead"].is<uint32_t>())    c.reminderLeadMin = d["rem_lead"].as<uint32_t>();
     take(d["ha_prefix"],   c.haDiscoveryPrefix);
     take(d["ha_devid"],    c.haDeviceId);
     configMgr.save();

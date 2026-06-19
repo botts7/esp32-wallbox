@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
+#include <time.h>   // time()/gmtime_r — charge-reminder engine (#127)
 
 WallboxBLE wallboxBLE;
 WallboxBLE* WallboxBLE::_instance = nullptr;
@@ -288,6 +289,15 @@ void WallboxBLE::loop() {
             if (now - _lastNotifPoll >= NOTIF_POLL_MS) {
                 _lastNotifPoll = now;
                 _pollNotifications();
+            }
+            // Charge-reminder engine (#127): refresh the schedule cache.
+            // Fast retry (15 s) until the first successful fetch so
+            // next-charge appears soon after a cold boot and a failed
+            // first read self-heals; slow 5-min cadence once populated.
+            uint32_t schedInterval = _schedFetched ? SCHED_POLL_MS : SCHED_POLL_MS_INIT;
+            if (now - _lastSchedPoll >= schedInterval) {
+                _lastSchedPoll = now;
+                _pollSchedules();
             }
         }
         break;
@@ -1425,7 +1435,18 @@ void WallboxBLE::_pollStatus() {
     // Energy meter on same cycle — lightweight & useful
     if (_state != State::CONNECTED) return;
     String meter = _sendCommandDirect(bapi::MET_GET_METER);
-    if (!meter.isEmpty()) _storeCache(_cachedMeterJson, _seqMeter, meter);
+    if (!meter.isEmpty()) {
+        _storeCache(_cachedMeterJson, _seqMeter, meter);
+        // Meter capability (#129): error code 4 = "feature not supported"
+        // (no Power Boost / Power Meter accessory). A valid r object means
+        // the meter is fitted. Anything else (timeout, transient) leaves
+        // the latched value untouched.
+        JsonDocument md;
+        if (deserializeJson(md, meter) == DeserializationError::Ok) {
+            if ((md["error"]["code"] | -1) == 4)      _meterPresent = false;
+            else if (md["r"].is<JsonObject>())        _meterPresent = true;
+        }
+    }
     // Live-session energy feed (solar/grid split, surplus, control mode).
     if (_state != State::CONNECTED) return;
     String lse = _sendCommandDirect(bapi::MET_GET_LSE);
@@ -1555,6 +1576,150 @@ void WallboxBLE::_pollNotifications() {
     String payload;
     serializeJson(out, payload);
     _storeCache(_cachedNotificationsJson, _seqNotifications, payload);
+}
+
+// ---- Charge-reminder engine (#127) ----
+
+// "HHMM" (UTC) -> minutes past midnight. Defensive: any malformed input
+// folds to 0 (midnight) rather than producing garbage.
+static uint16_t _hhmmToMin(const char* hhmm) {
+    if (!hhmm || strlen(hhmm) < 4) return 0;
+    int h = (hhmm[0] - '0') * 10 + (hhmm[1] - '0');
+    int m = (hhmm[2] - '0') * 10 + (hhmm[3] - '0');
+    if (h < 0 || h > 23 || m < 0 || m > 59) return 0;
+    return (uint16_t)(h * 60 + m);
+}
+
+void WallboxBLE::_pollSchedules() {
+    if (_state != State::CONNECTED) return;
+    SchedSlot tmp[kMaxSchedSlots];
+    uint8_t n = 0;
+
+    if (_isZentri) {
+        // Path B — legacy Pulsar (Zentri AMS): r_schs times out on this
+        // module, so read fixed slots sequentially (r_sch + bare-int sid)
+        // until the charger stops returning a sid. days==0 marks an
+        // empty/disabled slot — skipped, but we keep scanning past it.
+        // Mirrors loadSchedulesZentri() in the dashboard JS. The days
+        // bitmask is already Sunday-first (bit0=Sun), as the engine wants.
+        for (uint8_t i = 0; i < kMaxSchedSlots; i++) {
+            if (_state != State::CONNECTED) break;
+            String resp = _sendCommandDirect(bapi::MET_GET_SCHEDULE, String(i).c_str(), 3000);
+            if (resp.isEmpty()) break;
+            JsonDocument d;
+            if (deserializeJson(d, resp) != DeserializationError::Ok) break;
+            if (d["r"]["sid"].isNull()) break;  // past the last slot
+            uint8_t days = d["r"]["days"] | 0;
+            if (days == 0) continue;            // empty slot
+            if (n < kMaxSchedSlots) {
+                tmp[n].startMin = _hhmmToMin(d["r"]["start"] | "0000");
+                tmp[n].days     = days;
+                tmp[n].enabled  = true;         // days!=0 == enabled on Zentri
+                n++;
+            }
+        }
+    } else {
+        // Path A — array models (MAX/Plus/Copper/Quasar): one r_schs read
+        // returns the whole set. A transient miss (empty/parse-fail) keeps
+        // the previous cache rather than clobbering it to "no schedules".
+        String resp = _sendCommandDirect(bapi::MET_GET_SCHEDULES, "null", 8000);
+        if (resp.isEmpty()) return;
+        JsonDocument d;
+        if (deserializeJson(d, resp) != DeserializationError::Ok) return;
+        JsonArray arr = d["r"]["schedules"].is<JsonArray>()
+                          ? d["r"]["schedules"].as<JsonArray>()
+                          : d["r"].as<JsonArray>();
+        for (JsonObject s : arr) {
+            if (n >= kMaxSchedSlots) break;
+            tmp[n].startMin = _hhmmToMin(s["start"] | "0000");
+            tmp[n].days     = s["days"] | 0;
+            // r_schs reports enabled as integer 1/0, not a JSON bool, so use
+            // .as<bool>() (numeric->bool) — `| false` would strict-type a
+            // number to the default and read every schedule as disabled.
+            tmp[n].enabled  = s["enabled"].as<bool>();
+            n++;
+        }
+    }
+
+    // Reached only on a successful fetch+parse (both paths early-return on
+    // a transient empty/parse failure above, leaving _schedFetched false so
+    // the fast retry keeps trying). A valid response with zero schedules is
+    // still "fetched" — it switches to the slow cadence.
+    _schedFetched = true;
+    // Commit under the cache mutex (read by nextScheduledChargeEpoch on
+    // the main + AsyncTCP tasks).
+    if (_cacheMutex && xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        _schedCount = n;
+        for (uint8_t i = 0; i < n; i++) _schedSlots[i] = tmp[i];
+        xSemaphoreGive(_cacheMutex);
+    }
+}
+
+uint32_t WallboxBLE::nextScheduledChargeEpoch() {
+    time_t now = time(nullptr);
+    if (now < 1700000000) return 0;  // NTP not synced yet — can't compute
+    // Snapshot the slot cache, then compute lock-free.
+    SchedSlot slots[kMaxSchedSlots];
+    uint8_t n = 0;
+    if (_cacheMutex && xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        n = _schedCount;
+        for (uint8_t i = 0; i < n; i++) slots[i] = _schedSlots[i];
+        xSemaphoreGive(_cacheMutex);
+    } else {
+        return 0;
+    }
+    if (n == 0) return 0;
+
+    struct tm tmNow;
+    gmtime_r(&now, &tmNow);
+    // Minute-of-week, Sunday=0 — matches the slot days bitmask (bit0=Sun).
+    int32_t nowMow = tmNow.tm_wday * 1440 + tmNow.tm_hour * 60 + tmNow.tm_min;
+    int32_t best = INT32_MAX;
+    for (uint8_t i = 0; i < n; i++) {
+        if (!slots[i].enabled) continue;
+        for (uint8_t d = 0; d < 7; d++) {
+            if (!(slots[i].days & (1 << d))) continue;
+            int32_t slotMow = d * 1440 + slots[i].startMin;
+            int32_t delta = slotMow - nowMow;
+            if (delta < 0) delta += 7 * 1440;  // soonest future occurrence
+            if (delta < best) best = delta;
+        }
+    }
+    if (best == INT32_MAX) return 0;
+    // Align to the minute boundary: drop current seconds, add delta.
+    return (uint32_t)((int64_t)now - tmNow.tm_sec + (int64_t)best * 60);
+}
+
+bool WallboxBLE::carConnected() {
+    String s; uint32_t seq;
+    copyCachedStatus(s, seq);
+    if (s.isEmpty()) return false;
+    JsonDocument d;
+    if (deserializeJson(d, s) != DeserializationError::Ok) return false;
+    int st = d["r"]["st"] | -1;
+    // Same plugged-in r_dat.st code set as WallboxMQTT::publishCarConnected.
+    bool connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
+                      st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
+    // Locked-with-car heuristic (st==6 folds locked/no-car + locked/car):
+    // r_sta.charger_status==19 has been observed as locked-with-car.
+    if (st == 6) {
+        String rt; copyCachedRealtime(rt, seq);
+        if (!rt.isEmpty()) {
+            JsonDocument rd;
+            if (deserializeJson(rd, rt) == DeserializationError::Ok &&
+                (rd["r"]["charger_status"] | -1) == 19) connected = true;
+        }
+    }
+    return connected;
+}
+
+bool WallboxBLE::plugReminderActive(uint32_t leadMinutes) {
+    if (leadMinutes == 0) return false;     // feature disabled
+    if (carConnected()) return false;       // already plugged in — nothing to nudge
+    uint32_t next = nextScheduledChargeEpoch();
+    if (next == 0) return false;            // no schedule / NTP not ready
+    uint32_t now = (uint32_t)time(nullptr);
+    return (next > now) && (next - now <= leadMinutes * 60);
 }
 
 void WallboxBLE::copyCachedStatus(String& out, uint32_t& seq) {

@@ -37,6 +37,10 @@ struct WBConfig {
     uint32_t statusPollMs = 10000;
     uint32_t realtimePollMs = 30000;
 
+    // Charge reminder: how many minutes before a scheduled charge to raise
+    // the "plug in" nudge (plug_reminder). 0 disables the feature entirely.
+    uint32_t reminderLeadMin = 10;
+
     // HA
     String haDiscoveryPrefix = "homeassistant";
     String haDeviceId = "wallbox_pulsar_max";

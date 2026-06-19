@@ -63,7 +63,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 64;
+static const size_t kDiscoveryCount = 66;  // +next_scheduled_charge +plug_reminder (#127)
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -1261,6 +1261,23 @@ const DiscoveryEntry kEntries[] = {
     /* 63 */ { EntityKind::SENSOR, "control_mode", "Control Mode", "mdi:tune-variant",
                TopicSlot::LSE, "{{ value_json.r.control_mode }}",
                nullptr, nullptr, "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // ----- Charge-reminder engine (#127), gateway-computed from gTopic -----
+    // next_scheduled_charge: UTC epoch -> as_datetime gives HA a tz-aware
+    // timestamp; empty render (no schedule / null) leaves the state unknown.
+    /* 64 */ { EntityKind::SENSOR, "next_scheduled_charge", "Next Scheduled Charge", "mdi:calendar-clock",
+               TopicSlot::GATEWAY,
+               "{% if value_json.next_scheduled_charge %}{{ value_json.next_scheduled_charge | as_datetime }}{% endif %}",
+               nullptr, "timestamp", nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // plug_reminder: ON when a charge is due within the lead window and the
+    // car isn't plugged in. The single source a notify blueprint binds to.
+    /* 65 */ { EntityKind::BINARY_SENSOR, "plug_reminder", "Plug-In Reminder", "mdi:power-plug-off",
+               TopicSlot::GATEWAY,
+               "{% if value_json.plug_reminder %}ON{% else %}OFF{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 };
 

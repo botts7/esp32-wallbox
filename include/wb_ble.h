@@ -122,6 +122,34 @@ public:
     // view-only.
     bool isZentri() const { return _isZentri; }
 
+    // Power-meter capability (#129). False once the charger reports the
+    // power-meter read (r_dca) as unsupported — BAPI error code 4 — i.e.
+    // no Power Boost / Power Meter accessory fitted (e.g. the original
+    // Pulsar). Surfaces drive grid/solar field visibility off this so a
+    // meter-less charger doesn't show empty Grid/House values. Defaults
+    // true so a metered charger shows immediately; flips false after the
+    // first r_dca "not supported" response.
+    bool meterPresent() const { return _meterPresent; }
+
+    // ---- Charge-reminder engine (#127) ----
+    // Computed from the charger's own schedules (fetched on a slow
+    // cadence by _pollSchedules on the BLE task) plus NTP UTC time.
+    // "Build once, consume many": /api/status, the gateway dashboard,
+    // MQTT (publishGatewayInfo), the HA Integration, and the Add-on all
+    // read these — none re-derive them.
+    //
+    // nextScheduledChargeEpoch(): UTC epoch of the soonest *enabled*
+    // schedule start, or 0 when there are no enabled schedules or NTP
+    // hasn't synced yet. Cheap + thread-safe (snapshots the slot cache
+    // under _cacheMutex, then computes lock-free).
+    uint32_t nextScheduledChargeEpoch();
+    // carConnected(): reflects the cached r_dat status code using the
+    // same plugged-in code set as WallboxMQTT::publishCarConnected.
+    bool carConnected();
+    // plugReminderActive(): true when a charge is due within leadMinutes
+    // and the car is NOT plugged in. 0 leadMinutes disables the feature.
+    bool plugReminderActive(uint32_t leadMinutes);
+
     // Responses
     String lastResponse() const { return _lastResponse; }
     using ResponseCallback = void (*)(const String& json);
@@ -289,6 +317,7 @@ private:
     volatile State _state = State::DISCONNECTED;
     bool _pinRequired = false;
     bool _isZentri = false;  // set in _connect() when TruConnect module detected (#12)
+    bool _meterPresent = true;  // #129: false once r_dca reports error code 4 (no meter)
 
     // Response handling
     bapi::ResponseParser _parser;
@@ -361,6 +390,23 @@ private:
     void _pollSettings();
     void _pollNotifications();
     void _storeCache(String& dst, uint32_t& seq, const String& value);
+
+    // ---- Charge-reminder engine: normalized schedule cache (#127) ----
+    // Both charger families reduce to one shape: start time as minutes
+    // past midnight UTC, a days bitmask with bit0=Sunday (matches
+    // struct tm.tm_wday), and an enabled flag. Array models (MAX/Plus/
+    // Copper/Quasar) fill this from one r_schs read; the legacy Zentri
+    // Pulsar fills it from sequential per-sid r_sch reads (r_schs times
+    // out there). Guarded by _cacheMutex like the other cached reads.
+    struct SchedSlot { uint16_t startMin; uint8_t days; bool enabled; };
+    static const uint8_t  kMaxSchedSlots = 16;
+    SchedSlot _schedSlots[kMaxSchedSlots] = {};
+    uint8_t   _schedCount   = 0;
+    bool      _schedFetched = false;  // true once a poll has completed OK (even 0 schedules)
+    uint32_t  _lastSchedPoll = 0;
+    static const uint32_t SCHED_POLL_MS = 300000;  // 5 min steady cadence — schedules rarely change
+    static const uint32_t SCHED_POLL_MS_INIT = 15000;  // fast retry until first successful fetch
+    void _pollSchedules();
 
     // ---- Phase 3 BLE request queue (2.7.0 in progress) ----
     // Single-slot _pendingCmd is being replaced by a real FreeRTOS queue
