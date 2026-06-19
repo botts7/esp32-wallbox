@@ -752,6 +752,9 @@ String wb_buildStatusJson() {
     // #129: meter capability — surfaces hide grid/solar when false (charger
     // has no Power Boost / Power Meter; e.g. the original Pulsar).
     json += ",\"meter\":" + String(wallboxBLE.meterPresent() ? "true" : "false");
+    // Whether a vehicle is plugged in (r_dat.st-based, see carConnected()).
+    // Surfaces a real cable signal — NB sta_connected above is WiFi, not the car.
+    json += ",\"car_connected\":" + String(wallboxBLE.carConnected() ? "true" : "false");
     // Charge-reminder engine (#127): UTC epoch of the next enabled
     // schedule (null when none / NTP not synced) + the plug-in nudge.
     // All surfaces (dashboard banner, Integration, Add-on) read these.
@@ -1220,7 +1223,7 @@ static const char* DASH_BODY_SOURCE = R"HTML(
     <line id='pf-line2' x1='215' y1='70' x2='285' y2='70' stroke='var(--success)' stroke-width='2.5' stroke-dasharray='8 5' stroke-dashoffset='0' marker-end='url(#pf-arrow)' style='opacity:0;transition:opacity .25s'/>
     <g><circle cx='45' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><text x='45' y='78' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x1F50C;</text><text x='45' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Grid</text><text id='pf-grid-kw' x='45' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
     <g><rect x='150' y='40' width='60' height='60' rx='12' fill='var(--surface)' stroke='var(--primary)' stroke-width='1.5'/><text x='180' y='80' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x26A1;</text><text x='180' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Charger</text></g>
-    <g><circle cx='315' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><g transform='translate(295,62)' fill='none' stroke='var(--text)' stroke-width='1.6' stroke-linejoin='round' stroke-linecap='round'><path d='M2 12 Q3 7 7 7 L11 3 Q14 1 19 1 L28 1 Q33 1 36 5 L40 7 L41 12 L41 13 L2 13 Z' fill='var(--surface)'/><circle cx='11' cy='13' r='2.6' fill='var(--elevated)'/><circle cx='34' cy='13' r='2.6' fill='var(--elevated)'/></g><g id='pf-battery' transform='translate(303,82)'><rect x='0' y='0' width='22' height='7' rx='1.2' fill='var(--surface)' stroke='var(--text3)' stroke-width='.7'/><rect x='22' y='2' width='1.6' height='3' fill='var(--text3)'/><rect id='pf-batt-1' x='1.6' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-2' x='8.4' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-3' x='15.2' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/></g><text x='315' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Vehicle</text><text id='pf-veh-kw' x='315' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
+    <g><circle cx='315' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><g transform='translate(295,62)' fill='none' stroke='var(--text)' stroke-width='1.6' stroke-linejoin='round' stroke-linecap='round'><path d='M2 12 Q3 7 7 7 L11 3 Q14 1 19 1 L28 1 Q33 1 36 5 L40 7 L41 12 L41 13 L2 13 Z' fill='var(--surface)'/><circle cx='11' cy='13' r='2.6' fill='var(--elevated)'/><circle cx='34' cy='13' r='2.6' fill='var(--elevated)'/></g><g id='pf-battery' transform='translate(303,82)'><rect x='0' y='0' width='22' height='7' rx='1.2' fill='var(--surface)' stroke='var(--text3)' stroke-width='.7'/><rect x='22' y='2' width='1.6' height='3' fill='var(--text3)'/><rect id='pf-batt-1' x='1.6' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-2' x='8.4' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-3' x='15.2' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/></g><text x='315' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Vehicle</text><text id='pf-veh-kw' x='315' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text><text id='pf-plugin' x='315' y='30' text-anchor='middle' font-size='10.5' fill='var(--accent)' font-weight='700' style='display:none'>&#x1F50C; Plug in</text></g>
   </svg>
   <div style='display:flex;justify-content:space-between;font-size:.85em;padding:10px 14px 4px;border-top:1px solid var(--border);margin-top:8px'>
     <span style='color:var(--text2)'>Since plugged in</span><span id='pf-session' style='font-weight:600;font-variant-numeric:tabular-nums'>--</span>
@@ -1274,7 +1277,9 @@ function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;
 // Solar / "Green" branch is intentionally not rendered yet — needs a
 // solar-inverter integration that doesn't exist today. Adding it later
 // is a 30-line follow-up.
-var _pfState={cp:null,en:null,house:null};
+var _pfState={cp:null,en:null,house:null,conn:null};
+// Car-connected from the r_dat status code — mirrors firmware carConnected().
+function _carConn(st){return st===1||st===2||st===3||st===4||st===5||st===8||st===10||st===11||st===12||st===13||st===18}
 // Flowing-dash animation: scrolls the stroke-dashoffset negatively so
 // dashes appear to march Grid->Charger->Vehicle. Speed scales with
 // the actual charging power so visually-faster = more kW. Capped so
@@ -1328,6 +1333,11 @@ function _pfRender(){
   if(l2)l2.style.opacity=charging?'1':'0';
   _pfAnimate(l1,charging,cp);_pfAnimate(l2,charging,cp);
   _pfBatteryAnimate(charging);
+  // Plug-in prompt: when the car isn't connected, swap the vehicle kW for a
+  // "Plug in" cue (mirrors the official app's connect-cable visual).
+  var conn=_pfState.conn,plug=document.getElementById('pf-plugin'),vk=document.getElementById('pf-veh-kw');
+  if(conn===false){if(plug)plug.style.display='';if(vk)vk.style.display='none'}
+  else{if(plug)plug.style.display='none';if(vk)vk.style.display=''}
 }
 // 3.0: when BLE drops, clear all live-data spans + the power-flow
 // state so the dashboard reflects "no signal" instead of frozen stale
@@ -1335,12 +1345,12 @@ function _pfRender(){
 // reload doesn't rehydrate the corpse.
 function _clearLive(){
   ['v-st','v-pw','v-cr','v-en','v-mc','v-lk','v-oc','v-vt','v-gp','pf-veh-kw','pf-grid-kw','pf-session'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent='--'});
-  _pfState.cp=null;_pfState.en=null;_pfState.house=null;_pfRender();
+  _pfState.cp=null;_pfState.en=null;_pfState.house=null;_pfState.conn=null;_pfRender();
   var pb=document.getElementById('paused-banner');if(pb)pb.style.display='none';
   var cr=document.getElementById('charge-reminder');if(cr)cr.style.display='none';
   try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
 }
-function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
+function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
 function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
 function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null'){/* BLE not delivering charger status — reset power flow + session cache so the animation can't outlive a BLE drop on stale localStorage values */_pfState.cp=null;_pfState.en=null;_pfRender();return}var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(!d||!d.r){_pfState.house=null;_pfRender();return}applyMeterData(d.r)}).catch(function(){_pfState.house=null;_pfRender()})}
 // Hook WS push handlers
