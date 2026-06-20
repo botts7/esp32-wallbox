@@ -8,6 +8,7 @@
 #include "wb_ble.h"
 #include "wb_web.h"  // for webServer.requestReboot()
 #include "bapi.h"     // for MET_* constants used in /api/command
+#include "wb_control.h"  // last-command-by tracking for arbitration
 
 #if WB_ASYNC_WEB
 
@@ -880,6 +881,13 @@ static void _registerBleRoutes() {
         }
         String value = req->hasParam("value")
             ? req->getParam("value")->value() : String("");
+        // Tag the commander for arbitration (advisory; see docs/control-owner.md).
+        // Charge-affecting actions record who issued them (optional &owner=, ""
+        // -> "manual") so controllers can detect a recent manual/other override.
+        if (action == "start" || action == "stop" || action == "resume" || action == "current") {
+            wb_control::recordCommand(
+                req->hasParam("owner") ? req->getParam("owner")->value() : String(""));
+        }
         const char* met = nullptr;
         String par;
         if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
