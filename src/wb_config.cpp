@@ -32,6 +32,7 @@ void ConfigManager::load() {
     _cfg.statusPollMs = _prefs.getULong("poll_status", 10000);
     _cfg.realtimePollMs = _prefs.getULong("poll_rt", 30000);
     _cfg.reminderLeadMin = _prefs.getULong("rem_lead", 10);
+    _cfg.controlOwner = _prefs.getString("ctrl_owner", "wallbox_schedule");
     _cfg.haDiscoveryPrefix = _prefs.getString("ha_prefix", "homeassistant");
     _cfg.haDeviceId   = _prefs.getString("ha_devid", "wallbox_pulsar_max");
     _cfg.lastSeenFw   = _prefs.getString("last_fw", "");
@@ -88,6 +89,7 @@ void ConfigManager::save() {
     _prefs.putULong("poll_status", _cfg.statusPollMs);
     _prefs.putULong("poll_rt", _cfg.realtimePollMs);
     _prefs.putULong("rem_lead", _cfg.reminderLeadMin);
+    _prefs.putString("ctrl_owner", _cfg.controlOwner);
     _prefs.putString("ha_prefix", _cfg.haDiscoveryPrefix);
     _prefs.putString("ha_devid", _cfg.haDeviceId);
     _prefs.putString("last_fw", _cfg.lastSeenFw);

@@ -41,6 +41,12 @@ struct WBConfig {
     // the "plug in" nudge (plug_reminder). 0 disables the feature entirely.
     uint32_t reminderLeadMin = 10;
 
+    // Charge control owner — who may autonomously start/stop charging.
+    // Surfaces/controllers read control_owner from /api/status; only the
+    // matching one acts. "wallbox_schedule" (default) | "integration" |
+    // "addon" | "none". Advisory only — manual commands always work.
+    String controlOwner = "wallbox_schedule";
+
     // HA
     String haDiscoveryPrefix = "homeassistant";
     String haDeviceId = "wallbox_pulsar_max";

@@ -1,5 +1,6 @@
 #include "wb_web.h"
 #include "wb_config.h"
+#include "wb_control.h"
 #include "wb_ble.h"
 #include "wb_log.h"
 #include "wb_version.h"
@@ -765,6 +766,16 @@ String wb_buildStatusJson() {
         json += ",\"plug_reminder\":" +
                 String(wallboxBLE.plugReminderActive(configMgr.get().reminderLeadMin) ? "true" : "false");
     }
+    // Charge-control arbitration (advisory; see docs/control-owner.md). owner =
+    // the user's source-of-truth choice; last_command_by/age let controllers
+    // detect a recent manual or other-controller override and stand down.
+    json += ",\"control_owner\":\"" + configMgr.get().controlOwner + "\"";
+    json += ",\"last_command_by\":\"" + wb_control::lastCommandBy() + "\"";
+    {
+        uint32_t cAge = wb_control::lastCommandAgeMs();
+        json += ",\"last_command_age_s\":" +
+                String(cAge == 0xFFFFFFFFUL ? -1 : (int)(cAge / 1000));
+    }
     json += ",\"rssi\":" + String(wallboxBLE.rssi());
     json += ",\"scan_rssi\":" + String(wallboxBLE.scanRSSI());
     json += ",\"tx\":" + String(wallboxBLE.txCount());
@@ -1033,6 +1044,11 @@ static void handleApiCommand() {
     // Resolve action → met + par (shared by both paths).
     String action = http.arg("action");
     String value  = http.arg("value");
+    // Tag the commander for arbitration (advisory; see docs/control-owner.md).
+    // Charge-affecting actions record who issued them (optional &owner=, "" ->
+    // "manual") so controllers can detect a recent manual/other override.
+    if (action == "start" || action == "stop" || action == "resume" || action == "current")
+        wb_control::recordCommand(http.arg("owner"));
     const char* met = nullptr;
     String par;
     if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
@@ -2801,6 +2817,22 @@ String wb_buildConfigPage() {
     page += "<div class='row'><div><label>Status Poll (ms)</label><input name='poll_status' type='number' value='" + String(cfg.statusPollMs) + "'></div>";
     page += "<div><label>Realtime Poll (ms)</label><input name='poll_rt' type='number' value='" + String(cfg.realtimePollMs) + "'></div></div>";
     page += "<div class='row'><div><label>Charge Reminder Lead (min)</label><input name='rem_lead' type='number' min='0' max='1440' value='" + String(cfg.reminderLeadMin) + "'><p class='help' style='margin:4px 0 0'>Minutes before a scheduled charge to flag \"not plugged in\". 0 disables.</p></div><div></div></div>";
+    // Charge control owner — who is allowed to autonomously start/stop charging.
+    page += "<div class='row'><div><label>Charge Control Owner</label><select name='ctrl_owner'>";
+    {
+        static const char* ctrlOpts[][2] = {
+            {"wallbox_schedule", "Wallbox native schedule"},
+            {"integration",      "Home Assistant Integration"},
+            {"addon",            "Home Assistant Add-on"},
+            {"none",             "None (manual / plug-in only)"},
+        };
+        for (auto& o : ctrlOpts) {
+            page += "<option value='"; page += o[0]; page += "'";
+            if (cfg.controlOwner == o[0]) page += " selected";
+            page += ">"; page += o[1]; page += "</option>";
+        }
+    }
+    page += "</select><p class='help' style='margin:4px 0 0'>Who decides when to charge. The chosen one controls; the others stand down. Manual always works.</p></div><div></div></div>";
     page += "<div class='row'><div><label>HA Prefix</label><input name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'></div>";
     page += "<div><label>Device ID</label><input name='ha_devid' value='" + cfg.haDeviceId + "'></div></div>";
     page += "</div></div>";
@@ -3297,6 +3329,7 @@ String wb_applySaveForm(std::function<String(const char*)> getArg) {
     // the field doesn't silently reset it to 0 (= feature disabled); an
     // explicit "0" the user types still disables it.
     if (getArg("rem_lead").length()) cfg.reminderLeadMin = getArg("rem_lead").toInt();
+    if (getArg("ctrl_owner").length()) cfg.controlOwner = getArg("ctrl_owner");
     cfg.haDiscoveryPrefix = getArg("ha_prefix"); cfg.haDeviceId = getArg("ha_devid");
     if (cfg.mqttPort == 0) cfg.mqttPort = 1883;
     if (cfg.statusPollMs < 1000) cfg.statusPollMs = 10000;
@@ -3385,6 +3418,7 @@ String wb_buildConfigExportJson() {
     d["poll_status"]  = c.statusPollMs;
     d["poll_rt"]      = c.realtimePollMs;
     d["rem_lead"]     = c.reminderLeadMin;
+    d["ctrl_owner"]   = c.controlOwner;
     d["ha_prefix"]    = c.haDiscoveryPrefix;
     d["ha_devid"]     = c.haDeviceId;
     String body;
@@ -3429,6 +3463,7 @@ ImportResult wb_applyConfigImport(const String& jsonBody) {
     if (d["poll_status"].is<uint32_t>()) c.statusPollMs = d["poll_status"].as<uint32_t>();
     if (d["poll_rt"].is<uint32_t>())     c.realtimePollMs = d["poll_rt"].as<uint32_t>();
     if (d["rem_lead"].is<uint32_t>())    c.reminderLeadMin = d["rem_lead"].as<uint32_t>();
+    if (d["ctrl_owner"].is<const char*>()) c.controlOwner = d["ctrl_owner"].as<const char*>();
     take(d["ha_prefix"],   c.haDiscoveryPrefix);
     take(d["ha_devid"],    c.haDeviceId);
     configMgr.save();
