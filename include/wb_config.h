@@ -41,6 +41,13 @@ struct WBConfig {
     // the "plug in" nudge (plug_reminder). 0 disables the feature entirely.
     uint32_t reminderLeadMin = 10;
 
+    // Nominal mains voltage (V), used to derive charge power from phase
+    // currents on chargers that don't report `cp` (the original/Zentri
+    // Pulsar, #12). Only used as a fallback when no Power Meter accessory is
+    // fitted. 230 = UK/EU/AU/Asia (single- and 3-phase line-to-neutral);
+    // 240 = North America Level 2; 200 = Japan; 120 = NA Level 1.
+    uint32_t mainsVoltage = 230;
+
     // Charge control owner — who may autonomously start/stop charging.
     // Surfaces/controllers read control_owner from /api/status; only the
     // matching one acts. "wallbox_schedule" (default) | "integration" |

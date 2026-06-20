@@ -32,6 +32,7 @@ void ConfigManager::load() {
     _cfg.statusPollMs = _prefs.getULong("poll_status", 10000);
     _cfg.realtimePollMs = _prefs.getULong("poll_rt", 30000);
     _cfg.reminderLeadMin = _prefs.getULong("rem_lead", 10);
+    _cfg.mainsVoltage = _prefs.getULong("mains_v", 230);
     _cfg.controlOwner = _prefs.getString("ctrl_owner", "wallbox_schedule");
     _cfg.haDiscoveryPrefix = _prefs.getString("ha_prefix", "homeassistant");
     _cfg.haDeviceId   = _prefs.getString("ha_devid", "wallbox_pulsar_max");
@@ -65,6 +66,7 @@ void ConfigManager::load() {
     Log.printf("  polls:      status=%lums realtime=%lums\n",
         (unsigned long)_cfg.statusPollMs, (unsigned long)_cfg.realtimePollMs);
     Log.printf("  reminder:   lead=%lumin\n", (unsigned long)_cfg.reminderLeadMin);
+    Log.printf("  mains_v:    %luV (phase-current power fallback)\n", (unsigned long)_cfg.mainsVoltage);
     Log.printf("  HA:         prefix='%s' devid='%s'\n",
         _cfg.haDiscoveryPrefix.c_str(), _cfg.haDeviceId.c_str());
 }
@@ -89,6 +91,7 @@ void ConfigManager::save() {
     _prefs.putULong("poll_status", _cfg.statusPollMs);
     _prefs.putULong("poll_rt", _cfg.realtimePollMs);
     _prefs.putULong("rem_lead", _cfg.reminderLeadMin);
+    _prefs.putULong("mains_v", _cfg.mainsVoltage);
     _prefs.putString("ctrl_owner", _cfg.controlOwner);
     _prefs.putString("ha_prefix", _cfg.haDiscoveryPrefix);
     _prefs.putString("ha_devid", _cfg.haDeviceId);

@@ -393,6 +393,7 @@ void setup() {
                                 cfg.bleTxChar.c_str());
         }
         wallboxBLE.setChargerModel(cfg.chargerModel.c_str());
+        wallboxBLE.setMainsVoltage(cfg.mainsVoltage);
         wallboxBLE.setStatusPollMs(cfg.statusPollMs);
         wallboxBLE.setRealtimePollMs(cfg.realtimePollMs);
         if (cfg.blePin.length() > 0) {

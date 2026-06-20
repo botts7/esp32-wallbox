@@ -1290,6 +1290,10 @@ static const char* DASH_BODY_SOURCE = R"HTML(
 // — there's no MAX-specific cloud-code variant, the older
 // model-aware split was incorrect.
 var SN={0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',4:'Paused',5:'Charge Complete',6:'Locked',7:'Error',8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)'};
+// Original/Zentri Pulsar (#12) reports a small status enum that doesn't line
+// up with the MAX 0-18 codes (esp. st4 = charge ramp, not "Paused"). Used in
+// place of SN when /api/status reports zentri:true.
+var ZN={0:'Ready',1:'Charging',2:'Connected',3:'Waiting for Schedule',4:'Starting'};
 var CHARGER_TZ='UTC';try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
 fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function _setText(id,txt){var el=document.getElementById(id);if(el)el.textContent=txt}
@@ -1373,7 +1377,7 @@ function _clearLive(){
   var cr=document.getElementById('charge-reminder');if(cr)cr.style.display='none';
   try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
 }
-function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
+function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=(window._zentri&&ZN[s.st]!==undefined)?ZN[s.st]:SN[s.st];_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
 function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
 function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null'){/* BLE not delivering charger status — reset power flow + session cache so the animation can't outlive a BLE drop on stale localStorage values */_pfState.cp=null;_pfState.en=null;_pfRender();return}var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(!d||!d.r){_pfState.house=null;_pfRender();return}applyMeterData(d.r)}).catch(function(){_pfState.house=null;_pfRender()})}
 // Hook WS push handlers
@@ -1391,7 +1395,7 @@ fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return 
 var _notifs=[];
 function loadNotifs(){fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.ble!=='connected')return;return fetch('/api/command?action=bapi&met=r_not&par=null',{signal:AbortSignal.timeout(10000)}).then(function(r){return r.json()}).then(function(d){var v=d.r;if(!Array.isArray(v))return;_notifs=v;var bar=document.getElementById('notif-bar');if(!bar)return;if(v.length>0){document.getElementById('notif-count').textContent=v.length;bar.style.display='block'}else{bar.style.display='none'}})}).catch(function(){})}
 function showNotifs(){var m=document.getElementById('notif-modal');var inner=document.getElementById('notif-modal-inner');var html="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0'>&#x1F514; Notifications</h3><button onclick='document.getElementById(\"notif-modal\").style.display=\"none\"' style='background:transparent;border:none;color:var(--text2);font-size:1.6em;cursor:pointer;line-height:1'>×</button></div>";if(!_notifs.length){html+="<div style='color:var(--text3)'>No notifications</div>"}else{_notifs.forEach(function(n,i){var msg=n.message||n.msg||n.text||JSON.stringify(n);var ts=(n.timestamp||n.ts)?new Date((n.timestamp||n.ts)*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ}):'';html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='font-weight:500;font-size:.9em'>#"+(i+1)+" "+msg+"</div>"+(ts?"<div style='font-size:.78em;color:var(--text3);margin-top:4px'>"+ts+"</div>":'')+"</div>"})}inner.innerHTML=html;m.style.display='flex'}
-function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){updateChargeReminder(s);applyMeterCapability(s.meter);var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
+function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){window._zentri=!!s.zentri;updateChargeReminder(s);applyMeterCapability(s.meter);var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
 // Charge-reminder banner (#127). Reads next_scheduled_charge (UTC epoch)
 // + plug_reminder from /api/status — both gateway-computed, no BAPI hop.
 // Piggybacks on updateBleHealth's existing /api/status fetch (no extra
@@ -2576,6 +2580,7 @@ String wb_buildSetupPage() {
     page += "<input type='hidden' name='poll_status' value='" + String(cfg.statusPollMs) + "'>";
     page += "<input type='hidden' name='poll_rt' value='" + String(cfg.realtimePollMs) + "'>";
     page += "<input type='hidden' name='rem_lead' value='" + String(cfg.reminderLeadMin) + "'>";
+    page += "<input type='hidden' name='mains_v' value='" + String(cfg.mainsVoltage) + "'>";
     page += "<input type='hidden' name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'>";
     page += "<input type='hidden' name='ha_devid' value='" + cfg.haDeviceId + "'>";
 
@@ -2824,6 +2829,30 @@ String wb_buildConfigPage() {
     page += "<div class='row'><div><label>Status Poll (ms)</label><input name='poll_status' type='number' value='" + String(cfg.statusPollMs) + "'></div>";
     page += "<div><label>Realtime Poll (ms)</label><input name='poll_rt' type='number' value='" + String(cfg.realtimePollMs) + "'></div></div>";
     page += "<div class='row'><div><label>Charge Reminder Lead (min)</label><input name='rem_lead' type='number' min='0' max='1440' value='" + String(cfg.reminderLeadMin) + "'><p class='help' style='margin:4px 0 0'>Minutes before a scheduled charge to flag \"not plugged in\". 0 disables.</p></div><div></div></div>";
+    // Mains voltage — used to derive charge power from phase currents on the
+    // original/Zentri Pulsar, which doesn't report power directly (#12).
+    {
+        struct { uint32_t v; const char* label; } volts[] = {
+            {230, "230 V &mdash; UK / EU / Australia / Asia"},
+            {240, "240 V &mdash; North America (Level 2)"},
+            {208, "208 V &mdash; North America (3-phase)"},
+            {200, "200 V &mdash; Japan"},
+            {120, "120 V &mdash; North America (Level 1)"},
+            {127, "127 V &mdash; Latin America"},
+        };
+        bool known = false;
+        page += "<label>Mains Voltage</label><select name='mains_v'>";
+        for (auto& o : volts) {
+            bool sel = (cfg.mainsVoltage == o.v);
+            known = known || sel;
+            page += String("<option value='") + o.v + "'" + (sel ? " selected" : "") + ">" + o.label + "</option>";
+        }
+        // Preserve any custom value the user set via JSON/API.
+        if (!known)
+            page += String("<option value='") + cfg.mainsVoltage + "' selected>" + cfg.mainsVoltage + " V &mdash; custom</option>";
+        page += "</select>";
+        page += "<p class='help'>Used only when the charger doesn't report power directly (original Pulsar). Ignored if a Power Meter accessory is fitted &mdash; its measured voltage is used instead.</p>";
+    }
     // Charge control owner — who is allowed to autonomously start/stop charging.
     page += "<div class='row'><div><label>Charge Control Owner</label><select name='ctrl_owner'>";
     {
@@ -3336,6 +3365,10 @@ String wb_applySaveForm(std::function<String(const char*)> getArg) {
     // the field doesn't silently reset it to 0 (= feature disabled); an
     // explicit "0" the user types still disables it.
     if (getArg("rem_lead").length()) cfg.reminderLeadMin = getArg("rem_lead").toInt();
+    if (getArg("mains_v").length()) {
+        long mv = getArg("mains_v").toInt();
+        cfg.mainsVoltage = (mv >= 50 && mv <= 500) ? (uint32_t)mv : 230;
+    }
     if (getArg("ctrl_owner").length()) cfg.controlOwner = getArg("ctrl_owner");
     cfg.haDiscoveryPrefix = getArg("ha_prefix"); cfg.haDeviceId = getArg("ha_devid");
     if (cfg.mqttPort == 0) cfg.mqttPort = 1883;
@@ -3425,6 +3458,7 @@ String wb_buildConfigExportJson() {
     d["poll_status"]  = c.statusPollMs;
     d["poll_rt"]      = c.realtimePollMs;
     d["rem_lead"]     = c.reminderLeadMin;
+    d["mains_v"]      = c.mainsVoltage;
     d["ctrl_owner"]   = c.controlOwner;
     d["ha_prefix"]    = c.haDiscoveryPrefix;
     d["ha_devid"]     = c.haDeviceId;
@@ -3470,6 +3504,10 @@ ImportResult wb_applyConfigImport(const String& jsonBody) {
     if (d["poll_status"].is<uint32_t>()) c.statusPollMs = d["poll_status"].as<uint32_t>();
     if (d["poll_rt"].is<uint32_t>())     c.realtimePollMs = d["poll_rt"].as<uint32_t>();
     if (d["rem_lead"].is<uint32_t>())    c.reminderLeadMin = d["rem_lead"].as<uint32_t>();
+    if (d["mains_v"].is<uint32_t>()) {
+        uint32_t mv = d["mains_v"].as<uint32_t>();
+        if (mv >= 50 && mv <= 500) c.mainsVoltage = mv;
+    }
     if (d["ctrl_owner"].is<const char*>()) c.controlOwner = d["ctrl_owner"].as<const char*>();
     take(d["ha_prefix"],   c.haDiscoveryPrefix);
     take(d["ha_devid"],    c.haDeviceId);

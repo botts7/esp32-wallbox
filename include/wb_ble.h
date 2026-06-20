@@ -112,6 +112,9 @@ public:
     // Nordic-UART-style dual-char protocol per jagheterfredrik/wallbox-ble
     // and -mqtt-bridge: no BAPI PIN, `r_dat` keepalive, Plus 0-18 status enum.
     void setChargerModel(const char* m) { _chargerModel = (m && *m) ? m : "max"; }
+    // Nominal mains voltage (V) for deriving charge power from phase currents
+    // on chargers that don't report `cp` (Zentri/original Pulsar, #12).
+    void setMainsVoltage(uint32_t v) { _mainsVoltage = (v >= 50 && v <= 500) ? v : 230; }
     bool isPlus() const {
         return _chargerModel == "plus" || _chargerModel == "copper"
             || _chargerModel == "quasar" || _chargerModel == "quasar2";
@@ -529,6 +532,7 @@ public:
 
 private:
     String _chargerModel = "max";
+    uint32_t _mainsVoltage = 230;   // phase-current power derivation fallback (#12)
     String _prevFw;
     bool _fwChanged = false;
 

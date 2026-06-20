@@ -2,6 +2,7 @@
 #include "wb_log.h"
 #include "wb_config.h"
 #include "wb_health.h"
+#include "wb_zentri_normalize.h"
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
@@ -1431,7 +1432,15 @@ void WallboxBLE::_storeCache(String& dst, uint32_t& seq, const String& value) {
 void WallboxBLE::_pollStatus() {
     if (_state != State::CONNECTED) return;
     String resp = _sendCommandDirect(bapi::MET_GET_STATUS);
-    if (!resp.isEmpty()) _storeCache(_cachedStatusJson, _seqStatus, resp);
+    if (!resp.isEmpty()) {
+        // Zentri/original Pulsar omits `cp` — synthesise charge power from the
+        // phase currents so every downstream consumer (dashboard, MQTT,
+        // charge-interval log) works unchanged (#12). Uses the previous
+        // cycle's cached meter for measured voltage, else the nominal setting.
+        if (_isZentri)
+            wb_zentri::normaliseStatus(resp, (float)_mainsVoltage, _cachedMeterJson);
+        _storeCache(_cachedStatusJson, _seqStatus, resp);
+    }
     // Energy meter on same cycle — lightweight & useful
     if (_state != State::CONNECTED) return;
     String meter = _sendCommandDirect(bapi::MET_GET_METER);
