@@ -13,6 +13,7 @@
 #include "wb_log.h"
 #include "wb_health.h"
 #include "wb_diag.h"
+#include "wb_charge_log.h"
 #include "wb_net.h"
 #include "wb_web_async.h"
 #include "wb_version.h"
@@ -63,6 +64,20 @@ static void publishCachedRealtimeIfNew() {
         wallboxMQTT.publishRealtime(resp);
         wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
         webServer.updateCache(lastStatus, lastRealtime);
+    }
+}
+// Charge-interval capture — fed from the STATUS cache (BAPI r_dat, which
+// carries cp/en/gen/usid; the "realtime" cache is r_sta = charger_status only,
+// no power). Runs INDEPENDENTLY of MQTT so we never lose real charge windows
+// when the broker is disconnected (the publishCached*IfNew drains only run
+// inside `if (mqtt.isConnected())`).
+static uint32_t _lastChargeLogSeq = 0;
+static void feedChargeLog() {
+    String st; uint32_t seq = 0;
+    wallboxBLE.copyCachedStatus(st, seq);
+    if (seq != 0 && seq != _lastChargeLogSeq && !st.isEmpty()) {
+        _lastChargeLogSeq = seq;
+        wb_charge_log::onRealtime(st);
     }
 }
 static void publishCachedMeterIfNew() {
@@ -199,6 +214,13 @@ static void publishGatewayInfo() {
         json += ",\"plug_reminder\":";
         json += wallboxBLE.plugReminderActive(configMgr.get().reminderLeadMin) ? "true" : "false";
     }
+    // Charge-interval capture (#141) — gateway-computed; consumed by the HA
+    // last_burst_energy + charge_log_count MQTT entities (parity with the
+    // same fields on /api/status / the HACS integration).
+    json += ",\"charging_now\":";
+    json += wb_charge_log::chargingNow() ? "true" : "false";
+    json += ",\"last_burst_wh\":" + String((unsigned)wb_charge_log::lastBurstWh());
+    json += ",\"charge_log_count\":" + String((unsigned)wb_charge_log::count());
     json += "}";
     wallboxMQTT.publishResponse("gateway", json);
 }
@@ -288,6 +310,7 @@ void setup() {
     // lands (typically ~1–3s after WiFi up). Pool.ntp.org is the
     // canonical anycast resolver — no further config needed for UTC.
     configTime(0, 0, "pool.ntp.org");
+    wb_charge_log::begin();  // load persisted charge-interval ring
 
     // mDNS — wb_net handles it now: initial bind happens on the
     // first GOT_IP via wb_net::tick() pending-flag drain, and the
@@ -513,6 +536,9 @@ void loop() {
         bool avail = nowConnected || (bleDisconnectedAt > 0 && millis() - bleDisconnectedAt < 60000);
         wallboxMQTT.publishAvailability(avail);
     }
+
+    // Charge-interval capture — ungated (must run even with MQTT down).
+    feedChargeLog();
 
     // Phase 2 (rc16): periodic BAPI polling runs on the BLE FreeRTOS task
     // (see wb_ble.cpp _pollStatus/_pollRealtime/_pollSettings/_pollNotifications).

@@ -4,6 +4,7 @@
 #include "wb_version.h"
 #include "wb_health.h"
 #include "wb_diag.h"
+#include "wb_charge_log.h"
 #include "wb_ota_history.h"
 #include "wb_ble.h"
 #include "wb_web.h"  // for webServer.requestReboot()
@@ -349,6 +350,18 @@ static void _registerReadOnlyRoutes() {
         if (!_checkAuth(req)) return;
         AsyncWebServerResponse* res = req->beginResponse(200,
             "application/json", wb_diag::toJson());
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
+    // GET /api/charge_log — real per-session charge-burst windows (cp>0
+    // intervals), so consumers can bill/plot energy at the time it was
+    // actually delivered, not at plug-in time.
+    _async.on("/api/charge_log", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "application/json", wb_charge_log::toJson());
         res->addHeader("Cache-Control", "no-store");
         req->send(res);
     });

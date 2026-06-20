@@ -7,6 +7,7 @@
 #include "wb_health.h"
 #include "wb_ota_history.h"
 #include "wb_diag.h"
+#include "wb_charge_log.h"
 #include "wb_watchdog.h"
 #include "wb_ws.h"
 #include "wb_mqtt.h"
@@ -766,6 +767,12 @@ String wb_buildStatusJson() {
         json += ",\"plug_reminder\":" +
                 String(wallboxBLE.plugReminderActive(configMgr.get().reminderLeadMin) ? "true" : "false");
     }
+    // Charge-interval capture (#141): live summary of the real charge-burst
+    // tracker. Full interval list is at /api/charge_log; these let surfaces
+    // show "charging now" + a count without a second fetch.
+    json += ",\"charging_now\":" + String(wb_charge_log::chargingNow() ? "true" : "false");
+    json += ",\"charge_log_count\":" + String((unsigned)wb_charge_log::count());
+    json += ",\"last_burst_wh\":" + String((unsigned)wb_charge_log::lastBurstWh());
     // Charge-control arbitration (advisory; see docs/control-owner.md). owner =
     // the user's source-of-truth choice; last_command_by/age let controllers
     // detect a recent manual or other-controller override and stand down.

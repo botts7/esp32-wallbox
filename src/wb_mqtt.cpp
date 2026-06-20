@@ -63,7 +63,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 66;  // +next_scheduled_charge +plug_reminder (#127)
+static const size_t kDiscoveryCount = 68;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141)
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -1278,6 +1278,20 @@ const DiscoveryEntry kEntries[] = {
                TopicSlot::GATEWAY,
                "{% if value_json.plug_reminder %}ON{% else %}OFF{% endif %}",
                nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // ----- Charge-interval capture (#141), gateway-computed from gTopic.
+    // MQTT parity with the HACS Integration's charge-log sensors. -----
+    /* 66 */ { EntityKind::SENSOR, "last_burst_energy", "Last Charge Burst", "mdi:lightning-bolt",
+               TopicSlot::GATEWAY,
+               "{{ ((value_json.last_burst_wh | default(0)) / 1000) | round(3) }}",
+               "kWh", "energy", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 67 */ { EntityKind::SENSOR, "charge_log_count", "Recorded Charge Bursts", "mdi:counter",
+               TopicSlot::GATEWAY,
+               "{{ value_json.charge_log_count | default(0) }}",
+               nullptr, nullptr, "measurement", "diagnostic",
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 };
 
