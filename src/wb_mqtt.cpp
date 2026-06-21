@@ -63,7 +63,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 68;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141)
+static const size_t kDiscoveryCount = 72;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power L1/L2/L3 +meter total energy (EM340)
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -1002,8 +1002,8 @@ const DiscoveryEntry kEntries[] = {
                "V", "voltage", "measurement", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
-    /* 20 */ { EntityKind::SENSOR, "grid_power", "House Power", "mdi:home-lightning-bolt",
-               TopicSlot::METER, "{{ value_json.r.p1 }}",
+    /* 20 */ { EntityKind::SENSOR, "grid_power", "Grid Power", "mdi:home-lightning-bolt",
+               TopicSlot::METER, "{{ (value_json.r.p1|default(0)) + (value_json.r.p2|default(0)) + (value_json.r.p3|default(0)) }}",
                "W", "power", "measurement", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
@@ -1011,6 +1011,27 @@ const DiscoveryEntry kEntries[] = {
                TopicSlot::METER, "{{ (value_json.r.c1 / 10) | round(1) }}",
                "A", "current", "measurement", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // EM340 / Power-Boost meter detail (r_dca): per-phase power + lifetime
+    // total energy. Diagnostic-category per-phase (collapsed in HA); the
+    // total energy feeds the HA Energy dashboard. Unavailable when no meter
+    // accessory is fitted.
+    { EntityKind::SENSOR, "grid_power_l1", "Grid Power L1", "mdi:flash",
+      TopicSlot::METER, "{{ value_json.r.p1 }}",
+      "W", "power", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    { EntityKind::SENSOR, "grid_power_l2", "Grid Power L2", "mdi:flash",
+      TopicSlot::METER, "{{ value_json.r.p2 }}",
+      "W", "power", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    { EntityKind::SENSOR, "grid_power_l3", "Grid Power L3", "mdi:flash",
+      TopicSlot::METER, "{{ value_json.r.p3 }}",
+      "W", "power", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    { EntityKind::SENSOR, "meter_energy", "Meter Total Energy", "mdi:counter",
+      TopicSlot::METER, "{{ (value_json.r.e / 1000) | round(2) }}",
+      "kWh", "energy", "total_increasing", nullptr,
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
     /* 22 */ { EntityKind::SENSOR, "meter_total_energy", "Lifetime Energy", "mdi:counter",
                TopicSlot::METER, "{{ (value_json.r.e / 1000) | round(1) }}",
