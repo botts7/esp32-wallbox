@@ -1237,16 +1237,16 @@ static const char* DASH_BODY_SOURCE = R"HTML(
 <div id='notif-modal' style='display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:300;align-items:center;justify-content:center;padding:16px' onclick='if(event.target===this)this.style.display=\"none\"'><div id='notif-modal-inner' style='background:var(--card);border-radius:12px;max-width:480px;width:100%;max-height:80vh;overflow:auto;padding:16px'></div></div>
 
 <div class='card' id='card-powerflow'>
-  <div class='card-header'><span class='card-icon'>&#x26A1;</span><h2 style='margin:0;font-size:1em'>Power Flow</h2></div>
-  <svg viewBox='0 0 360 130' style='display:block;width:100%;max-width:360px;margin:0 auto' role='img' aria-label='Live power flow Grid Charger Vehicle'>
-    <defs><marker id='pf-arrow' viewBox='0 0 6 6' refX='5' refY='3' markerWidth='5' markerHeight='5' orient='auto'><path d='M0,0 L6,3 L0,6 z' fill='var(--accent)'/></marker></defs>
-    <line x1='75' y1='70' x2='145' y2='70' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
-    <line x1='215' y1='70' x2='285' y2='70' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
-    <line id='pf-line1' x1='75' y1='70' x2='145' y2='70' stroke='var(--success)' stroke-width='2.5' stroke-dasharray='8 5' stroke-dashoffset='0' marker-end='url(#pf-arrow)' style='opacity:0;transition:opacity .25s'/>
-    <line id='pf-line2' x1='215' y1='70' x2='285' y2='70' stroke='var(--success)' stroke-width='2.5' stroke-dasharray='8 5' stroke-dashoffset='0' marker-end='url(#pf-arrow)' style='opacity:0;transition:opacity .25s'/>
-    <g><circle cx='45' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><text x='45' y='78' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x1F50C;</text><text x='45' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Grid</text><text id='pf-grid-kw' x='45' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
-    <g><rect x='150' y='40' width='60' height='60' rx='12' fill='var(--surface)' stroke='var(--primary)' stroke-width='1.5'/><text x='180' y='80' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x26A1;</text><text x='180' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Charger</text></g>
-    <g><circle cx='315' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><g transform='translate(295,62)' fill='none' stroke='var(--text)' stroke-width='1.6' stroke-linejoin='round' stroke-linecap='round'><path d='M2 12 Q3 7 7 7 L11 3 Q14 1 19 1 L28 1 Q33 1 36 5 L40 7 L41 12 L41 13 L2 13 Z' fill='var(--surface)'/><circle cx='11' cy='13' r='2.6' fill='var(--elevated)'/><circle cx='34' cy='13' r='2.6' fill='var(--elevated)'/></g><g id='pf-battery' transform='translate(303,82)'><rect x='0' y='0' width='22' height='7' rx='1.2' fill='var(--surface)' stroke='var(--text3)' stroke-width='.7'/><rect x='22' y='2' width='1.6' height='3' fill='var(--text3)'/><rect id='pf-batt-1' x='1.6' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-2' x='8.4' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-3' x='15.2' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/></g><text x='315' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Vehicle</text><text id='pf-veh-kw' x='315' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text><text id='pf-plugin' x='315' y='30' text-anchor='middle' font-size='10.5' fill='var(--accent)' font-weight='700' style='display:none'>&#x1F50C; Plug in</text></g>
+  <div class='card-header'><span class='card-icon'>&#x26A1;</span><h2 style='margin:0;font-size:1em'>Energy Flow</h2></div>
+  <svg viewBox='0 0 320 196' style='display:block;width:100%;max-width:320px;margin:0 auto' role='img' aria-label='Live energy flow Solar and Grid to Vehicle'>
+    <path d='M160,74 C160,116 214,122 246,130' fill='none' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
+    <line x1='76' y1='140' x2='244' y2='140' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
+    <path id='pf-solar-line' d='M160,74 C160,116 214,122 246,130' fill='none' stroke='#f59e0b' stroke-width='3.5' stroke-dasharray='9 6' stroke-dashoffset='0' style='opacity:0;transition:opacity .3s'/>
+    <line id='pf-grid-line' x1='76' y1='140' x2='244' y2='140' stroke='var(--primary)' stroke-width='3.5' stroke-dasharray='9 6' stroke-dashoffset='0' style='opacity:0;transition:opacity .3s'/>
+    <text id='pf-live' x='158' y='112' text-anchor='middle' font-size='12' fill='var(--text)' font-weight='700'></text>
+    <g><circle cx='160' cy='44' r='30' fill='rgba(245,158,11,.10)' stroke='#f59e0b' stroke-width='1.6'/><text x='160' y='42' text-anchor='middle' font-size='18' style='-webkit-user-select:none;user-select:none'>&#x2600;&#xFE0F;</text><text id='pf-solar-kwh' x='160' y='60' text-anchor='middle' font-size='11' fill='var(--text)' font-weight='700'>--</text><text x='160' y='88' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Solar</text></g>
+    <g><circle cx='46' cy='140' r='30' fill='var(--elevated)' stroke='var(--primary)' stroke-width='1.6'/><text x='46' y='147' text-anchor='middle' font-size='22' style='-webkit-user-select:none;user-select:none'>&#x1F50C;</text><text id='pf-grid-kwh' x='46' y='160' text-anchor='middle' font-size='11' fill='var(--text)' font-weight='700'>--</text><text x='46' y='184' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Grid</text></g>
+    <g><circle cx='274' cy='140' r='32' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.6'/><text x='274' y='132' text-anchor='middle' font-size='20' style='-webkit-user-select:none;user-select:none'>&#x1F697;</text><g id='pf-battery' transform='translate(263,146)'><rect x='0' y='0' width='22' height='7' rx='1.2' fill='var(--surface)' stroke='var(--text3)' stroke-width='.7'/><rect x='22' y='2' width='1.6' height='3' fill='var(--text3)'/><rect id='pf-batt-1' x='1.6' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-2' x='8.4' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-3' x='15.2' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/></g><text id='pf-car-kwh' x='274' y='166' text-anchor='middle' font-size='11' fill='var(--text)' font-weight='700'>--</text><text id='pf-plugin' x='274' y='166' text-anchor='middle' font-size='10' fill='var(--accent)' font-weight='700' style='display:none'>&#x1F50C; Plug in</text><text x='274' y='190' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Vehicle</text></g>
   </svg>
   <div style='display:flex;justify-content:space-between;font-size:.85em;padding:10px 14px 4px;border-top:1px solid var(--border);margin-top:8px'>
     <span style='color:var(--text2)'>Since plugged in</span><span id='pf-session' style='font-weight:600;font-variant-numeric:tabular-nums'>--</span>
@@ -1298,13 +1298,12 @@ var CHARGER_TZ='UTC';try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().time
 fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function _setText(id,txt){var el=document.getElementById(id);if(el)el.textContent=txt}
 function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;var el=document.getElementById(id);if(!el)return;el.textContent=(fmt?fmt(val):val)+(suffix||'')}
-// Power Flow card: Grid -> Charger -> Vehicle live kW + animated flow.
-// State is built up from two BAPI sources so we cache last-seen values
-// here (status pushes cp + en; meter pushes the house-power reading).
-// Solar / "Green" branch is intentionally not rendered yet — needs a
-// solar-inverter integration that doesn't exist today. Adding it later
-// is a 30-line follow-up.
-var _pfState={cp:null,en:null,house:null,conn:null};
+// Energy Flow card: Solar + Grid -> Vehicle, HA-style triangle. Per-source
+// kWh come from the gateway's r_lse feed (green_energy / grid_energy /
+// charged_energy); the live charge rate from charging_power (or r_dat cp).
+// The solar branch lights only when this session actually drew solar; grid
+// is the default source. cp/en still arrive on the status push.
+var _pfState={cp:null,en:null,house:null,conn:null,green:null,grid:null,charged:null};
 // Car-connected from the r_dat status code — mirrors firmware carConnected().
 function _carConn(st){return st===1||st===2||st===3||st===4||st===5||st===8||st===10||st===11||st===12||st===13||st===18}
 // Flowing-dash animation: scrolls the stroke-dashoffset negatively so
@@ -1350,29 +1349,38 @@ function _pfBatteryAnimate(on){
   },260);
 }
 function _pfRender(){
-  var cp=_pfState.cp,h=_pfState.house;
-  if(typeof cp==='number'){_setText('pf-veh-kw',cp.toFixed(2)+' kW')}
-  if(typeof h==='number'){_setText('pf-grid-kw',(h/1000).toFixed(2)+' kW')}
+  var g=_pfState.green,gr=_pfState.grid,cp=_pfState.cp;
+  function _kwh(v){return (typeof v==='number')?v.toFixed(2)+' kWh':'--'}
+  // Vehicle node total: r_lse charged_energy if present, else green+grid.
+  var total=(typeof _pfState.charged==='number')?_pfState.charged:(((g||0)+(gr||0))||null);
+  _setText('pf-solar-kwh',_kwh(g));
+  _setText('pf-grid-kwh',_kwh(gr));
+  _setText('pf-car-kwh',_kwh(typeof total==='number'?total:null));
   if(typeof _pfState.en==='number'){_setText('pf-session',(_pfState.en/100).toFixed(2)+' kWh')}
   var charging=(typeof cp==='number'&&cp>0.05);
-  var l1=document.getElementById('pf-line1'),l2=document.getElementById('pf-line2');
-  if(l1)l1.style.opacity=charging?'1':'0';
-  if(l2)l2.style.opacity=charging?'1':'0';
-  _pfAnimate(l1,charging,cp);_pfAnimate(l2,charging,cp);
+  _setText('pf-live',charging?cp.toFixed(2)+' kW':'');
+  // A branch is lit when this session drew from that source; grid is the
+  // default source while charging even before any energy has accumulated.
+  var hasSolar=(g||0)>0.001;
+  var hasGrid=(gr||0)>0.001||(charging&&!hasSolar);
+  var sl=document.getElementById('pf-solar-line'),gl=document.getElementById('pf-grid-line');
+  if(sl)sl.style.opacity=hasSolar?'1':'0';
+  if(gl)gl.style.opacity=hasGrid?'1':'0';
+  _pfAnimate(sl,charging&&hasSolar,cp);_pfAnimate(gl,charging&&hasGrid,cp);
   _pfBatteryAnimate(charging);
-  // Plug-in prompt: when the car isn't connected, swap the vehicle kW for a
+  // Plug-in prompt: when the car isn't connected, swap the vehicle kWh for a
   // "Plug in" cue (mirrors the official app's connect-cable visual).
-  var conn=_pfState.conn,plug=document.getElementById('pf-plugin'),vk=document.getElementById('pf-veh-kw');
-  if(conn===false){if(plug)plug.style.display='';if(vk)vk.style.display='none'}
-  else{if(plug)plug.style.display='none';if(vk)vk.style.display=''}
+  var conn=_pfState.conn,plug=document.getElementById('pf-plugin'),ck=document.getElementById('pf-car-kwh');
+  if(conn===false){if(plug)plug.style.display='';if(ck)ck.style.display='none'}
+  else{if(plug)plug.style.display='none';if(ck)ck.style.display=''}
 }
 // 3.0: when BLE drops, clear all live-data spans + the power-flow
 // state so the dashboard reflects "no signal" instead of frozen stale
 // values from the last poll. localStorage is also cleared so a page
 // reload doesn't rehydrate the corpse.
 function _clearLive(){
-  ['v-st','v-pw','v-cr','v-en','v-mc','v-lk','v-oc','v-vt','v-gp','pf-veh-kw','pf-grid-kw','pf-session'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent='--'});
-  _pfState.cp=null;_pfState.en=null;_pfState.house=null;_pfState.conn=null;_pfRender();
+  ['v-st','v-pw','v-cr','v-en','v-mc','v-lk','v-oc','v-vt','v-gp','pf-solar-kwh','pf-grid-kwh','pf-car-kwh','pf-live','pf-session'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent='--'});
+  _pfState.cp=null;_pfState.en=null;_pfState.house=null;_pfState.conn=null;_pfState.green=null;_pfState.grid=null;_pfState.charged=null;_pfRender();
   var pb=document.getElementById('paused-banner');if(pb)pb.style.display='none';
   var cr=document.getElementById('charge-reminder');if(cr)cr.style.display='none';
   try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
@@ -1390,6 +1398,12 @@ var _curTimer=null;
 function setCurrent(v){if(_curTimer)clearTimeout(_curTimer);_curTimer=setTimeout(function(){toast('Setting '+v+'A','info');fetch('/api/command?action=current&value='+v).then(function(x){return x.json()}).then(function(d){if(d.error)toast(d.error,'error');else toast('Max current set to '+v+'A','success');setTimeout(P,1000)}).catch(function(e){toast('Error: '+e,'error')})},300)}
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
 P();setInterval(P,10000);
+// r_lse (live-session solar/grid split) feeds the Energy Flow triangle.
+// Separate from P() because P() early-returns when the WS is open (r_lse is
+// not a WS push), and staggered + slower so it doesn't pile onto the
+// /api/command token bucket. charging_power overrides the r_dat cp live.
+function PLse(){fetch('/api/command?action=bapi&met=r_lse&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(!d||!d.r)return;var r=d.r;if(typeof r.green_energy==='number')_pfState.green=r.green_energy;if(typeof r.grid_energy==='number')_pfState.grid=r.grid_energy;if(typeof r.charged_energy==='number')_pfState.charged=r.charged_energy;if(typeof r.charging_power==='number'&&r.charging_power>0)_pfState.cp=r.charging_power;_pfRender()}).catch(function(){})}
+setTimeout(function(){PLse();setInterval(PLse,15000)},3500);
 fetch('/api/command?action=bapi&met=read_pin&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&!d.r.pin)document.getElementById('pin-warn').style.display='block'}).catch(function(){});
 fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.sta_connected&&!s.auth_enabled){var b=document.getElementById('auth-warn');if(b)b.style.display='block'}}).catch(function(){});
 var _notifs=[];
