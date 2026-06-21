@@ -36,6 +36,7 @@ void ConfigManager::load() {
     _cfg.controlOwner = _prefs.getString("ctrl_owner", "wallbox_schedule");
     _cfg.haDiscoveryPrefix = _prefs.getString("ha_prefix", "homeassistant");
     _cfg.haDeviceId   = _prefs.getString("ha_devid", "wallbox_pulsar_max");
+    _cfg.haDiscoveryEnabled = _prefs.getBool("ha_disc", true);
     _cfg.lastSeenFw   = _prefs.getString("last_fw", "");
 
     // FORENSIC (task #97): also log the LENGTHS so trailing whitespace,
@@ -67,8 +68,9 @@ void ConfigManager::load() {
         (unsigned long)_cfg.statusPollMs, (unsigned long)_cfg.realtimePollMs);
     Log.printf("  reminder:   lead=%lumin\n", (unsigned long)_cfg.reminderLeadMin);
     Log.printf("  mains_v:    %luV (phase-current power fallback)\n", (unsigned long)_cfg.mainsVoltage);
-    Log.printf("  HA:         prefix='%s' devid='%s'\n",
-        _cfg.haDiscoveryPrefix.c_str(), _cfg.haDeviceId.c_str());
+    Log.printf("  HA:         prefix='%s' devid='%s' discovery=%s\n",
+        _cfg.haDiscoveryPrefix.c_str(), _cfg.haDeviceId.c_str(),
+        _cfg.haDiscoveryEnabled ? "on" : "off");
 }
 
 void ConfigManager::save() {
@@ -95,6 +97,7 @@ void ConfigManager::save() {
     _prefs.putString("ctrl_owner", _cfg.controlOwner);
     _prefs.putString("ha_prefix", _cfg.haDiscoveryPrefix);
     _prefs.putString("ha_devid", _cfg.haDeviceId);
+    _prefs.putBool("ha_disc", _cfg.haDiscoveryEnabled);
     _prefs.putString("last_fw", _cfg.lastSeenFw);
     Log.println("[Config] Saved to NVS");
 }

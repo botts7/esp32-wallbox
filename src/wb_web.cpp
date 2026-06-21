@@ -2889,6 +2889,13 @@ String wb_buildConfigPage() {
     page += "</select><p class='help' style='margin:4px 0 0'>Who decides when to charge. The chosen one controls; the others stand down. Manual always works.</p></div><div></div></div>";
     page += "<div class='row'><div><label>HA Prefix</label><input name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'></div>";
     page += "<div><label>Device ID</label><input name='ha_devid' value='" + cfg.haDeviceId + "'></div></div>";
+    // Publish HA MQTT discovery — turn off if driving HA via the HACS
+    // Integration instead, to avoid duplicate entities. Off clears the
+    // retained configs so HA removes the MQTT entities.
+    page += "<div class='row'><div><label>HA MQTT Discovery</label><select name='ha_disc'>";
+    page += String("<option value='1'") + (cfg.haDiscoveryEnabled ? " selected" : "") + ">On &mdash; create HA entities via MQTT</option>";
+    page += String("<option value='0'") + (!cfg.haDiscoveryEnabled ? " selected" : "") + ">Off &mdash; I use the HACS Integration</option>";
+    page += "</select><p class='help' style='margin:4px 0 0'>Turn <b>Off</b> if you add the charger to HA with the HACS Integration instead &mdash; avoids duplicate entities. Off removes the MQTT entities from HA.</p></div><div></div></div>";
     page += "</div></div>";
 
     // ---------- Save button (outside panels so always visible) ----------
@@ -3389,6 +3396,9 @@ String wb_applySaveForm(std::function<String(const char*)> getArg) {
     }
     if (getArg("ctrl_owner").length()) cfg.controlOwner = getArg("ctrl_owner");
     cfg.haDiscoveryPrefix = getArg("ha_prefix"); cfg.haDeviceId = getArg("ha_devid");
+    // Only change when the select is present (it's Advanced-panel only) so a
+    // wizard save can't silently disable discovery.
+    if (getArg("ha_disc").length()) cfg.haDiscoveryEnabled = getArg("ha_disc") != "0";
     if (cfg.mqttPort == 0) cfg.mqttPort = 1883;
     if (cfg.statusPollMs < 1000) cfg.statusPollMs = 10000;
     if (cfg.realtimePollMs < 1000) cfg.realtimePollMs = 30000;
@@ -3480,6 +3490,7 @@ String wb_buildConfigExportJson() {
     d["ctrl_owner"]   = c.controlOwner;
     d["ha_prefix"]    = c.haDiscoveryPrefix;
     d["ha_devid"]     = c.haDeviceId;
+    d["ha_disc"]      = c.haDiscoveryEnabled;
     String body;
     serializeJsonPretty(d, body);
     return body;
@@ -3527,6 +3538,7 @@ ImportResult wb_applyConfigImport(const String& jsonBody) {
         if (mv >= 50 && mv <= 500) c.mainsVoltage = mv;
     }
     if (d["ctrl_owner"].is<const char*>()) c.controlOwner = d["ctrl_owner"].as<const char*>();
+    if (d["ha_disc"].is<bool>()) c.haDiscoveryEnabled = d["ha_disc"].as<bool>();
     take(d["ha_prefix"],   c.haDiscoveryPrefix);
     take(d["ha_devid"],    c.haDeviceId);
     configMgr.save();

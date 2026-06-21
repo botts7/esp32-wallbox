@@ -57,6 +57,11 @@ struct WBConfig {
     // HA
     String haDiscoveryPrefix = "homeassistant";
     String haDeviceId = "wallbox_pulsar_max";
+    // Publish HA MQTT discovery (creates the entities). Default on. Turn OFF
+    // if you drive HA via the HACS Integration instead — avoids duplicate
+    // entities. Toggling off clears the retained discovery configs so HA
+    // removes the MQTT entities cleanly.
+    bool haDiscoveryEnabled = true;
 
     // Last-seen charger firmware string (GATT 0x180A 0x2A26).
     // Used to detect Wallbox-pushed auto-OTAs across our reboots.

@@ -785,7 +785,12 @@ void WallboxMQTT::publishResponse(const char* method, const String& json) {
 // by `identifiers` from each payload's device block, so partial bursts
 // are safe; HA just gradually populates the device page.
 void WallboxMQTT::sendDiscovery() {
-    Log.println("[MQTT] HA discovery armed — publishing one entity per main-loop tick");
+    // When HA discovery is disabled (user drives HA via the HACS Integration),
+    // run the state machine in CLEARING mode: publish empty retained payloads
+    // to each config topic so HA removes the MQTT entities cleanly.
+    _discoveryClearing = !configMgr.get().haDiscoveryEnabled;
+    Log.printf("[MQTT] HA discovery armed (%s) — one entity per main-loop tick\n",
+               _discoveryClearing ? "CLEARING — discovery disabled" : "publishing");
 
     // ---- 2.6.0 cleanup: remove discovery for entities that we no
     // longer publish, so existing HA installs don't keep showing them
@@ -1326,9 +1331,40 @@ static const char* _resolveTopic(wb_disc::TopicSlot slot,
     return nullptr;
 }
 
+// HA MQTT-discovery component name for a table entry's kind (CUSTOM is the
+// car_connected binary_sensor). Used to build the config topic when clearing.
+static const char* _discComponentFor(wb_disc::EntityKind k) {
+    using EK = wb_disc::EntityKind;
+    switch (k) {
+        case EK::SENSOR:        return "sensor";
+        case EK::BINARY_SENSOR: return "binary_sensor";
+        case EK::NUMBER:        return "number";
+        case EK::SWITCH:        return "switch";
+        case EK::SELECT:        return "select";
+        case EK::BUTTON:        return "button";
+        case EK::CUSTOM:        return "binary_sensor";  // car_connected
+        case EK::NOOP:          return nullptr;
+    }
+    return nullptr;
+}
+
 void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
     if (index >= wb_disc::kEntryCount) return;
     const auto& e = wb_disc::kEntries[index];
+
+    // Discovery disabled: delete the entity instead of publishing it. An
+    // empty retained payload to the config topic is HA's documented "remove
+    // this entity" mechanism. Idempotent on every reconnect.
+    if (_discoveryClearing) {
+        const char* comp = _discComponentFor(e.kind);
+        if (comp) {
+            const WBConfig& cfg = configMgr.get();
+            String topic = cfg.haDiscoveryPrefix + "/" + comp + "/"
+                         + cfg.haDeviceId + "/" + e.objectId + "/config";
+            _client->publish(topic.c_str(), "", true);
+        }
+        return;
+    }
 
     auto resolve = [&](wb_disc::TopicSlot s) -> const char* {
         switch (s) {

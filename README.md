@@ -167,6 +167,12 @@ Both work; choose based on whether you want the gateway to be self-contained
 
 ### Home Assistant integration
 - 30+ auto-discovered entities (sensors, switches, numbers, selects, buttons)
+- **HA MQTT Discovery toggle** (Config → Advanced, v3.2+): on by default. Turn
+  **Off** if you add the charger to HA via the **HACS Integration** instead —
+  avoids duplicate entities; the gateway then clears its MQTT entities cleanly
+- Pick **one** entity source — MQTT discovery **or** the HACS Integration. The
+  HA **Add-on** is a dashboard panel only (no `homeassistant_api`), so it
+  creates no entities and never duplicates
 - Proper native HA types (Eco Smart = select dropdown, Auto Lock = switch, etc.)
 - Diagnostic-category entities (loop_max_ms, heap_free, reentry tripwire,
   rate-limit tokens etc.) collapse into a separate HA card so the main
