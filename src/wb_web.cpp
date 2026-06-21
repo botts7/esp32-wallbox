@@ -1353,7 +1353,7 @@ function _pfRender(){
   var cp=_pfState.cp,h=_pfState.house,sp=_pfState.surplus;
   function _kw(v){return (typeof v==='number')?v.toFixed(2)+' kW':'--'}
   _setText('pf-solar-kwh',_kw(sp));                                 // live solar surplus
-  _setText('pf-grid-kwh',_kw(typeof h==='number'?h/1000:null));     // live grid/house power
+  _setText('pf-grid-kwh',_kw(typeof h==='number'?Math.max(0,h/1000):null));  // live grid IMPORT (>=0; export = surplus, shown on Solar)
   _setText('pf-car-kwh',_kw(cp));                                   // live charge power
   // Footer: cumulative since-plugged-in split — solar USED (green) vs grid.
   var gp=_pfState.green,grp=_pfState.grid;
