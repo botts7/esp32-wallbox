@@ -1064,12 +1064,15 @@ static void handleApiCommand() {
     // Mirrors jagheterfredrik/wallbox-ble's Plus convention. See #4.
     else if (action == "stop")    { met = bapi::MET_START_STOP;  par = configMgr.isPlusFamily() ? "0" : "2"; }
     // Resume — clears schedule/eco override flag (r_dat.gen -> 0).
-    // Sends Stop first as a defensive prefix because s_cmode mode=0
-    // rejects (subcode 6) when charger is actively charging.
-    // See async handler for the rationale.
+    // s_cmode mode=0 is rejected (subcode 6) ONLY while actively charging,
+    // so we queue a defensive Stop first in that case alone. Sending the
+    // hard Stop (par=2 on the MAX) when merely paused/waiting is NOT a
+    // harmless no-op — it can fault the charger (error 114), so we skip it.
     else if (action == "resume")  {
-        const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
-        wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
+        if (wallboxBLE.isCharging()) {
+            const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
+            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
+        }
         met = "s_cmode";             par = "{\"mode\":0}";
     }
     else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }

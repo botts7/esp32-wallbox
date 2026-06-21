@@ -911,15 +911,17 @@ static void _registerBleRoutes() {
         else if (action == "stop")    { met = bapi::MET_START_STOP;  par = configMgr.isPlusFamily() ? "0" : "2"; }
         // Resume clears the schedule/eco manual-override flag
         // (r_dat.gen != 0 -> 0). The charger rejects s_cmode mode=0
-        // (subcode 6) when actively charging (st=1), so we queue a
-        // Stop first as a defensive prefix. Stop is a no-op when the
-        // charger is already not charging — w_cha par=0/2 returns
-        // r:null without changing state. Net effect: Resume always
-        // lands gen=0 regardless of starting state. Two-call sequence
-        // serializes through the BLE queue.
+        // (subcode 6) ONLY when actively charging (st=1), so we queue a
+        // defensive Stop first in that case alone. The earlier assumption
+        // that Stop is a harmless no-op when not charging proved WRONG: a
+        // hard Stop (par=2 on the MAX) while merely paused/waiting can fault
+        // the charger (error 114), so we skip it unless actually charging.
+        // s_cmode mode=0 alone lands gen=0 from the paused/idle state.
         else if (action == "resume")  {
-            const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
-            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
+            if (wallboxBLE.isCharging()) {
+                const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
+                wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
+            }
             met = "s_cmode";             par = "{\"mode\":0}";
         }
         else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }

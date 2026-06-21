@@ -149,6 +149,10 @@ public:
     // carConnected(): reflects the cached r_dat status code using the
     // same plugged-in code set as WallboxMQTT::publishCarConnected.
     bool carConnected();
+    // isCharging(): true only when actively charging (cached r_dat.st == 1,
+    // or r_sta.charger_status == 1). Lets Resume skip its defensive hard-Stop
+    // when the charger is merely paused/waiting (error-114 fix).
+    bool isCharging();
     // plugReminderActive(): true when a charge is due within leadMinutes
     // and the car is NOT plugged in. 0 leadMinutes disables the feature.
     bool plugReminderActive(uint32_t leadMinutes);

@@ -1722,6 +1722,28 @@ bool WallboxBLE::carConnected() {
     return connected;
 }
 
+// Is the charger ACTIVELY charging right now? Reads the cached r_dat.st
+// (== 1 = Charging), falling back to r_sta.charger_status == 1. Used by the
+// Resume action to decide whether the defensive Stop prefix is needed — a
+// hard Stop is only required (and only safe) when actually charging; sending
+// it while merely paused/waiting can fault the charger (#resume / error 114).
+bool WallboxBLE::isCharging() {
+    String s; uint32_t seq;
+    copyCachedStatus(s, seq);
+    if (!s.isEmpty()) {
+        JsonDocument d;
+        if (deserializeJson(d, s) == DeserializationError::Ok &&
+            (d["r"]["st"] | -1) == 1) return true;
+    }
+    String rt; copyCachedRealtime(rt, seq);
+    if (!rt.isEmpty()) {
+        JsonDocument rd;
+        if (deserializeJson(rd, rt) == DeserializationError::Ok &&
+            (rd["r"]["charger_status"] | -1) == 1) return true;
+    }
+    return false;
+}
+
 bool WallboxBLE::plugReminderActive(uint32_t leadMinutes) {
     if (leadMinutes == 0) return false;     // feature disabled
     if (carConnected()) return false;       // already plugged in — nothing to nudge
