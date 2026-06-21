@@ -1298,12 +1298,12 @@ var CHARGER_TZ='UTC';try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().time
 fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function _setText(id,txt){var el=document.getElementById(id);if(el)el.textContent=txt}
 function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;var el=document.getElementById(id);if(!el)return;el.textContent=(fmt?fmt(val):val)+(suffix||'')}
-// Energy Flow card: Solar + Grid -> Vehicle, HA-style triangle. Per-source
-// kWh come from the gateway's r_lse feed (green_energy / grid_energy /
-// charged_energy); the live charge rate from charging_power (or r_dat cp).
-// The solar branch lights only when this session actually drew solar; grid
-// is the default source. cp/en still arrive on the status push.
-var _pfState={cp:null,en:null,house:null,conn:null,green:null,grid:null,charged:null};
+// Energy Flow card: Solar + Grid -> Vehicle, HA-style triangle, LIVE POWER.
+// Nodes show instantaneous kW: Vehicle = charging_power (r_lse) / r_dat cp;
+// Grid = live house/grid power from the r_dca meter (p1+p2+p3); Solar = live
+// solar surplus (r_lse active_feature.surplus_power). Lines animate only
+// while charging. The footer keeps the cumulative "since plugged in" kWh.
+var _pfState={cp:null,en:null,house:null,conn:null,surplus:null};
 // Car-connected from the r_dat status code — mirrors firmware carConnected().
 function _carConn(st){return st===1||st===2||st===3||st===4||st===5||st===8||st===10||st===11||st===12||st===13||st===18}
 // Flowing-dash animation: scrolls the stroke-dashoffset negatively so
@@ -1349,26 +1349,24 @@ function _pfBatteryAnimate(on){
   },260);
 }
 function _pfRender(){
-  var g=_pfState.green,gr=_pfState.grid,cp=_pfState.cp;
-  function _kwh(v){return (typeof v==='number')?v.toFixed(2)+' kWh':'--'}
-  // Vehicle node total: r_lse charged_energy if present, else green+grid.
-  var total=(typeof _pfState.charged==='number')?_pfState.charged:(((g||0)+(gr||0))||null);
-  _setText('pf-solar-kwh',_kwh(g));
-  _setText('pf-grid-kwh',_kwh(gr));
-  _setText('pf-car-kwh',_kwh(typeof total==='number'?total:null));
+  var cp=_pfState.cp,h=_pfState.house,sp=_pfState.surplus;
+  function _kw(v){return (typeof v==='number')?v.toFixed(2)+' kW':'--'}
+  _setText('pf-solar-kwh',_kw(sp));                                 // live solar surplus
+  _setText('pf-grid-kwh',_kw(typeof h==='number'?h/1000:null));     // live grid/house power
+  _setText('pf-car-kwh',_kw(cp));                                   // live charge power
   if(typeof _pfState.en==='number'){_setText('pf-session',(_pfState.en/100).toFixed(2)+' kWh')}
   var charging=(typeof cp==='number'&&cp>0.05);
-  _setText('pf-live',charging?cp.toFixed(2)+' kW':'');
-  // A branch is lit when this session drew from that source; grid is the
-  // default source while charging even before any energy has accumulated.
-  var hasSolar=(g||0)>0.001;
-  var hasGrid=(gr||0)>0.001||(charging&&!hasSolar);
+  // Approximate the live split from solar surplus: solar covers up to its
+  // available kW, grid makes up the remainder. Lines only flow while charging.
+  var hasSolar=charging&&(sp||0)>0.05;
+  var hasGrid=charging&&((cp||0)-(sp||0)>0.05);
+  if(charging&&!hasSolar&&!hasGrid)hasGrid=true;   // unknown split -> default grid
   var sl=document.getElementById('pf-solar-line'),gl=document.getElementById('pf-grid-line');
   if(sl)sl.style.opacity=hasSolar?'1':'0';
   if(gl)gl.style.opacity=hasGrid?'1':'0';
-  _pfAnimate(sl,charging&&hasSolar,cp);_pfAnimate(gl,charging&&hasGrid,cp);
+  _pfAnimate(sl,hasSolar,cp);_pfAnimate(gl,hasGrid,cp);
   _pfBatteryAnimate(charging);
-  // Plug-in prompt: when the car isn't connected, swap the vehicle kWh for a
+  // Plug-in prompt: when the car isn't connected, swap the vehicle kW for a
   // "Plug in" cue (mirrors the official app's connect-cable visual).
   var conn=_pfState.conn,plug=document.getElementById('pf-plugin'),ck=document.getElementById('pf-car-kwh');
   if(conn===false){if(plug)plug.style.display='';if(ck)ck.style.display='none'}
@@ -1379,8 +1377,8 @@ function _pfRender(){
 // values from the last poll. localStorage is also cleared so a page
 // reload doesn't rehydrate the corpse.
 function _clearLive(){
-  ['v-st','v-pw','v-cr','v-en','v-mc','v-lk','v-oc','v-vt','v-gp','pf-solar-kwh','pf-grid-kwh','pf-car-kwh','pf-live','pf-session'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent='--'});
-  _pfState.cp=null;_pfState.en=null;_pfState.house=null;_pfState.conn=null;_pfState.green=null;_pfState.grid=null;_pfState.charged=null;_pfRender();
+  ['v-st','v-pw','v-cr','v-en','v-mc','v-lk','v-oc','v-vt','v-gp','pf-solar-kwh','pf-grid-kwh','pf-car-kwh','pf-session'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent='--'});
+  _pfState.cp=null;_pfState.en=null;_pfState.house=null;_pfState.conn=null;_pfState.surplus=null;_pfRender();
   var pb=document.getElementById('paused-banner');if(pb)pb.style.display='none';
   var cr=document.getElementById('charge-reminder');if(cr)cr.style.display='none';
   try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
@@ -1402,7 +1400,7 @@ P();setInterval(P,10000);
 // Separate from P() because P() early-returns when the WS is open (r_lse is
 // not a WS push), and staggered + slower so it doesn't pile onto the
 // /api/command token bucket. charging_power overrides the r_dat cp live.
-function PLse(){fetch('/api/command?action=bapi&met=r_lse&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(!d||!d.r)return;var r=d.r;if(typeof r.green_energy==='number')_pfState.green=r.green_energy;if(typeof r.grid_energy==='number')_pfState.grid=r.grid_energy;if(typeof r.charged_energy==='number')_pfState.charged=r.charged_energy;if(typeof r.charging_power==='number'&&r.charging_power>0)_pfState.cp=r.charging_power;_pfRender()}).catch(function(){})}
+function PLse(){fetch('/api/command?action=bapi&met=r_lse&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(!d||!d.r)return;var r=d.r;if(typeof r.charging_power==='number')_pfState.cp=r.charging_power;var af=r.active_feature;if(af&&typeof af.surplus_power==='number')_pfState.surplus=af.surplus_power;_pfRender()}).catch(function(){})}
 setTimeout(function(){PLse();setInterval(PLse,15000)},3500);
 fetch('/api/command?action=bapi&met=read_pin&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&!d.r.pin)document.getElementById('pin-warn').style.display='block'}).catch(function(){});
 fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.sta_connected&&!s.auth_enabled){var b=document.getElementById('auth-warn');if(b)b.style.display='block'}}).catch(function(){});
