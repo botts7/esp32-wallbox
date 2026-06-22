@@ -2,9 +2,11 @@
 #include "wb_log.h"
 #include "wb_config.h"
 #include "wb_health.h"
+#include "wb_zentri_normalize.h"
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
+#include <time.h>   // time()/gmtime_r — charge-reminder engine (#127)
 
 WallboxBLE wallboxBLE;
 WallboxBLE* WallboxBLE::_instance = nullptr;
@@ -48,6 +50,13 @@ class WBClientCallbacks : public NimBLEClientCallbacks {
     void onAuthenticationComplete(ble_gap_conn_desc* desc) override {
         Log.printf("[BLE] SMP auth complete: encrypted=%d bonded=%d\n",
             desc->sec_state.encrypted, desc->sec_state.bonded);
+    }
+    // NimBLE 1.4.x's single-arg onDisconnect doesn't receive the HCI reason
+    // (the library discards event->disconnect.reason and never stores it in
+    // m_lastErr), so getLastError() here is the last GATT error — often the rc
+    // of the write that preceded the drop. Logged as context.
+    void onDisconnect(NimBLEClient* pClient) override {
+        Log.printf("[BLE] Disconnected — last GATT err=%d\n", pClient->getLastError());
     }
 };
 static WBClientCallbacks _secCallbacks;
@@ -282,6 +291,15 @@ void WallboxBLE::loop() {
                 _lastNotifPoll = now;
                 _pollNotifications();
             }
+            // Charge-reminder engine (#127): refresh the schedule cache.
+            // Fast retry (15 s) until the first successful fetch so
+            // next-charge appears soon after a cold boot and a failed
+            // first read self-heals; slow 5-min cadence once populated.
+            uint32_t schedInterval = _schedFetched ? SCHED_POLL_MS : SCHED_POLL_MS_INIT;
+            if (now - _lastSchedPoll >= schedInterval) {
+                _lastSchedPoll = now;
+                _pollSchedules();
+            }
         }
         break;
 
@@ -514,6 +532,34 @@ void WallboxBLE::_connect() {
         Log.println("[BLE] Using dual-char mode (separate notify characteristic)");
     }
 
+    // Zentri TruConnect detection — the original (pre-BGX, no-WiFi) Pulsar
+    // uses a Zentri AMS module running the TruConnect serial-over-BLE profile
+    // (service 175f8f23), not u-blox (MAX) or BGX13P (Plus). TruConnect has a
+    // MODE characteristic (20b9794f) that selects STREAM_MODE (1, transparent
+    // passthrough) vs command modes — the same idea as the Plus's BGX
+    // mode-switch. Commands go to the RX char (the configured write char,
+    // 1cce1ea8); responses arrive on the TX char (the configured notify char,
+    // cacc07ff). Detected by the MODE char's presence, which neither MAX
+    // (u-blox) nor Plus/Copper/Quasar (BGX) expose — so this path is inert on
+    // every charger we've shipped support for.
+    static const char* ZENTRI_MODE_UUID = "20b9794f-da1a-4d14-8014-a0fb9cefb2f7";
+    NimBLERemoteCharacteristic* zentriMode = svc->getCharacteristic(ZENTRI_MODE_UUID);
+    const bool zentri = (zentriMode != nullptr);
+    _isZentri = zentri;  // surfaced via /api/status so the UI reads schedules per-sid (#12)
+    if (zentri) {
+        Log.println("[BLE] Zentri TruConnect peripheral detected (20b9794f mode char present)");
+        // Relax connection params for this module. The default (latency 2,
+        // 3 s supervision timeout, set above for MAX/Plus) is aggressive; on
+        // the older Zentri the link drops ~15-17 s in regardless of signal
+        // (#12). Drop slave latency to 0 (no skipped events) and widen the
+        // supervision timeout to 6 s so a brief stall doesn't tear the link
+        // down before BAPI gets through. Zentri-only — MAX/Plus keep the
+        // default above. (Confirm against the HCI disconnect reason: this
+        // targets 0x08 supervision-timeout drops.)
+        _client->updateConnParams(24, 40, 0, 600);  // 30-50ms, latency 0, 6s timeout
+        Log.println("[BLE] Zentri: relaxed conn params (latency 0, 6s supervision)");
+    }
+
     // 3.0 schedule-write fix attempt: proactively pair/encrypt
     // before subscribing for notifies. jagheterfredrik's HACS
     // reference always pairs on connect, and the live Pulsar MAX
@@ -524,32 +570,55 @@ void WallboxBLE::_connect() {
     // prompt. We do this BEFORE CCCD subscription rather than as
     // a fallback so the first-write authorisation is in place
     // from the start of the session.
-    Log.println("[BLE] Initiating SMP encryption (proactive pair)...");
-    bool secureOk = _client->secureConnection();
-    if (secureOk) {
-        Log.println("[BLE] Encryption established");
-        // NimBLE 1.4.1 can return before bond info fully lands —
-        // small delay matches the fallback path's behaviour.
-        delay(200);
+    //
+    // Skip it entirely for Zentri: the original Pulsar (FW 375, no PIN) runs
+    // unauthenticated TruConnect — its own app never bonds. Forcing SMP there
+    // returns ENOTCONN (err 0x07) and, worse, corrupts the ATT link: with the
+    // pairing attempt present, gambys's Device Info read came back empty and
+    // BAPI went silent, whereas the build without it read the module info
+    // cleanly (#12). So for Zentri we skip pairing and go straight to the
+    // TruConnect stream-mode switch below.
+    if (!zentri) {
+        Log.println("[BLE] Initiating SMP encryption (proactive pair)...");
+        bool secureOk = _client->secureConnection();
+        if (secureOk) {
+            Log.println("[BLE] Encryption established");
+            // NimBLE 1.4.1 can return before bond info fully lands —
+            // small delay matches the fallback path's behaviour.
+            delay(200);
+        } else {
+            Log.printf("[BLE] secureConnection() failed (err 0x%02x) — "
+                       "continuing unpaired; writes may be rejected\n",
+                       _client->getLastError());
+        }
     } else {
-        Log.printf("[BLE] secureConnection() failed (err 0x%02x) — "
-                   "continuing unpaired; writes may be rejected\n",
-                   _client->getLastError());
+        Log.println("[BLE] Zentri: skipping SMP pair (unauthenticated handshake protocol)");
     }
 
-    // Subscribe to notifications — if CCCD write is rejected, encrypt and retry
-    bool notifyOk = notifyChr->canNotify() && notifyChr->registerForNotify(_notifyCb);
-    if (!notifyOk && notifyChr->canNotify()) {
-        Log.println("[BLE] CCCD rejected, trying SMP encryption...");
-        delay(200);
-        if (_client->secureConnection()) {
-            Log.println("[BLE] Encrypted, retrying notifications...");
-            // NimBLE 1.4.1 can return from secureConnection() before bond
-            // info fully lands — give it a moment before the CCCD retry
+    bool notifyOk;
+    if (zentri) {
+        // TruConnect TX (the notify char, cacc07ff) streams responses via
+        // notifications. Subscribe it (notify; indicate fallback). No
+        // SMP-retry path — Zentri is unauthenticated and pairing corrupts it.
+        notifyOk = notifyChr->canNotify() && notifyChr->registerForNotify(_notifyCb, true);
+        if (!notifyOk && notifyChr->canIndicate())
+            notifyOk = notifyChr->registerForNotify(_notifyCb, false);
+        if (notifyOk) Log.println("[BLE] Zentri TX subscribed (notifications)");
+    } else {
+        // Subscribe to notifications — if CCCD write is rejected, encrypt and retry
+        notifyOk = notifyChr->canNotify() && notifyChr->registerForNotify(_notifyCb);
+        if (!notifyOk && notifyChr->canNotify()) {
+            Log.println("[BLE] CCCD rejected, trying SMP encryption...");
             delay(200);
-            notifyOk = notifyChr->registerForNotify(_notifyCb);
-        } else {
-            Log.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
+            if (_client->secureConnection()) {
+                Log.println("[BLE] Encrypted, retrying notifications...");
+                // NimBLE 1.4.1 can return from secureConnection() before bond
+                // info fully lands — give it a moment before the CCCD retry
+                delay(200);
+                notifyOk = notifyChr->registerForNotify(_notifyCb);
+            } else {
+                Log.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
+            }
         }
     }
     if (!notifyOk) {
@@ -561,6 +630,30 @@ void WallboxBLE::_connect() {
     }
 
     Log.println("[BLE] Notifications enabled");
+
+    // Zentri TruConnect stream-mode switch — the pre-BGX equivalent of the
+    // BGX block below. Write STREAM_MODE (1) to the MODE characteristic so
+    // the module passes our BAPI bytes transparently to the Wallbox MCU
+    // (writes on the RX char -> MCU, MCU -> notifications on the TX char).
+    // Without this the module sits in command mode and BAPI writes are
+    // swallowed (gambys #12: every write failed, nothing streamed back).
+    if (zentri) {
+        uint8_t streamMode = 0x01;  // 1 = STREAM_MODE per Zentri TruConnect
+        if (zentriMode->writeValue(&streamMode, 1, true) ||
+            zentriMode->writeValue(&streamMode, 1, false)) {
+            Log.println("[BLE] Zentri switched to STREAM_MODE — BAPI passthrough enabled");
+            delay(200);  // let the module honour the mode change before first write
+        } else {
+            Log.println("[BLE] Zentri STREAM_MODE write failed — BAPI may not pass through");
+        }
+
+        // The Zentri AMS caps the ATT MTU at the 23-byte default and never
+        // negotiates up (confirmed #12 — it stayed 23 after a 2s wait), so
+        // BAPI frames (~41 B) can't go out in one write. We don't wait or work
+        // around it here: the write path (_sendCommandDirect) reads the live
+        // MTU and fragments each frame into (mtu-3) chunks to fit. Just note it.
+        Log.printf("[BLE] Zentri MTU: %u (writes fragment to fit)\n", _client->getMTU());
+    }
 
     // BGX13P / BGXSS stream-mode switch.
     // Pulsar Plus (and Copper SB / Quasar) use a Silicon Labs BGX13P module
@@ -1163,15 +1256,50 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
 
     Log.printf("[BLE] TX %s\n", met);
 
-    // Write — try without response first, fallback to with response
-    if (!_chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), false)) {
-        if (!_chr->writeValue((const uint8_t*)framed.c_str(), framed.length(), true)) {
-            Log.printf("[BLE] Write failed for %s — connection may be dead\n", met);
-            _state = State::DISCONNECTED;
-            _chr = nullptr;
-            if (_cmdMutex) xSemaphoreGive(_cmdMutex);
-            return "";
+    // Write the framed BAPI command. On a small-MTU link the frame can exceed
+    // the single-write payload (mtu-3); NimBLE would then fall back to a long/
+    // prepared write, which a serial-over-BLE stream char rejects — and which,
+    // on an auth error, internally calls secureConnection() and corrupts the
+    // unauthenticated Zentri link. So fragment large frames into (mtu-3) chunks
+    // with write-no-response, exactly as a serial stream expects (the module
+    // reassembles the byte stream). Frames that fit take the normal path, so
+    // MAX/Plus (MTU 247) are unchanged. #12: gambys's log confirmed the Zentri
+    // TruConnect module caps MTU at the 23-byte default while frames are ~41 B.
+    const uint8_t* wp = (const uint8_t*)framed.c_str();
+    size_t wlen = framed.length();
+    uint16_t curMtu = _client ? _client->getMTU() : 23;
+    size_t maxChunk = (curMtu > 3) ? (size_t)(curMtu - 3) : 20;
+    bool writeOk = true;
+
+    if (wlen <= maxChunk) {
+        // Fits in one ATT write — original behaviour (no-response, then with).
+        if (!_chr->writeValue(wp, wlen, false))
+            writeOk = _chr->writeValue(wp, wlen, true);
+    } else {
+        // Fragment: write-no-response in mtu-sized chunks, paced so the
+        // controller TX buffer can't overrun (no per-chunk ACK on a stream).
+        size_t off = 0;
+        while (off < wlen && writeOk) {
+            size_t n = (wlen - off < maxChunk) ? (wlen - off) : maxChunk;
+            writeOk = _chr->writeValue(wp + off, n, false);
+            off += n;
+            if (off < wlen) delay(8);
         }
+        if (writeOk)
+            Log.printf("[BLE] TX %s fragmented: %u bytes in %u-byte chunks (mtu=%u)\n",
+                       met, (unsigned)wlen, (unsigned)maxChunk, curMtu);
+    }
+
+    if (!writeOk) {
+        Log.printf("[BLE] Write failed for %s — mtu=%d framelen=%u connected=%d char=%s\n",
+                   met, _client ? (int)_client->getMTU() : -1,
+                   (unsigned)framed.length(),
+                   (_client && _client->isConnected()) ? 1 : 0,
+                   _chr ? _chr->getUUID().toString().c_str() : "?");
+        _state = State::DISCONNECTED;
+        _chr = nullptr;
+        if (_cmdMutex) xSemaphoreGive(_cmdMutex);
+        return "";
     }
     _txCount++;
 
@@ -1304,11 +1432,30 @@ void WallboxBLE::_storeCache(String& dst, uint32_t& seq, const String& value) {
 void WallboxBLE::_pollStatus() {
     if (_state != State::CONNECTED) return;
     String resp = _sendCommandDirect(bapi::MET_GET_STATUS);
-    if (!resp.isEmpty()) _storeCache(_cachedStatusJson, _seqStatus, resp);
+    if (!resp.isEmpty()) {
+        // Zentri/original Pulsar omits `cp` — synthesise charge power from the
+        // phase currents so every downstream consumer (dashboard, MQTT,
+        // charge-interval log) works unchanged (#12). Uses the previous
+        // cycle's cached meter for measured voltage, else the nominal setting.
+        if (_isZentri)
+            wb_zentri::normaliseStatus(resp, (float)_mainsVoltage, _cachedMeterJson);
+        _storeCache(_cachedStatusJson, _seqStatus, resp);
+    }
     // Energy meter on same cycle — lightweight & useful
     if (_state != State::CONNECTED) return;
     String meter = _sendCommandDirect(bapi::MET_GET_METER);
-    if (!meter.isEmpty()) _storeCache(_cachedMeterJson, _seqMeter, meter);
+    if (!meter.isEmpty()) {
+        _storeCache(_cachedMeterJson, _seqMeter, meter);
+        // Meter capability (#129): error code 4 = "feature not supported"
+        // (no Power Boost / Power Meter accessory). A valid r object means
+        // the meter is fitted. Anything else (timeout, transient) leaves
+        // the latched value untouched.
+        JsonDocument md;
+        if (deserializeJson(md, meter) == DeserializationError::Ok) {
+            if ((md["error"]["code"] | -1) == 4)      _meterPresent = false;
+            else if (md["r"].is<JsonObject>())        _meterPresent = true;
+        }
+    }
     // Live-session energy feed (solar/grid split, surplus, control mode).
     if (_state != State::CONNECTED) return;
     String lse = _sendCommandDirect(bapi::MET_GET_LSE);
@@ -1438,6 +1585,172 @@ void WallboxBLE::_pollNotifications() {
     String payload;
     serializeJson(out, payload);
     _storeCache(_cachedNotificationsJson, _seqNotifications, payload);
+}
+
+// ---- Charge-reminder engine (#127) ----
+
+// "HHMM" (UTC) -> minutes past midnight. Defensive: any malformed input
+// folds to 0 (midnight) rather than producing garbage.
+static uint16_t _hhmmToMin(const char* hhmm) {
+    if (!hhmm || strlen(hhmm) < 4) return 0;
+    int h = (hhmm[0] - '0') * 10 + (hhmm[1] - '0');
+    int m = (hhmm[2] - '0') * 10 + (hhmm[3] - '0');
+    if (h < 0 || h > 23 || m < 0 || m > 59) return 0;
+    return (uint16_t)(h * 60 + m);
+}
+
+void WallboxBLE::_pollSchedules() {
+    if (_state != State::CONNECTED) return;
+    SchedSlot tmp[kMaxSchedSlots];
+    uint8_t n = 0;
+
+    if (_isZentri) {
+        // Path B — legacy Pulsar (Zentri AMS): r_schs times out on this
+        // module, so read fixed slots sequentially (r_sch + bare-int sid)
+        // until the charger stops returning a sid. days==0 marks an
+        // empty/disabled slot — skipped, but we keep scanning past it.
+        // Mirrors loadSchedulesZentri() in the dashboard JS. The days
+        // bitmask is already Sunday-first (bit0=Sun), as the engine wants.
+        for (uint8_t i = 0; i < kMaxSchedSlots; i++) {
+            if (_state != State::CONNECTED) break;
+            String resp = _sendCommandDirect(bapi::MET_GET_SCHEDULE, String(i).c_str(), 3000);
+            if (resp.isEmpty()) break;
+            JsonDocument d;
+            if (deserializeJson(d, resp) != DeserializationError::Ok) break;
+            if (d["r"]["sid"].isNull()) break;  // past the last slot
+            uint8_t days = d["r"]["days"] | 0;
+            if (days == 0) continue;            // empty slot
+            if (n < kMaxSchedSlots) {
+                tmp[n].startMin = _hhmmToMin(d["r"]["start"] | "0000");
+                tmp[n].days     = days;
+                tmp[n].enabled  = true;         // days!=0 == enabled on Zentri
+                n++;
+            }
+        }
+    } else {
+        // Path A — array models (MAX/Plus/Copper/Quasar): one r_schs read
+        // returns the whole set. A transient miss (empty/parse-fail) keeps
+        // the previous cache rather than clobbering it to "no schedules".
+        String resp = _sendCommandDirect(bapi::MET_GET_SCHEDULES, "null", 8000);
+        if (resp.isEmpty()) return;
+        JsonDocument d;
+        if (deserializeJson(d, resp) != DeserializationError::Ok) return;
+        JsonArray arr = d["r"]["schedules"].is<JsonArray>()
+                          ? d["r"]["schedules"].as<JsonArray>()
+                          : d["r"].as<JsonArray>();
+        for (JsonObject s : arr) {
+            if (n >= kMaxSchedSlots) break;
+            tmp[n].startMin = _hhmmToMin(s["start"] | "0000");
+            tmp[n].days     = s["days"] | 0;
+            // r_schs reports enabled as integer 1/0, not a JSON bool, so use
+            // .as<bool>() (numeric->bool) — `| false` would strict-type a
+            // number to the default and read every schedule as disabled.
+            tmp[n].enabled  = s["enabled"].as<bool>();
+            n++;
+        }
+    }
+
+    // Reached only on a successful fetch+parse (both paths early-return on
+    // a transient empty/parse failure above, leaving _schedFetched false so
+    // the fast retry keeps trying). A valid response with zero schedules is
+    // still "fetched" — it switches to the slow cadence.
+    _schedFetched = true;
+    // Commit under the cache mutex (read by nextScheduledChargeEpoch on
+    // the main + AsyncTCP tasks).
+    if (_cacheMutex && xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        _schedCount = n;
+        for (uint8_t i = 0; i < n; i++) _schedSlots[i] = tmp[i];
+        xSemaphoreGive(_cacheMutex);
+    }
+}
+
+uint32_t WallboxBLE::nextScheduledChargeEpoch() {
+    time_t now = time(nullptr);
+    if (now < 1700000000) return 0;  // NTP not synced yet — can't compute
+    // Snapshot the slot cache, then compute lock-free.
+    SchedSlot slots[kMaxSchedSlots];
+    uint8_t n = 0;
+    if (_cacheMutex && xSemaphoreTake(_cacheMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        n = _schedCount;
+        for (uint8_t i = 0; i < n; i++) slots[i] = _schedSlots[i];
+        xSemaphoreGive(_cacheMutex);
+    } else {
+        return 0;
+    }
+    if (n == 0) return 0;
+
+    struct tm tmNow;
+    gmtime_r(&now, &tmNow);
+    // Minute-of-week, Sunday=0 — matches the slot days bitmask (bit0=Sun).
+    int32_t nowMow = tmNow.tm_wday * 1440 + tmNow.tm_hour * 60 + tmNow.tm_min;
+    int32_t best = INT32_MAX;
+    for (uint8_t i = 0; i < n; i++) {
+        if (!slots[i].enabled) continue;
+        for (uint8_t d = 0; d < 7; d++) {
+            if (!(slots[i].days & (1 << d))) continue;
+            int32_t slotMow = d * 1440 + slots[i].startMin;
+            int32_t delta = slotMow - nowMow;
+            if (delta < 0) delta += 7 * 1440;  // soonest future occurrence
+            if (delta < best) best = delta;
+        }
+    }
+    if (best == INT32_MAX) return 0;
+    // Align to the minute boundary: drop current seconds, add delta.
+    return (uint32_t)((int64_t)now - tmNow.tm_sec + (int64_t)best * 60);
+}
+
+bool WallboxBLE::carConnected() {
+    String s; uint32_t seq;
+    copyCachedStatus(s, seq);
+    if (s.isEmpty()) return false;
+    JsonDocument d;
+    if (deserializeJson(d, s) != DeserializationError::Ok) return false;
+    int st = d["r"]["st"] | -1;
+    // Same plugged-in r_dat.st code set as WallboxMQTT::publishCarConnected.
+    bool connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
+                      st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
+    // Locked-with-car heuristic (st==6 folds locked/no-car + locked/car):
+    // r_sta.charger_status==19 has been observed as locked-with-car.
+    if (st == 6) {
+        String rt; copyCachedRealtime(rt, seq);
+        if (!rt.isEmpty()) {
+            JsonDocument rd;
+            if (deserializeJson(rd, rt) == DeserializationError::Ok &&
+                (rd["r"]["charger_status"] | -1) == 19) connected = true;
+        }
+    }
+    return connected;
+}
+
+// Is the charger ACTIVELY charging right now? Reads the cached r_dat.st
+// (== 1 = Charging), falling back to r_sta.charger_status == 1. Used by the
+// Resume action to decide whether the defensive Stop prefix is needed — a
+// hard Stop is only required (and only safe) when actually charging; sending
+// it while merely paused/waiting can fault the charger (#resume / error 114).
+bool WallboxBLE::isCharging() {
+    String s; uint32_t seq;
+    copyCachedStatus(s, seq);
+    if (!s.isEmpty()) {
+        JsonDocument d;
+        if (deserializeJson(d, s) == DeserializationError::Ok &&
+            (d["r"]["st"] | -1) == 1) return true;
+    }
+    String rt; copyCachedRealtime(rt, seq);
+    if (!rt.isEmpty()) {
+        JsonDocument rd;
+        if (deserializeJson(rd, rt) == DeserializationError::Ok &&
+            (rd["r"]["charger_status"] | -1) == 1) return true;
+    }
+    return false;
+}
+
+bool WallboxBLE::plugReminderActive(uint32_t leadMinutes) {
+    if (leadMinutes == 0) return false;     // feature disabled
+    if (carConnected()) return false;       // already plugged in — nothing to nudge
+    uint32_t next = nextScheduledChargeEpoch();
+    if (next == 0) return false;            // no schedule / NTP not ready
+    uint32_t now = (uint32_t)time(nullptr);
+    return (next > now) && (next - now <= leadMinutes * 60);
 }
 
 void WallboxBLE::copyCachedStatus(String& out, uint32_t& seq) {

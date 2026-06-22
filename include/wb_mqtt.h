@@ -64,6 +64,10 @@ private:
     // Discovery state machine. SIZE_MAX = idle/complete; 0..N-1 = next
     // entity to publish on the next tickDiscovery() call.
     size_t _discoveryIndex = SIZE_MAX;
+    // When true, the state machine publishes an EMPTY retained payload to
+    // each entity's config topic (HA's "delete this entity") instead of the
+    // config — used when haDiscoveryEnabled is off to clear MQTT entities.
+    bool _discoveryClearing = false;
     // Per-arm topic cache. Populated once in sendDiscovery() from
     // configMgr/baseTopic()/cmdPrefix(); read by tickDiscovery() cases.
     // Lifting these out of the per-iteration switch means we don't

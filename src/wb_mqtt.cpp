@@ -63,7 +63,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 64;
+static const size_t kDiscoveryCount = 72;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power L1/L2/L3 +meter total energy (EM340)
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -785,7 +785,12 @@ void WallboxMQTT::publishResponse(const char* method, const String& json) {
 // by `identifiers` from each payload's device block, so partial bursts
 // are safe; HA just gradually populates the device page.
 void WallboxMQTT::sendDiscovery() {
-    Log.println("[MQTT] HA discovery armed — publishing one entity per main-loop tick");
+    // When HA discovery is disabled (user drives HA via the HACS Integration),
+    // run the state machine in CLEARING mode: publish empty retained payloads
+    // to each config topic so HA removes the MQTT entities cleanly.
+    _discoveryClearing = !configMgr.get().haDiscoveryEnabled;
+    Log.printf("[MQTT] HA discovery armed (%s) — one entity per main-loop tick\n",
+               _discoveryClearing ? "CLEARING — discovery disabled" : "publishing");
 
     // ---- 2.6.0 cleanup: remove discovery for entities that we no
     // longer publish, so existing HA installs don't keep showing them
@@ -997,8 +1002,8 @@ const DiscoveryEntry kEntries[] = {
                "V", "voltage", "measurement", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
-    /* 20 */ { EntityKind::SENSOR, "grid_power", "House Power", "mdi:home-lightning-bolt",
-               TopicSlot::METER, "{{ value_json.r.p1 }}",
+    /* 20 */ { EntityKind::SENSOR, "grid_power", "Grid Power", "mdi:home-lightning-bolt",
+               TopicSlot::METER, "{{ (value_json.r.p1|default(0)) + (value_json.r.p2|default(0)) + (value_json.r.p3|default(0)) }}",
                "W", "power", "measurement", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
@@ -1006,6 +1011,27 @@ const DiscoveryEntry kEntries[] = {
                TopicSlot::METER, "{{ (value_json.r.c1 / 10) | round(1) }}",
                "A", "current", "measurement", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // EM340 / Power-Boost meter detail (r_dca): per-phase power + lifetime
+    // total energy. Diagnostic-category per-phase (collapsed in HA); the
+    // total energy feeds the HA Energy dashboard. Unavailable when no meter
+    // accessory is fitted.
+    { EntityKind::SENSOR, "grid_power_l1", "Grid Power L1", "mdi:flash",
+      TopicSlot::METER, "{{ value_json.r.p1 }}",
+      "W", "power", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    { EntityKind::SENSOR, "grid_power_l2", "Grid Power L2", "mdi:flash",
+      TopicSlot::METER, "{{ value_json.r.p2 }}",
+      "W", "power", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    { EntityKind::SENSOR, "grid_power_l3", "Grid Power L3", "mdi:flash",
+      TopicSlot::METER, "{{ value_json.r.p3 }}",
+      "W", "power", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    { EntityKind::SENSOR, "meter_energy", "Meter Total Energy", "mdi:counter",
+      TopicSlot::METER, "{{ (value_json.r.e / 1000) | round(2) }}",
+      "kWh", "energy", "total_increasing", nullptr,
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
     /* 22 */ { EntityKind::SENSOR, "meter_total_energy", "Lifetime Energy", "mdi:counter",
                TopicSlot::METER, "{{ (value_json.r.e / 1000) | round(1) }}",
@@ -1262,6 +1288,37 @@ const DiscoveryEntry kEntries[] = {
                TopicSlot::LSE, "{{ value_json.r.control_mode }}",
                nullptr, nullptr, "measurement", "diagnostic",
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // ----- Charge-reminder engine (#127), gateway-computed from gTopic -----
+    // next_scheduled_charge: UTC epoch -> as_datetime gives HA a tz-aware
+    // timestamp; empty render (no schedule / null) leaves the state unknown.
+    /* 64 */ { EntityKind::SENSOR, "next_scheduled_charge", "Next Scheduled Charge", "mdi:calendar-clock",
+               TopicSlot::GATEWAY,
+               "{% if value_json.next_scheduled_charge %}{{ value_json.next_scheduled_charge | as_datetime }}{% endif %}",
+               nullptr, "timestamp", nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // plug_reminder: ON when a charge is due within the lead window and the
+    // car isn't plugged in. The single source a notify blueprint binds to.
+    /* 65 */ { EntityKind::BINARY_SENSOR, "plug_reminder", "Plug-In Reminder", "mdi:power-plug-off",
+               TopicSlot::GATEWAY,
+               "{% if value_json.plug_reminder %}ON{% else %}OFF{% endif %}",
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // ----- Charge-interval capture (#141), gateway-computed from gTopic.
+    // MQTT parity with the HACS Integration's charge-log sensors. -----
+    /* 66 */ { EntityKind::SENSOR, "last_burst_energy", "Last Charge Burst", "mdi:lightning-bolt",
+               TopicSlot::GATEWAY,
+               "{{ ((value_json.last_burst_wh | default(0)) / 1000) | round(3) }}",
+               "kWh", "energy", "measurement", nullptr,
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    /* 67 */ { EntityKind::SENSOR, "charge_log_count", "Recorded Charge Bursts", "mdi:counter",
+               TopicSlot::GATEWAY,
+               "{{ value_json.charge_log_count | default(0) }}",
+               nullptr, nullptr, "measurement", "diagnostic",
+               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 };
 
 const size_t kEntryCount = sizeof(kEntries) / sizeof(kEntries[0]);
@@ -1295,9 +1352,40 @@ static const char* _resolveTopic(wb_disc::TopicSlot slot,
     return nullptr;
 }
 
+// HA MQTT-discovery component name for a table entry's kind (CUSTOM is the
+// car_connected binary_sensor). Used to build the config topic when clearing.
+static const char* _discComponentFor(wb_disc::EntityKind k) {
+    using EK = wb_disc::EntityKind;
+    switch (k) {
+        case EK::SENSOR:        return "sensor";
+        case EK::BINARY_SENSOR: return "binary_sensor";
+        case EK::NUMBER:        return "number";
+        case EK::SWITCH:        return "switch";
+        case EK::SELECT:        return "select";
+        case EK::BUTTON:        return "button";
+        case EK::CUSTOM:        return "binary_sensor";  // car_connected
+        case EK::NOOP:          return nullptr;
+    }
+    return nullptr;
+}
+
 void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
     if (index >= wb_disc::kEntryCount) return;
     const auto& e = wb_disc::kEntries[index];
+
+    // Discovery disabled: delete the entity instead of publishing it. An
+    // empty retained payload to the config topic is HA's documented "remove
+    // this entity" mechanism. Idempotent on every reconnect.
+    if (_discoveryClearing) {
+        const char* comp = _discComponentFor(e.kind);
+        if (comp) {
+            const WBConfig& cfg = configMgr.get();
+            String topic = cfg.haDiscoveryPrefix + "/" + comp + "/"
+                         + cfg.haDeviceId + "/" + e.objectId + "/config";
+            _client->publish(topic.c_str(), "", true);
+        }
+        return;
+    }
 
     auto resolve = [&](wb_disc::TopicSlot s) -> const char* {
         switch (s) {

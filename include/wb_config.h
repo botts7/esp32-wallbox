@@ -37,9 +37,31 @@ struct WBConfig {
     uint32_t statusPollMs = 10000;
     uint32_t realtimePollMs = 30000;
 
+    // Charge reminder: how many minutes before a scheduled charge to raise
+    // the "plug in" nudge (plug_reminder). 0 disables the feature entirely.
+    uint32_t reminderLeadMin = 10;
+
+    // Nominal mains voltage (V), used to derive charge power from phase
+    // currents on chargers that don't report `cp` (the original/Zentri
+    // Pulsar, #12). Only used as a fallback when no Power Meter accessory is
+    // fitted. 230 = UK/EU/AU/Asia (single- and 3-phase line-to-neutral);
+    // 240 = North America Level 2; 200 = Japan; 120 = NA Level 1.
+    uint32_t mainsVoltage = 230;
+
+    // Charge control owner — who may autonomously start/stop charging.
+    // Surfaces/controllers read control_owner from /api/status; only the
+    // matching one acts. "wallbox_schedule" (default) | "integration" |
+    // "addon" | "none". Advisory only — manual commands always work.
+    String controlOwner = "wallbox_schedule";
+
     // HA
     String haDiscoveryPrefix = "homeassistant";
     String haDeviceId = "wallbox_pulsar_max";
+    // Publish HA MQTT discovery (creates the entities). Default on. Turn OFF
+    // if you drive HA via the HACS Integration instead — avoids duplicate
+    // entities. Toggling off clears the retained discovery configs so HA
+    // removes the MQTT entities cleanly.
+    bool haDiscoveryEnabled = true;
 
     // Last-seen charger firmware string (GATT 0x180A 0x2A26).
     // Used to detect Wallbox-pushed auto-OTAs across our reboots.

@@ -27,6 +27,13 @@
 
 ### Recent releases
 
+- **3.2.0-beta.1** *(pre-release — testers)* — **charge-interval capture**:
+  the gateway records each real charge burst (cp>0) with per-burst energy +
+  solar split into an NVS ring, exposed via `GET /api/charge_log` + status
+  fields + 2 new MQTT entities (**Last Charge Burst**, **Recorded Charge
+  Bursts**). Lets the HA add-on bill time-of-use cost in the *actual* charge
+  window instead of at plug-in time. Builds on the 3.2 charge-reminder +
+  control-owner work. [Download / OTA →](https://github.com/botts7/esp32-wallbox/releases/tag/v3.2.0-beta.1)
 - **3.0.4** — heap-pressure relief (#103): `/info`, `/dashboard` and
   `/sessions` now serve a small shell + a build-time-gzipped body from
   PROGMEM instead of building a big String per request, raising the
@@ -136,6 +143,11 @@ Both work; choose based on whether you want the gateway to be self-contained
 - Mains voltage, whole-house power consumption
 - Charger status (Ready / Plugged In / Charging / Scheduled / etc.)
 - BLE signal strength
+- **Charge-interval capture (v3.2)** — records each real charge burst
+  (when charging *actually* happened, not plug-in time) with per-burst
+  energy + solar/grid split, persisted across reboots, exposed via
+  `GET /api/charge_log`. Lets consumers bill time-of-use cost in the real
+  charge window, and powers the add-on's schedule-aware cost.
 
 ### Control
 - Start / stop / pause / resume charging
@@ -155,6 +167,12 @@ Both work; choose based on whether you want the gateway to be self-contained
 
 ### Home Assistant integration
 - 30+ auto-discovered entities (sensors, switches, numbers, selects, buttons)
+- **HA MQTT Discovery toggle** (Config → Advanced, v3.2+): on by default. Turn
+  **Off** if you add the charger to HA via the **HACS Integration** instead —
+  avoids duplicate entities; the gateway then clears its MQTT entities cleanly
+- Pick **one** entity source — MQTT discovery **or** the HACS Integration. The
+  HA **Add-on** is a dashboard panel only (no `homeassistant_api`), so it
+  creates no entities and never duplicates
 - Proper native HA types (Eco Smart = select dropdown, Auto Lock = switch, etc.)
 - Diagnostic-category entities (loop_max_ms, heap_free, reentry tripwire,
   rate-limit tokens etc.) collapse into a separate HA card so the main
@@ -165,6 +183,10 @@ Both work; choose based on whether you want the gateway to be self-contained
 - Dynamic `sw_version` reported via discovery so HA shows your exact
   firmware build
 - Energy Dashboard compatible
+- Charge-reminder + charge-log entities (v3.2): **Next Scheduled Charge**
+  (timestamp), **Plug-In Reminder** (binary), **Last Charge Burst** (kWh),
+  **Recorded Charge Bursts** — all auto-discovered, same data also on
+  `/api/status` for the HACS integration
 - Time-of-use cost tracking examples in [HA docs](docs/HOME_ASSISTANT.md)
 
 ### Web UI

@@ -1,11 +1,13 @@
 #include "wb_web.h"
 #include "wb_config.h"
+#include "wb_control.h"
 #include "wb_ble.h"
 #include "wb_log.h"
 #include "wb_version.h"
 #include "wb_health.h"
 #include "wb_ota_history.h"
 #include "wb_diag.h"
+#include "wb_charge_log.h"
 #include "wb_watchdog.h"
 #include "wb_ws.h"
 #include "wb_mqtt.h"
@@ -748,6 +750,39 @@ String wb_buildStatusJson() {
     json += ",\"ssid\":\"" + WiFi.SSID() + "\"";
     json += ",\"wifi_rssi\":" + String(WiFi.RSSI());
     json += ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"";
+    json += ",\"zentri\":" + String(wallboxBLE.isZentri() ? "true" : "false");
+    // #129: meter capability — surfaces hide grid/solar when false (charger
+    // has no Power Boost / Power Meter; e.g. the original Pulsar).
+    json += ",\"meter\":" + String(wallboxBLE.meterPresent() ? "true" : "false");
+    // Whether a vehicle is plugged in (r_dat.st-based, see carConnected()).
+    // Surfaces a real cable signal — NB sta_connected above is WiFi, not the car.
+    json += ",\"car_connected\":" + String(wallboxBLE.carConnected() ? "true" : "false");
+    // Charge-reminder engine (#127): UTC epoch of the next enabled
+    // schedule (null when none / NTP not synced) + the plug-in nudge.
+    // All surfaces (dashboard banner, Integration, Add-on) read these.
+    {
+        uint32_t nsc = wallboxBLE.nextScheduledChargeEpoch();
+        json += nsc ? (",\"next_scheduled_charge\":" + String(nsc))
+                    : String(",\"next_scheduled_charge\":null");
+        json += ",\"plug_reminder\":" +
+                String(wallboxBLE.plugReminderActive(configMgr.get().reminderLeadMin) ? "true" : "false");
+    }
+    // Charge-interval capture (#141): live summary of the real charge-burst
+    // tracker. Full interval list is at /api/charge_log; these let surfaces
+    // show "charging now" + a count without a second fetch.
+    json += ",\"charging_now\":" + String(wb_charge_log::chargingNow() ? "true" : "false");
+    json += ",\"charge_log_count\":" + String((unsigned)wb_charge_log::count());
+    json += ",\"last_burst_wh\":" + String((unsigned)wb_charge_log::lastBurstWh());
+    // Charge-control arbitration (advisory; see docs/control-owner.md). owner =
+    // the user's source-of-truth choice; last_command_by/age let controllers
+    // detect a recent manual or other-controller override and stand down.
+    json += ",\"control_owner\":\"" + configMgr.get().controlOwner + "\"";
+    json += ",\"last_command_by\":\"" + wb_control::lastCommandBy() + "\"";
+    {
+        uint32_t cAge = wb_control::lastCommandAgeMs();
+        json += ",\"last_command_age_s\":" +
+                String(cAge == 0xFFFFFFFFUL ? -1 : (int)(cAge / 1000));
+    }
     json += ",\"rssi\":" + String(wallboxBLE.rssi());
     json += ",\"scan_rssi\":" + String(wallboxBLE.scanRSSI());
     json += ",\"tx\":" + String(wallboxBLE.txCount());
@@ -1016,6 +1051,11 @@ static void handleApiCommand() {
     // Resolve action → met + par (shared by both paths).
     String action = http.arg("action");
     String value  = http.arg("value");
+    // Tag the commander for arbitration (advisory; see docs/control-owner.md).
+    // Charge-affecting actions record who issued them (optional &owner=, "" ->
+    // "manual") so controllers can detect a recent manual/other override.
+    if (action == "start" || action == "stop" || action == "resume" || action == "current")
+        wb_control::recordCommand(http.arg("owner"));
     const char* met = nullptr;
     String par;
     if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
@@ -1024,12 +1064,15 @@ static void handleApiCommand() {
     // Mirrors jagheterfredrik/wallbox-ble's Plus convention. See #4.
     else if (action == "stop")    { met = bapi::MET_START_STOP;  par = configMgr.isPlusFamily() ? "0" : "2"; }
     // Resume — clears schedule/eco override flag (r_dat.gen -> 0).
-    // Sends Stop first as a defensive prefix because s_cmode mode=0
-    // rejects (subcode 6) when charger is actively charging.
-    // See async handler for the rationale.
+    // s_cmode mode=0 is rejected (subcode 6) ONLY while actively charging,
+    // so we queue a defensive Stop first in that case alone. Sending the
+    // hard Stop (par=2 on the MAX) when merely paused/waiting is NOT a
+    // harmless no-op — it can fault the charger (error 114), so we skip it.
     else if (action == "resume")  {
-        const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
-        wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
+        if (wallboxBLE.isCharging()) {
+            const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
+            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
+        }
         met = "s_cmode";             par = "{\"mode\":0}";
     }
     else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
@@ -1193,19 +1236,20 @@ static const char* DASH_BODY_SOURCE = R"HTML(
 <div id='ble-health' style='display:none;border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em'></div>
 <div id='notif-bar' style='display:none;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.25);border-radius:8px;padding:10px;margin-bottom:10px;font-size:.82em;color:#ef4444;cursor:pointer' onclick='showNotifs()'>&#x1F514; <span id='notif-count'></span> charger notification(s) — tap to view</div>
 <div id='paused-banner' style='display:none;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);border-radius:10px;padding:12px 14px;margin-bottom:10px;color:#f59e0b;font-size:.88em;line-height:1.4;align-items:center;gap:10px;flex-wrap:wrap'><span>&#x23F8;&#xFE0F; <strong>Schedules &amp; Eco Smart paused</strong> — manual override active.</span><button class='btn btn-outline' style='margin-left:auto;padding:6px 14px;font-size:.85em;width:auto;border-color:rgba(245,158,11,.5);color:#f59e0b' onclick='C("resume")'>&#x25B6;&#xFE0F; Resume Schedule</button></div>
+<div id='charge-reminder' style='display:none;border-radius:10px;padding:12px 14px;margin-bottom:10px;font-size:.88em;line-height:1.4'></div>
 <div id='notif-modal' style='display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);z-index:300;align-items:center;justify-content:center;padding:16px' onclick='if(event.target===this)this.style.display=\"none\"'><div id='notif-modal-inner' style='background:var(--card);border-radius:12px;max-width:480px;width:100%;max-height:80vh;overflow:auto;padding:16px'></div></div>
 
-<div class='card'>
-  <div class='card-header'><span class='card-icon'>&#x26A1;</span><h2 style='margin:0;font-size:1em'>Power Flow</h2></div>
-  <svg viewBox='0 0 360 130' style='display:block;width:100%;max-width:360px;margin:0 auto' role='img' aria-label='Live power flow Grid Charger Vehicle'>
-    <defs><marker id='pf-arrow' viewBox='0 0 6 6' refX='5' refY='3' markerWidth='5' markerHeight='5' orient='auto'><path d='M0,0 L6,3 L0,6 z' fill='var(--accent)'/></marker></defs>
-    <line x1='75' y1='70' x2='145' y2='70' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
-    <line x1='215' y1='70' x2='285' y2='70' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
-    <line id='pf-line1' x1='75' y1='70' x2='145' y2='70' stroke='var(--success)' stroke-width='2.5' stroke-dasharray='8 5' stroke-dashoffset='0' marker-end='url(#pf-arrow)' style='opacity:0;transition:opacity .25s'/>
-    <line id='pf-line2' x1='215' y1='70' x2='285' y2='70' stroke='var(--success)' stroke-width='2.5' stroke-dasharray='8 5' stroke-dashoffset='0' marker-end='url(#pf-arrow)' style='opacity:0;transition:opacity .25s'/>
-    <g><circle cx='45' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><text x='45' y='78' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x1F50C;</text><text x='45' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Grid</text><text id='pf-grid-kw' x='45' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
-    <g><rect x='150' y='40' width='60' height='60' rx='12' fill='var(--surface)' stroke='var(--primary)' stroke-width='1.5'/><text x='180' y='80' text-anchor='middle' font-size='26' style='-webkit-user-select:none;user-select:none'>&#x26A1;</text><text x='180' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Charger</text></g>
-    <g><circle cx='315' cy='70' r='30' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.5'/><g transform='translate(295,62)' fill='none' stroke='var(--text)' stroke-width='1.6' stroke-linejoin='round' stroke-linecap='round'><path d='M2 12 Q3 7 7 7 L11 3 Q14 1 19 1 L28 1 Q33 1 36 5 L40 7 L41 12 L41 13 L2 13 Z' fill='var(--surface)'/><circle cx='11' cy='13' r='2.6' fill='var(--elevated)'/><circle cx='34' cy='13' r='2.6' fill='var(--elevated)'/></g><g id='pf-battery' transform='translate(303,82)'><rect x='0' y='0' width='22' height='7' rx='1.2' fill='var(--surface)' stroke='var(--text3)' stroke-width='.7'/><rect x='22' y='2' width='1.6' height='3' fill='var(--text3)'/><rect id='pf-batt-1' x='1.6' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-2' x='8.4' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-3' x='15.2' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/></g><text x='315' y='118' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Vehicle</text><text id='pf-veh-kw' x='315' y='30' text-anchor='middle' font-size='13' fill='var(--text)' font-weight='700'>--</text></g>
+<div class='card' id='card-powerflow'>
+  <div class='card-header'><span class='card-icon'>&#x26A1;</span><h2 style='margin:0;font-size:1em'>Energy Flow</h2></div>
+  <svg viewBox='0 0 320 196' style='display:block;width:100%;max-width:320px;margin:0 auto' role='img' aria-label='Live energy flow Solar and Grid to Vehicle'>
+    <path id='pf-guide-solar' d='M160,74 C160,116 214,122 246,130' fill='none' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
+    <line x1='76' y1='140' x2='244' y2='140' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
+    <path id='pf-solar-line' d='M160,74 C160,116 214,122 246,130' fill='none' stroke='#f59e0b' stroke-width='3.5' stroke-dasharray='9 6' stroke-dashoffset='0' style='opacity:0;transition:opacity .3s'/>
+    <line id='pf-grid-line' x1='76' y1='140' x2='244' y2='140' stroke='var(--primary)' stroke-width='3.5' stroke-dasharray='9 6' stroke-dashoffset='0' style='opacity:0;transition:opacity .3s'/>
+    <text id='pf-live' x='158' y='112' text-anchor='middle' font-size='12' fill='var(--text)' font-weight='700'></text>
+    <g id='pf-node-solar'><circle cx='160' cy='44' r='30' fill='rgba(245,158,11,.10)' stroke='#f59e0b' stroke-width='1.6'/><text x='160' y='42' text-anchor='middle' font-size='18' style='-webkit-user-select:none;user-select:none'>&#x2600;&#xFE0F;</text><text id='pf-solar-kwh' x='160' y='58' text-anchor='middle' font-size='11' fill='var(--text)' font-weight='700'>--</text><text x='160' y='88' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Solar</text></g>
+    <g><circle cx='46' cy='140' r='30' fill='var(--elevated)' stroke='var(--primary)' stroke-width='1.6'/><text x='46' y='136' text-anchor='middle' font-size='18' style='-webkit-user-select:none;user-select:none'>&#x1F50C;</text><text id='pf-grid-kwh' x='46' y='156' text-anchor='middle' font-size='11' fill='var(--text)' font-weight='700'>--</text><text x='46' y='186' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Grid</text></g>
+    <g><circle cx='274' cy='140' r='32' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.6'/><text x='274' y='128' text-anchor='middle' font-size='20' style='-webkit-user-select:none;user-select:none'>&#x1F697;</text><g id='pf-battery' transform='translate(263,138)'><rect x='0' y='0' width='22' height='7' rx='1.2' fill='var(--surface)' stroke='var(--text3)' stroke-width='.7'/><rect x='22' y='2' width='1.6' height='3' fill='var(--text3)'/><rect id='pf-batt-1' x='1.6' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-2' x='8.4' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-3' x='15.2' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/></g><text id='pf-car-kwh' x='274' y='156' text-anchor='middle' font-size='11' fill='var(--text)' font-weight='700'>--</text><text id='pf-plugin' x='274' y='156' text-anchor='middle' font-size='10' fill='var(--accent)' font-weight='700' style='display:none'>&#x1F50C; Plug in</text><text x='274' y='186' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Vehicle</text></g>
   </svg>
   <div style='display:flex;justify-content:space-between;font-size:.85em;padding:10px 14px 4px;border-top:1px solid var(--border);margin-top:8px'>
     <span style='color:var(--text2)'>Since plugged in</span><span id='pf-session' style='font-weight:600;font-variant-numeric:tabular-nums'>--</span>
@@ -1220,8 +1264,8 @@ static const char* DASH_BODY_SOURCE = R"HTML(
     <div><label>Session Energy</label><div id='v-en' class='info-value'>--</div></div>
     <div><label>Max Current</label><div id='v-mc' class='info-value'>--</div></div>
     <div><label>Socket Lock</label><div id='v-lk' class='info-value'>--</div></div>
-    <div><label>Mains Voltage</label><div id='v-vt' class='info-value'>--</div></div>
-    <div><label title='Whole-house power from charger MID meter'>House Power</label><div id='v-gp' class='info-value'>--</div></div>
+    <div id='cell-vt'><label>Mains Voltage</label><div id='v-vt' class='info-value'>--</div></div>
+    <div id='cell-gp'><label title='Whole-house power from charger MID meter'>House Power</label><div id='v-gp' class='info-value'>--</div></div>
   </div>
 </div>
 
@@ -1249,17 +1293,23 @@ static const char* DASH_BODY_SOURCE = R"HTML(
 // — there's no MAX-specific cloud-code variant, the older
 // model-aware split was incorrect.
 var SN={0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',4:'Paused',5:'Charge Complete',6:'Locked',7:'Error',8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)'};
+// Original/Zentri Pulsar (#12) reports a small status enum that doesn't line
+// up with the MAX 0-18 codes (esp. st4 = charge ramp, not "Paused"). Used in
+// place of SN when /api/status reports zentri:true.
+var ZN={0:'Ready',1:'Charging',2:'Connected',3:'Waiting for Schedule',4:'Starting'};
 var CHARGER_TZ='UTC';try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
 fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function _setText(id,txt){var el=document.getElementById(id);if(el)el.textContent=txt}
 function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;var el=document.getElementById(id);if(!el)return;el.textContent=(fmt?fmt(val):val)+(suffix||'')}
-// Power Flow card: Grid -> Charger -> Vehicle live kW + animated flow.
-// State is built up from two BAPI sources so we cache last-seen values
-// here (status pushes cp + en; meter pushes the house-power reading).
-// Solar / "Green" branch is intentionally not rendered yet — needs a
-// solar-inverter integration that doesn't exist today. Adding it later
-// is a 30-line follow-up.
-var _pfState={cp:null,en:null,house:null};
+// Energy Flow card: Solar + Grid -> Vehicle, HA-style triangle, LIVE POWER.
+// Nodes show instantaneous kW: Vehicle = charging_power (r_lse) / r_dat cp;
+// Grid = live house/grid power from the r_dca meter (p1+p2+p3); Solar = live
+// solar surplus AVAILABLE (r_lse active_feature.surplus_power). Lines animate
+// only while charging. The "Since plugged in" footer shows the cumulative
+// green (solar USED) vs grid energy split — the app's "green" number.
+var _pfState={cp:null,en:null,house:null,conn:null,surplus:null,green:null,grid:null};
+// Car-connected from the r_dat status code — mirrors firmware carConnected().
+function _carConn(st){return st===1||st===2||st===3||st===4||st===5||st===8||st===10||st===11||st===12||st===13||st===18}
 // Flowing-dash animation: scrolls the stroke-dashoffset negatively so
 // dashes appear to march Grid->Charger->Vehicle. Speed scales with
 // the actual charging power so visually-faster = more kW. Capped so
@@ -1303,28 +1353,43 @@ function _pfBatteryAnimate(on){
   },260);
 }
 function _pfRender(){
-  var cp=_pfState.cp,h=_pfState.house;
-  if(typeof cp==='number'){_setText('pf-veh-kw',cp.toFixed(2)+' kW')}
-  if(typeof h==='number'){_setText('pf-grid-kw',(h/1000).toFixed(2)+' kW')}
-  if(typeof _pfState.en==='number'){_setText('pf-session',(_pfState.en/100).toFixed(2)+' kWh')}
+  var cp=_pfState.cp,h=_pfState.house,sp=_pfState.surplus;
+  function _kw(v){return (typeof v==='number')?v.toFixed(2)+' kW':'--'}
+  _setText('pf-solar-kwh',_kw(sp));                                 // live solar surplus
+  _setText('pf-grid-kwh',_kw(typeof h==='number'?Math.max(0,h/1000):null));  // live grid IMPORT (>=0; export = surplus, shown on Solar)
+  _setText('pf-car-kwh',_kw(cp));                                   // live charge power
+  // Footer: cumulative since-plugged-in split — solar USED (green) vs grid.
+  var gp=_pfState.green,grp=_pfState.grid;
+  if(typeof gp==='number'||typeof grp==='number'){_setText('pf-session','☀️ '+(gp||0).toFixed(2)+'  🔌 '+(grp||0).toFixed(2)+' kWh')}
   var charging=(typeof cp==='number'&&cp>0.05);
-  var l1=document.getElementById('pf-line1'),l2=document.getElementById('pf-line2');
-  if(l1)l1.style.opacity=charging?'1':'0';
-  if(l2)l2.style.opacity=charging?'1':'0';
-  _pfAnimate(l1,charging,cp);_pfAnimate(l2,charging,cp);
+  // Approximate the live split from solar surplus: solar covers up to its
+  // available kW, grid makes up the remainder. Lines only flow while charging.
+  var hasSolar=charging&&(sp||0)>0.05;
+  var hasGrid=charging&&((cp||0)-(sp||0)>0.05);
+  if(charging&&!hasSolar&&!hasGrid)hasGrid=true;   // unknown split -> default grid
+  var sl=document.getElementById('pf-solar-line'),gl=document.getElementById('pf-grid-line');
+  if(sl)sl.style.opacity=hasSolar?'1':'0';
+  if(gl)gl.style.opacity=hasGrid?'1':'0';
+  _pfAnimate(sl,hasSolar,cp);_pfAnimate(gl,hasGrid,cp);
   _pfBatteryAnimate(charging);
+  // Plug-in prompt: when the car isn't connected, swap the vehicle kW for a
+  // "Plug in" cue (mirrors the official app's connect-cable visual).
+  var conn=_pfState.conn,plug=document.getElementById('pf-plugin'),ck=document.getElementById('pf-car-kwh'),bat=document.getElementById('pf-battery');
+  if(conn===false){if(plug)plug.style.display='';if(ck)ck.style.display='none';if(bat)bat.style.display='none'}
+  else{if(plug)plug.style.display='none';if(ck)ck.style.display='';if(bat)bat.style.display=''}
 }
 // 3.0: when BLE drops, clear all live-data spans + the power-flow
 // state so the dashboard reflects "no signal" instead of frozen stale
 // values from the last poll. localStorage is also cleared so a page
 // reload doesn't rehydrate the corpse.
 function _clearLive(){
-  ['v-st','v-pw','v-cr','v-en','v-mc','v-lk','v-oc','v-vt','v-gp','pf-veh-kw','pf-grid-kw','pf-session'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent='--'});
-  _pfState.cp=null;_pfState.en=null;_pfState.house=null;_pfRender();
+  ['v-st','v-pw','v-cr','v-en','v-mc','v-lk','v-oc','v-vt','v-gp','pf-solar-kwh','pf-grid-kwh','pf-car-kwh','pf-session'].forEach(function(id){var el=document.getElementById(id);if(el)el.textContent='--'});
+  _pfState.cp=null;_pfState.en=null;_pfState.house=null;_pfState.conn=null;_pfState.surplus=null;_pfState.green=null;_pfState.grid=null;_pfRender();
   var pb=document.getElementById('paused-banner');if(pb)pb.style.display='none';
+  var cr=document.getElementById('charge-reminder');if(cr)cr.style.display='none';
   try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
 }
-function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=SN[s.st];_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
+function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=(window._zentri&&ZN[s.st]!==undefined)?ZN[s.st]:SN[s.st];_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
 function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
 function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null'){/* BLE not delivering charger status — reset power flow + session cache so the animation can't outlive a BLE drop on stale localStorage values */_pfState.cp=null;_pfState.en=null;_pfRender();return}var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(!d||!d.r){_pfState.house=null;_pfRender();return}applyMeterData(d.r)}).catch(function(){_pfState.house=null;_pfRender()})}
 // Hook WS push handlers
@@ -1337,12 +1402,61 @@ var _curTimer=null;
 function setCurrent(v){if(_curTimer)clearTimeout(_curTimer);_curTimer=setTimeout(function(){toast('Setting '+v+'A','info');fetch('/api/command?action=current&value='+v).then(function(x){return x.json()}).then(function(d){if(d.error)toast(d.error,'error');else toast('Max current set to '+v+'A','success');setTimeout(P,1000)}).catch(function(e){toast('Error: '+e,'error')})},300)}
 document.getElementById('ld').style.display='none';document.getElementById('pg').style.display='block';
 P();setInterval(P,10000);
+// r_lse (live-session solar/grid split) feeds the Energy Flow triangle.
+// Separate from P() because P() early-returns when the WS is open (r_lse is
+// not a WS push), and staggered + slower so it doesn't pile onto the
+// /api/command token bucket. charging_power overrides the r_dat cp live.
+function PLse(){fetch('/api/command?action=bapi&met=r_lse&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(!d||!d.r)return;var r=d.r;if(typeof r.charging_power==='number')_pfState.cp=r.charging_power;if(typeof r.green_energy==='number')_pfState.green=r.green_energy;if(typeof r.grid_energy==='number')_pfState.grid=r.grid_energy;var af=r.active_feature;if(af&&typeof af.surplus_power==='number')_pfState.surplus=af.surplus_power;_pfRender()}).catch(function(){})}
+setTimeout(function(){PLse();setInterval(PLse,15000)},3500);
 fetch('/api/command?action=bapi&met=read_pin&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&!d.r.pin)document.getElementById('pin-warn').style.display='block'}).catch(function(){});
 fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.sta_connected&&!s.auth_enabled){var b=document.getElementById('auth-warn');if(b)b.style.display='block'}}).catch(function(){});
 var _notifs=[];
 function loadNotifs(){fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.ble!=='connected')return;return fetch('/api/command?action=bapi&met=r_not&par=null',{signal:AbortSignal.timeout(10000)}).then(function(r){return r.json()}).then(function(d){var v=d.r;if(!Array.isArray(v))return;_notifs=v;var bar=document.getElementById('notif-bar');if(!bar)return;if(v.length>0){document.getElementById('notif-count').textContent=v.length;bar.style.display='block'}else{bar.style.display='none'}})}).catch(function(){})}
 function showNotifs(){var m=document.getElementById('notif-modal');var inner=document.getElementById('notif-modal-inner');var html="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0'>&#x1F514; Notifications</h3><button onclick='document.getElementById(\"notif-modal\").style.display=\"none\"' style='background:transparent;border:none;color:var(--text2);font-size:1.6em;cursor:pointer;line-height:1'>×</button></div>";if(!_notifs.length){html+="<div style='color:var(--text3)'>No notifications</div>"}else{_notifs.forEach(function(n,i){var msg=n.message||n.msg||n.text||JSON.stringify(n);var ts=(n.timestamp||n.ts)?new Date((n.timestamp||n.ts)*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ}):'';html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='font-weight:500;font-size:.9em'>#"+(i+1)+" "+msg+"</div>"+(ts?"<div style='font-size:.78em;color:var(--text3);margin-top:4px'>"+ts+"</div>":'')+"</div>"})}inner.innerHTML=html;m.style.display='flex'}
-function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
+function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){window._zentri=!!s.zentri;updateChargeReminder(s);applyMeterCapability(s.meter);var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
+// Charge-reminder banner (#127). Reads next_scheduled_charge (UTC epoch)
+// + plug_reminder from /api/status — both gateway-computed, no BAPI hop.
+// Piggybacks on updateBleHealth's existing /api/status fetch (no extra
+// request on the single-connection ESP). Times render in the charger's
+// timezone so they match the schedule editor.
+function fmtCharge(epoch){
+  try{return new Date(epoch*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ,weekday:'short',hour:'2-digit',minute:'2-digit'})}
+  catch(e){return new Date(epoch*1000).toLocaleString()}
+}
+// #129: hide grid/solar surfaces when the charger has no power meter
+// (Power Boost / Power Meter accessory absent — e.g. the original Pulsar).
+// meter===undefined (older firmware) is treated as present, so nothing
+// hides on a gateway that doesn't report the flag. Charging power stays
+// visible via the stats grid; only the grid-dependent bits hide.
+function applyMeterCapability(meter){
+  var noMeter=(meter===false);
+  // No meter: keep the Energy Flow card — the Vehicle node still shows the
+  // (derived) charge power, which is meter-independent (e.g. original Pulsar).
+  // Only hide the meter-dependent bits: the Solar branch (no Eco-Smart without
+  // a meter) and the Mains Voltage / House Power stat cells. Grid -> Vehicle
+  // still conveys charging. (Previously the whole card hid — #129 — which
+  // wrongly dropped the charge-power visual on meter-less chargers.)
+  ['cell-vt','cell-gp','pf-node-solar','pf-guide-solar','pf-solar-line'].forEach(function(id){
+    var el=document.getElementById(id);if(el)el.style.display=noMeter?'none':'';
+  });
+}
+function updateChargeReminder(s){
+  var b=document.getElementById('charge-reminder');if(!b)return;
+  // Don't trust plug/schedule state when the charger link is down.
+  if(!s||s.ble!=='connected'){b.style.display='none';return}
+  var nsc=s.next_scheduled_charge;
+  if(s.plug_reminder){
+    b.style.background='rgba(239,68,68,.10)';b.style.border='1px solid rgba(239,68,68,.35)';b.style.color='#ef4444';
+    b.innerHTML='&#x1F50C; <strong>Not plugged in</strong> — scheduled charge '+(nsc?'at '+fmtCharge(nsc):'due soon')+'. Connect the cable so it can start.';
+    b.style.display='block';
+  }else if(nsc){
+    b.style.background='rgba(59,130,246,.08)';b.style.border='1px solid rgba(59,130,246,.25)';b.style.color='var(--text2)';
+    b.innerHTML='&#x1F5D3;&#xFE0F; Next scheduled charge: <strong>'+fmtCharge(nsc)+'</strong>';
+    b.style.display='block';
+  }else{
+    b.style.display='none';
+  }
+}
 loadNotifs();setInterval(loadNotifs,60000);
 updateBleHealth();setInterval(updateBleHealth,15000);
 </script>
@@ -1914,12 +2028,13 @@ function buildScheduleTimeline(schedules){
 // bitmask, start/stop strings). Split out of loadSchedules so the
 // optimistic paths (toggle/delete) can redraw instantly from the cached
 // allSchedules without a BLE round-trip.
-function renderSchedules(sc){
+function renderSchedules(sc,readonly){
   var l=document.getElementById('sch-list');if(!l)return;
+  var z=!!window._schZentri;  // original Pulsar: edit start/stop/days only, no toggle
   allSchedules=sc;
   try{buildScheduleTimeline(sc)}catch(e){console.error('timeline failed',e)}
-  if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules yet. Tap + Add New to create one.</div>';return}
-  var html='';
+  if(!sc.length){l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">No schedules yet'+(readonly?'.':'. Tap + Add New to create one.')+'</div>';return}
+  var html=z?"<div style='font-size:.78em;color:var(--text3);margin-bottom:6px'>&#x2139; On this charger, schedules set start/stop/days only (no power or energy limit).</div>":(readonly?"<div style='font-size:.78em;color:var(--text3);margin-bottom:6px'>&#x1F4CB; View-only on this charger.</div>":'');
   sc.forEach(function(s){
     var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS_M[b]+' ';
     var t1=utcToLocal(s.start),t2=utcToLocal(s.stop);
@@ -1929,11 +2044,48 @@ function renderSchedules(sc){
     var togIcon=s.enabled?'⏸':'▶';
     var togColor=s.enabled?'var(--warning)':'var(--success)';
     var togTitle=s.enabled?'Pause this schedule':'Resume this schedule';
-    html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" – "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" · "+lim+(ek?' · '+ek:'')+" · #"+s.sid+"</div></div><div style='display:flex;gap:6px;flex-shrink:0'><button class='btn btn-outline' title='"+togTitle+"' style='padding:6px 10px;font-size:.85em;color:"+togColor+"' onclick='toggleSchedule("+s.sid+")'>"+togIcon+"</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>✎</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>✖</button></div></div></div>";
+    html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='display:flex;justify-content:space-between;align-items:flex-start;gap:8px'><div style='flex:1;min-width:0'><div style='font-weight:600;font-size:.92em'>"+t1+" – "+t2+" "+badge+"</div><div style='font-size:.78em;color:var(--text3);margin-top:3px'>"+(ds.trim()||'No days')+" · "+lim+(ek?' · '+ek:'')+" · #"+s.sid+"</div></div>"+(readonly?"":"<div style='display:flex;gap:6px;flex-shrink:0'>"+(z?"":"<button class='btn btn-outline' title='"+togTitle+"' style='padding:6px 10px;font-size:.85em;color:"+togColor+"' onclick='toggleSchedule("+s.sid+")'>"+togIcon+"</button>")+"<button class='btn btn-outline' style='padding:6px 10px;font-size:.85em' onclick='editSchedule("+s.sid+")'>✎</button><button class='btn btn-outline' style='padding:6px 10px;font-size:.85em;color:var(--danger)' onclick='deleteSchedule("+s.sid+")'>✖</button></div>")+"</div></div>";
   });
   l.innerHTML=html;
 }
+// #12: the original (Zentri) Pulsar's r_schs times out — it reads schedules
+// one slot at a time via r_sch (bare-int sid). Detect via /api/status and
+// dispatch: Zentri -> per-sid reader (view-only); everyone else -> r_schs array.
 function loadSchedules(_retry){
+  var l=document.getElementById('sch-list');if(l)l.innerHTML="<span class='spinner'></span> Loading...";
+  fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(x){return x.json()}).then(function(st){
+    if(st&&st.zentri){window._schZentri=true;loadSchedulesZentri();}else{window._schZentri=false;loadSchedulesArr(_retry);}
+  }).catch(function(){window._schZentri=false;loadSchedulesArr(_retry);});
+}
+// Read the 4 fixed schedule slots (r_sch + bare-int sid 0..3) and normalize the
+// original Pulsar's {sid,start:"HHMM",stop:"HHMM",days,mcr,nrg} into the array
+// shape renderSchedules expects. View-only — write method not yet known.
+function loadSchedulesZentri(){
+  var l=document.getElementById('sch-list');if(!l)return;
+  // Read slots sequentially (r_sch + bare-int sid) until the charger reports
+  // no more — an error or non-object reply for an out-of-range sid marks the
+  // end. This adapts to whatever slot count the firmware exposes rather than
+  // assuming 4. MAXSLOTS is just a safety backstop for a charger that returns
+  // empty (instead of erroring) past its last slot. Empty-but-valid slots
+  // (days 0, 00:00-00:00) are skipped but we keep reading past them.
+  var out=[],i=0,MAXSLOTS=16;
+  (function next(){
+    if(i>=MAXSLOTS){renderSchedules(out);return;}
+    fetch('/api/command?action=bapi&met=r_sch&par='+i,{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){
+      if(!d||d.error||!d.r||typeof d.r.sid==='undefined'){renderSchedules(out);return;}
+      var s=d.r;
+      if(s.days||s.start!=='0000'||s.stop!=='0000'){
+        // This firmware's days bitmask is Sunday-first (bit0=Sun, confirmed:
+        // days:1 == Sundays). renderSchedules labels bits Monday-first
+        // (DAYS_M), so rotate Sun-first -> Mon-first: Sun(bit0)->bit6, Mon->bit0, etc.
+        var zd=0;for(var b=0;b<7;b++)if(s.days&(1<<b))zd|=(1<<((b+6)%7));
+        out.push({sid:s.sid,start:s.start,stop:s.stop,days:zd,mcr:s.mcr,enabled:s.days?1:0,target:{type:s.nrg?1:0,value:s.nrg||0}});
+      }
+      i++;next();
+    }).catch(function(){renderSchedules(out);});
+  })();
+}
+function loadSchedulesArr(_retry){
   // _retry: undefined = first attempt, true = the auto-retry. We retry
   // once after a brief settle when the BAPI call times out or the
   // gateway returns null (typically because the BLE mutex was busy
@@ -1983,6 +2135,7 @@ function newSchedule(){
   document.getElementById('se2').value='0';
   document.getElementById('sn').value='1';
   document.getElementById('sched-edit').style.display='block';
+  _schScopeForm();
   document.getElementById('sched-edit').scrollIntoView({behavior:'smooth',block:'start'});
 }
 // One-tap toggle for a schedule's enabled flag (the ⏸/▶ button in
@@ -2017,11 +2170,19 @@ function editSchedule(sid){
   document.getElementById('se2').value=(s.target&&s.target.type==1)?Math.round(s.target.value/1000):0;
   document.getElementById('sn').value=s.enabled?'1':'0';
   document.getElementById('sched-edit').style.display='block';
+  _schScopeForm();
   document.getElementById('sched-edit').scrollIntoView({behavior:'smooth',block:'start'});
 }
 function cancelEdit(){
   document.getElementById('sched-edit').style.display='none';
   editingSid=null;
+}
+// #12: the original Pulsar's w_sch write carries only start/stop/days, so hide
+// the Power/Energy-limit row and the Enabled selector in the editor for it.
+function _schScopeForm(){
+  var z=!!window._schZentri,sc=document.getElementById('sc'),sn=document.getElementById('sn');
+  try{if(sc&&sc.closest('.row'))sc.closest('.row').style.display=z?'none':''}catch(e){}
+  try{if(sn&&sn.parentNode)sn.parentNode.style.display=z?'none':''}catch(e){}
 }
 // Convert bitmask integer (bit 0=Mon..bit 6=Sun) to bit-array
 // [Mon,Tue,Wed,Thu,Fri,Sat,Sun]. The BAPI READ returns days as a
@@ -2039,7 +2200,30 @@ function buildSchEntry(sid,start,stop,days,enabled,mcr,type,target,repeat){
           mcr:mcr|0,type:type|0,enabled:enabled|0,
           target:target||{type:0,value:0},repeat:(repeat===undefined?1:repeat|0)}
 }
+// #12: original Pulsar schedule write — w_sch with a packed string
+// "<sid><startHHMM><stopHHMM><days3>": UTC times, a Sunday-first 3-digit day
+// bitmask, no power/energy fields. Insert/edit use the same call; the slot is
+// the sid. (Delete = the same slot all-zeroed, see doDeleteScheduleZentri.)
+function saveSchZentri(){
+  var st=localToUtc(document.getElementById('ss').value);  // "HHMM" UTC
+  var sp=localToUtc(document.getElementById('se').value);
+  var dForm=0;document.querySelectorAll('#sd input:checked').forEach(function(c){dForm+=parseInt(c.value)});
+  if(!dForm){toast('Select at least one day','error');return}
+  // form day bits are Monday-first; charger is Sunday-first -> Sun bit=(b+1)%7
+  var dZ=0;for(var b=0;b<7;b++)if(dForm&(1<<b))dZ|=(1<<((b+1)%7));
+  var sid;
+  if(editingSid!==null){sid=editingSid;}
+  else{var used={};allSchedules.forEach(function(s){used[s.sid]=1});sid=0;while(sid<4&&used[sid])sid++;if(sid>=4){toast('All 4 schedule slots are in use — edit or delete one first','error');return}}
+  var par=''+sid+st+sp+('00'+dZ).slice(-3);  // sid(1)+start(4)+stop(4)+days(3)
+  var verb=(editingSid!==null)?'updated':'added';
+  toast('Saving...','info');
+  fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(par),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+    if(r&&r.error){toast('Save failed (code '+(r.error&&r.error.code!==undefined?r.error.code:'?')+')','error');return}
+    toast('Schedule #'+sid+' '+verb,'success');cancelEdit();setTimeout(loadSchedules,1200);
+  }).catch(function(e){toast('Error: '+(e.message||e),'error')});
+}
 function saveSch(){
+  if(window._schZentri){saveSchZentri();return;}
   var st=localToUtc(document.getElementById('ss').value);
   var sp=localToUtc(document.getElementById('se').value);
   var d=0;document.querySelectorAll('#sd input:checked').forEach(function(c){d+=parseInt(c.value)});
@@ -2080,7 +2264,17 @@ function deleteSchedule(sid){
 // synchronously. Earlier clr_sch attempts failed only because the param
 // was the wrong shape (scalar sid / "sids" plural / null) — the correct
 // form deletes cleanly without any clear-all + rewrite dance.
+// #12: original Pulsar delete = w_sch with the slot's start/stop/days zeroed
+// ("<sid>00000000000"), which the charger reports back as an empty slot.
+function doDeleteScheduleZentri(sid){
+  toast('Deleting schedule #'+sid+'...','info');
+  fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(''+sid+'00000000000'),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+    if(r&&r.error){toast('Delete failed (code '+(r.error&&r.error.code!==undefined?r.error.code:'?')+')','error');loadSchedules();return;}
+    toast('Schedule #'+sid+' deleted','success');setTimeout(loadSchedules,1200);
+  }).catch(function(e){toast('Delete error: '+(e.message||e),'error');loadSchedules();});
+}
 function doDeleteSchedule(sid){
+  if(window._schZentri){doDeleteScheduleZentri(sid);return;}
   // Not optimistic: keep the row until the charger confirms, so a failed or
   // timed-out delete gives honest feedback instead of the row vanishing then
   // reappearing. Always reload after (success or fail) to show the true state.
@@ -2409,6 +2603,8 @@ String wb_buildSetupPage() {
     page += "<input type='hidden' name='ble_txchr' value='" + cfg.bleTxChar + "'>";
     page += "<input type='hidden' name='poll_status' value='" + String(cfg.statusPollMs) + "'>";
     page += "<input type='hidden' name='poll_rt' value='" + String(cfg.realtimePollMs) + "'>";
+    page += "<input type='hidden' name='rem_lead' value='" + String(cfg.reminderLeadMin) + "'>";
+    page += "<input type='hidden' name='mains_v' value='" + String(cfg.mainsVoltage) + "'>";
     page += "<input type='hidden' name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'>";
     page += "<input type='hidden' name='ha_devid' value='" + cfg.haDeviceId + "'>";
 
@@ -2656,8 +2852,56 @@ String wb_buildConfigPage() {
     page += "<label>TX/Notify Char UUID (optional &mdash; leave blank for single-char Pulsar MAX)</label><input name='ble_txchr' value='" + cfg.bleTxChar + "' placeholder='Required for Pulsar Plus' style='font-size:12px;font-family:monospace'>";
     page += "<div class='row'><div><label>Status Poll (ms)</label><input name='poll_status' type='number' value='" + String(cfg.statusPollMs) + "'></div>";
     page += "<div><label>Realtime Poll (ms)</label><input name='poll_rt' type='number' value='" + String(cfg.realtimePollMs) + "'></div></div>";
+    page += "<div class='row'><div><label>Charge Reminder Lead (min)</label><input name='rem_lead' type='number' min='0' max='1440' value='" + String(cfg.reminderLeadMin) + "'><p class='help' style='margin:4px 0 0'>Minutes before a scheduled charge to flag \"not plugged in\". 0 disables.</p></div><div></div></div>";
+    // Mains voltage — used to derive charge power from phase currents on the
+    // original/Zentri Pulsar, which doesn't report power directly (#12).
+    {
+        struct { uint32_t v; const char* label; } volts[] = {
+            {230, "230 V &mdash; UK / EU / Australia / Asia"},
+            {240, "240 V &mdash; North America (Level 2)"},
+            {208, "208 V &mdash; North America (3-phase)"},
+            {200, "200 V &mdash; Japan"},
+            {120, "120 V &mdash; North America (Level 1)"},
+            {127, "127 V &mdash; Latin America"},
+        };
+        bool known = false;
+        page += "<label>Mains Voltage</label><select name='mains_v'>";
+        for (auto& o : volts) {
+            bool sel = (cfg.mainsVoltage == o.v);
+            known = known || sel;
+            page += String("<option value='") + o.v + "'" + (sel ? " selected" : "") + ">" + o.label + "</option>";
+        }
+        // Preserve any custom value the user set via JSON/API.
+        if (!known)
+            page += String("<option value='") + cfg.mainsVoltage + "' selected>" + cfg.mainsVoltage + " V &mdash; custom</option>";
+        page += "</select>";
+        page += "<p class='help'>Used only when the charger doesn't report power directly (original Pulsar). Ignored if a Power Meter accessory is fitted &mdash; its measured voltage is used instead.</p>";
+    }
+    // Charge control owner — who is allowed to autonomously start/stop charging.
+    page += "<div class='row'><div><label>Charge Control Owner</label><select name='ctrl_owner'>";
+    {
+        static const char* ctrlOpts[][2] = {
+            {"wallbox_schedule", "Wallbox native schedule"},
+            {"integration",      "Home Assistant Integration"},
+            {"addon",            "Home Assistant Add-on"},
+            {"none",             "None (manual / plug-in only)"},
+        };
+        for (auto& o : ctrlOpts) {
+            page += "<option value='"; page += o[0]; page += "'";
+            if (cfg.controlOwner == o[0]) page += " selected";
+            page += ">"; page += o[1]; page += "</option>";
+        }
+    }
+    page += "</select><p class='help' style='margin:4px 0 0'>Who decides when to charge. The chosen one controls; the others stand down. Manual always works.</p></div><div></div></div>";
     page += "<div class='row'><div><label>HA Prefix</label><input name='ha_prefix' value='" + cfg.haDiscoveryPrefix + "'></div>";
     page += "<div><label>Device ID</label><input name='ha_devid' value='" + cfg.haDeviceId + "'></div></div>";
+    // Publish HA MQTT discovery — turn off if driving HA via the HACS
+    // Integration instead, to avoid duplicate entities. Off clears the
+    // retained configs so HA removes the MQTT entities.
+    page += "<div class='row'><div><label>HA MQTT Discovery</label><select name='ha_disc'>";
+    page += String("<option value='1'") + (cfg.haDiscoveryEnabled ? " selected" : "") + ">On &mdash; create HA entities via MQTT</option>";
+    page += String("<option value='0'") + (!cfg.haDiscoveryEnabled ? " selected" : "") + ">Off &mdash; I use the HACS Integration</option>";
+    page += "</select><p class='help' style='margin:4px 0 0'>Turn <b>Off</b> if you add the charger to HA with the HACS Integration instead &mdash; avoids duplicate entities. Off removes the MQTT entities from HA.</p></div><div></div></div>";
     page += "</div></div>";
 
     // ---------- Save button (outside panels so always visible) ----------
@@ -2991,11 +3235,14 @@ function loadDiag(){
     if(d.wifi_last_at_s)h+=row('Last WiFi reconnect',fmtUptime(d.wifi_last_at_s)+' after boot');
     if(d.events&&d.events.length){
       // Split this-boot vs prior by the event's boot id (d.boot is the
-      // current boot). The old heuristic compared e.start to curUp, which
-      // mislabelled a prior-boot event whose start was below the current
-      // uptime as "this boot". Fall back to that heuristic only if the
-      // firmware is old enough not to stamp boot ids.
-      function isThisBoot(e){return (typeof e.boot==='number'&&typeof d.boot==='number')?e.boot===d.boot:e.start<=curUp;}
+      // current boot). When the summary HAS a boot id, an event WITHOUT one
+      // predates boot-stamping (recorded by old firmware, still in NVS) → it's
+      // a prior boot, not this one. The earlier fallback (e.start<=curUp)
+      // mislabelled those leftover events as "this boot" (#13: counters showed
+      // 0 reconnects this boot while the list showed 8 old events). Only use
+      // the start-heuristic when the firmware is so old it stamps no boot id in
+      // the summary at all.
+      function isThisBoot(e){return (typeof d.boot==='number')?(typeof e.boot==='number'&&e.boot===d.boot):(e.start<=curUp);}
       function evRow(e,dim){var kc=e.kind==='ble'?'#a78bfa':(e.kind==='wifi'?'#34d399':'#22d3ee');var tag=e.settle?' <span style="color:var(--text3)">· boot-settle</span>':'';return '<div style="font-family:monospace;font-size:.78em;margin:2px 0'+(dim?';opacity:.55':'')+'"><span style="color:'+kc+'">'+e.kind.toUpperCase().padEnd(4,' ')+'</span> at +'+fmtUptime(e.start)+(dim?' of that boot':'')+', down '+fmtDur(e.dur)+tag+'</div>';}
       var thisBoot=d.events.filter(isThisBoot);
       var prior=d.events.filter(function(e){return !isThisBoot(e);});
@@ -3145,7 +3392,19 @@ String wb_applySaveForm(std::function<String(const char*)> getArg) {
     }
     cfg.statusPollMs = getArg("poll_status").toInt();
     cfg.realtimePollMs = getArg("poll_rt").toInt();
+    // Charge reminder lead (#127). Guard on presence so a form that omits
+    // the field doesn't silently reset it to 0 (= feature disabled); an
+    // explicit "0" the user types still disables it.
+    if (getArg("rem_lead").length()) cfg.reminderLeadMin = getArg("rem_lead").toInt();
+    if (getArg("mains_v").length()) {
+        long mv = getArg("mains_v").toInt();
+        cfg.mainsVoltage = (mv >= 50 && mv <= 500) ? (uint32_t)mv : 230;
+    }
+    if (getArg("ctrl_owner").length()) cfg.controlOwner = getArg("ctrl_owner");
     cfg.haDiscoveryPrefix = getArg("ha_prefix"); cfg.haDeviceId = getArg("ha_devid");
+    // Only change when the select is present (it's Advanced-panel only) so a
+    // wizard save can't silently disable discovery.
+    if (getArg("ha_disc").length()) cfg.haDiscoveryEnabled = getArg("ha_disc") != "0";
     if (cfg.mqttPort == 0) cfg.mqttPort = 1883;
     if (cfg.statusPollMs < 1000) cfg.statusPollMs = 10000;
     if (cfg.realtimePollMs < 1000) cfg.realtimePollMs = 30000;
@@ -3232,8 +3491,12 @@ String wb_buildConfigExportJson() {
     d["auth_pass"]    = c.authPass.length() ? "***" : "";
     d["poll_status"]  = c.statusPollMs;
     d["poll_rt"]      = c.realtimePollMs;
+    d["rem_lead"]     = c.reminderLeadMin;
+    d["mains_v"]      = c.mainsVoltage;
+    d["ctrl_owner"]   = c.controlOwner;
     d["ha_prefix"]    = c.haDiscoveryPrefix;
     d["ha_devid"]     = c.haDeviceId;
+    d["ha_disc"]      = c.haDiscoveryEnabled;
     String body;
     serializeJsonPretty(d, body);
     return body;
@@ -3275,6 +3538,13 @@ ImportResult wb_applyConfigImport(const String& jsonBody) {
     take(d["auth_pass"],   c.authPass);
     if (d["poll_status"].is<uint32_t>()) c.statusPollMs = d["poll_status"].as<uint32_t>();
     if (d["poll_rt"].is<uint32_t>())     c.realtimePollMs = d["poll_rt"].as<uint32_t>();
+    if (d["rem_lead"].is<uint32_t>())    c.reminderLeadMin = d["rem_lead"].as<uint32_t>();
+    if (d["mains_v"].is<uint32_t>()) {
+        uint32_t mv = d["mains_v"].as<uint32_t>();
+        if (mv >= 50 && mv <= 500) c.mainsVoltage = mv;
+    }
+    if (d["ctrl_owner"].is<const char*>()) c.controlOwner = d["ctrl_owner"].as<const char*>();
+    if (d["ha_disc"].is<bool>()) c.haDiscoveryEnabled = d["ha_disc"].as<bool>();
     take(d["ha_prefix"],   c.haDiscoveryPrefix);
     take(d["ha_devid"],    c.haDeviceId);
     configMgr.save();
@@ -3673,6 +3943,19 @@ function exportCsv(){
   document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
   toast('Downloaded '+(rows.length-1)+' sessions','success');
 }
+// Fallback when the charger doesn't serve per-session r_log records (e.g. the
+// original/Zentri Pulsar): build the heatmap + list from the gateway's OWN
+// local charge-interval log (/api/charge_log). wh is Wh (matches session.en),
+// gwh is green Wh (matches gen). Going-forward only — no historical backfill.
+function loadFromChargeLog(cache,cachedList){
+  fetch('/api/charge_log',{signal:AbortSignal.timeout(8000)})
+    .then(function(x){return x.json()}).then(function(d){
+      var ivs=(d&&d.intervals)||[];
+      if(!ivs.length){if(!cachedList.length)document.getElementById('slist').innerHTML='No charge sessions recorded yet — they appear here after your next charge.';return}
+      var list=ivs.map(function(iv){return {id:'cl'+iv.start,ts:iv.start,dur:Math.max(0,(iv.stop||iv.start)-iv.start),en:iv.wh||0,gen:iv.gwh||0}});
+      renderAll(list,cache.lifetimeKwh);
+    }).catch(function(){if(!cachedList.length)document.getElementById('slist').innerHTML='No charge sessions recorded yet.'});
+}
 function loadSessions2(){
   var cache;
   try{cache=JSON.parse(localStorage.getItem('wb-sessions-v1')||'{}')}catch(e){cache={}}
@@ -3688,7 +3971,7 @@ function loadSessions2(){
     }).catch(function(){});
   fetch('/api/command?action=bapi&met=r_ses&par=null',{signal:AbortSignal.timeout(15000)})
     .then(function(x){return x.json()}).then(function(d){
-      if(!d.r||!d.r.last){if(!cachedList.length)document.getElementById('slist').innerHTML='No sessions yet';return}
+      if(!d.r||!d.r.last){loadFromChargeLog(cache,cachedList);return}
       var last=d.r.last;
       var cachedSids=Object.keys(cache.s).map(Number);
       var maxCached=cachedSids.length?Math.max.apply(null,cachedSids):0;
@@ -3699,6 +3982,9 @@ function loadSessions2(){
       function fetchNext(){
         if(sid>last){
           var allList=Object.keys(cache.s).map(function(k){return cache.s[k]});
+          // Nothing came back from r_log (charger doesn't serve per-session
+          // records) — fall back to the gateway's local charge log.
+          if(!allList.length){loadFromChargeLog(cache,cachedList);return}
           try{localStorage.setItem('wb-sessions-v1',JSON.stringify(cache))}catch(e){}
           renderAll(allList,cache.lifetimeKwh);
           return;
@@ -3719,7 +4005,13 @@ function loadSessions2(){
             advance();
           }).catch(function(){clearTimeout(hardTimer);advance()});
       }
-      fetchNext();
+      // Probe the newest session once. If the charger doesn't serve r_log
+      // (original/Zentri Pulsar), skip the slow 60-sid loop entirely and use
+      // the gateway's local charge log instead.
+      fetch('/api/command?action=bapi&met=r_log&par='+last,{signal:AbortSignal.timeout(8000)})
+        .then(function(x){return x.json()}).then(function(pd){
+          if(pd.r&&pd.r.start){fetchNext();}else{loadFromChargeLog(cache,cachedList);}
+        }).catch(function(){loadFromChargeLog(cache,cachedList);});
     }).catch(function(e){
       if(!cachedList.length){document.getElementById('slist').innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'}
     });
