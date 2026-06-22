@@ -1242,12 +1242,12 @@ static const char* DASH_BODY_SOURCE = R"HTML(
 <div class='card' id='card-powerflow'>
   <div class='card-header'><span class='card-icon'>&#x26A1;</span><h2 style='margin:0;font-size:1em'>Energy Flow</h2></div>
   <svg viewBox='0 0 320 196' style='display:block;width:100%;max-width:320px;margin:0 auto' role='img' aria-label='Live energy flow Solar and Grid to Vehicle'>
-    <path d='M160,74 C160,116 214,122 246,130' fill='none' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
+    <path id='pf-guide-solar' d='M160,74 C160,116 214,122 246,130' fill='none' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
     <line x1='76' y1='140' x2='244' y2='140' stroke='var(--border)' stroke-width='2' stroke-dasharray='5 4'/>
     <path id='pf-solar-line' d='M160,74 C160,116 214,122 246,130' fill='none' stroke='#f59e0b' stroke-width='3.5' stroke-dasharray='9 6' stroke-dashoffset='0' style='opacity:0;transition:opacity .3s'/>
     <line id='pf-grid-line' x1='76' y1='140' x2='244' y2='140' stroke='var(--primary)' stroke-width='3.5' stroke-dasharray='9 6' stroke-dashoffset='0' style='opacity:0;transition:opacity .3s'/>
     <text id='pf-live' x='158' y='112' text-anchor='middle' font-size='12' fill='var(--text)' font-weight='700'></text>
-    <g><circle cx='160' cy='44' r='30' fill='rgba(245,158,11,.10)' stroke='#f59e0b' stroke-width='1.6'/><text x='160' y='42' text-anchor='middle' font-size='18' style='-webkit-user-select:none;user-select:none'>&#x2600;&#xFE0F;</text><text id='pf-solar-kwh' x='160' y='58' text-anchor='middle' font-size='11' fill='var(--text)' font-weight='700'>--</text><text x='160' y='88' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Solar</text></g>
+    <g id='pf-node-solar'><circle cx='160' cy='44' r='30' fill='rgba(245,158,11,.10)' stroke='#f59e0b' stroke-width='1.6'/><text x='160' y='42' text-anchor='middle' font-size='18' style='-webkit-user-select:none;user-select:none'>&#x2600;&#xFE0F;</text><text id='pf-solar-kwh' x='160' y='58' text-anchor='middle' font-size='11' fill='var(--text)' font-weight='700'>--</text><text x='160' y='88' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Solar</text></g>
     <g><circle cx='46' cy='140' r='30' fill='var(--elevated)' stroke='var(--primary)' stroke-width='1.6'/><text x='46' y='136' text-anchor='middle' font-size='18' style='-webkit-user-select:none;user-select:none'>&#x1F50C;</text><text id='pf-grid-kwh' x='46' y='156' text-anchor='middle' font-size='11' fill='var(--text)' font-weight='700'>--</text><text x='46' y='186' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Grid</text></g>
     <g><circle cx='274' cy='140' r='32' fill='var(--elevated)' stroke='var(--border)' stroke-width='1.6'/><text x='274' y='128' text-anchor='middle' font-size='20' style='-webkit-user-select:none;user-select:none'>&#x1F697;</text><g id='pf-battery' transform='translate(263,138)'><rect x='0' y='0' width='22' height='7' rx='1.2' fill='var(--surface)' stroke='var(--text3)' stroke-width='.7'/><rect x='22' y='2' width='1.6' height='3' fill='var(--text3)'/><rect id='pf-batt-1' x='1.6' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-2' x='8.4' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/><rect id='pf-batt-3' x='15.2' y='1.5' width='5.5' height='4' rx='.5' fill='var(--success)' opacity='0'/></g><text id='pf-car-kwh' x='274' y='156' text-anchor='middle' font-size='11' fill='var(--text)' font-weight='700'>--</text><text id='pf-plugin' x='274' y='156' text-anchor='middle' font-size='10' fill='var(--accent)' font-weight='700' style='display:none'>&#x1F50C; Plug in</text><text x='274' y='186' text-anchor='middle' font-size='11' fill='var(--text2)' font-weight='500'>Vehicle</text></g>
   </svg>
@@ -1429,9 +1429,15 @@ function fmtCharge(epoch){
 // hides on a gateway that doesn't report the flag. Charging power stays
 // visible via the stats grid; only the grid-dependent bits hide.
 function applyMeterCapability(meter){
-  var hide=(meter===false);
-  ['card-powerflow','cell-vt','cell-gp'].forEach(function(id){
-    var el=document.getElementById(id);if(el)el.style.display=hide?'none':'';
+  var noMeter=(meter===false);
+  // No meter: keep the Energy Flow card — the Vehicle node still shows the
+  // (derived) charge power, which is meter-independent (e.g. original Pulsar).
+  // Only hide the meter-dependent bits: the Solar branch (no Eco-Smart without
+  // a meter) and the Mains Voltage / House Power stat cells. Grid -> Vehicle
+  // still conveys charging. (Previously the whole card hid — #129 — which
+  // wrongly dropped the charge-power visual on meter-less chargers.)
+  ['cell-vt','cell-gp','pf-node-solar','pf-guide-solar','pf-solar-line'].forEach(function(id){
+    var el=document.getElementById(id);if(el)el.style.display=noMeter?'none':'';
   });
 }
 function updateChargeReminder(s){
@@ -3937,6 +3943,19 @@ function exportCsv(){
   document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
   toast('Downloaded '+(rows.length-1)+' sessions','success');
 }
+// Fallback when the charger doesn't serve per-session r_log records (e.g. the
+// original/Zentri Pulsar): build the heatmap + list from the gateway's OWN
+// local charge-interval log (/api/charge_log). wh is Wh (matches session.en),
+// gwh is green Wh (matches gen). Going-forward only — no historical backfill.
+function loadFromChargeLog(cache,cachedList){
+  fetch('/api/charge_log',{signal:AbortSignal.timeout(8000)})
+    .then(function(x){return x.json()}).then(function(d){
+      var ivs=(d&&d.intervals)||[];
+      if(!ivs.length){if(!cachedList.length)document.getElementById('slist').innerHTML='No charge sessions recorded yet — they appear here after your next charge.';return}
+      var list=ivs.map(function(iv){return {id:'cl'+iv.start,ts:iv.start,dur:Math.max(0,(iv.stop||iv.start)-iv.start),en:iv.wh||0,gen:iv.gwh||0}});
+      renderAll(list,cache.lifetimeKwh);
+    }).catch(function(){if(!cachedList.length)document.getElementById('slist').innerHTML='No charge sessions recorded yet.'});
+}
 function loadSessions2(){
   var cache;
   try{cache=JSON.parse(localStorage.getItem('wb-sessions-v1')||'{}')}catch(e){cache={}}
@@ -3952,7 +3971,7 @@ function loadSessions2(){
     }).catch(function(){});
   fetch('/api/command?action=bapi&met=r_ses&par=null',{signal:AbortSignal.timeout(15000)})
     .then(function(x){return x.json()}).then(function(d){
-      if(!d.r||!d.r.last){if(!cachedList.length)document.getElementById('slist').innerHTML='No sessions yet';return}
+      if(!d.r||!d.r.last){loadFromChargeLog(cache,cachedList);return}
       var last=d.r.last;
       var cachedSids=Object.keys(cache.s).map(Number);
       var maxCached=cachedSids.length?Math.max.apply(null,cachedSids):0;
@@ -3963,6 +3982,9 @@ function loadSessions2(){
       function fetchNext(){
         if(sid>last){
           var allList=Object.keys(cache.s).map(function(k){return cache.s[k]});
+          // Nothing came back from r_log (charger doesn't serve per-session
+          // records) — fall back to the gateway's local charge log.
+          if(!allList.length){loadFromChargeLog(cache,cachedList);return}
           try{localStorage.setItem('wb-sessions-v1',JSON.stringify(cache))}catch(e){}
           renderAll(allList,cache.lifetimeKwh);
           return;
@@ -3983,7 +4005,13 @@ function loadSessions2(){
             advance();
           }).catch(function(){clearTimeout(hardTimer);advance()});
       }
-      fetchNext();
+      // Probe the newest session once. If the charger doesn't serve r_log
+      // (original/Zentri Pulsar), skip the slow 60-sid loop entirely and use
+      // the gateway's local charge log instead.
+      fetch('/api/command?action=bapi&met=r_log&par='+last,{signal:AbortSignal.timeout(8000)})
+        .then(function(x){return x.json()}).then(function(pd){
+          if(pd.r&&pd.r.start){fetchNext();}else{loadFromChargeLog(cache,cachedList);}
+        }).catch(function(){loadFromChargeLog(cache,cachedList);});
     }).catch(function(e){
       if(!cachedList.length){document.getElementById('slist').innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'}
     });
