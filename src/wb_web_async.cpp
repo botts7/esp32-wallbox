@@ -621,6 +621,28 @@ static void _registerStaticAndPostRoutes() {
             "{\"ok\":true,\"rebooting\":true}");
         webServer.requestReboot();
     });
+
+    // Set the charge-control owner. Auth-only (no CSRF) so the stateless HA
+    // integration / Add-on can set it, matching /api/command. Persists to NVS
+    // immediately (no reboot) so the selection survives a power cycle.
+    _async.on("/api/control_owner", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        String owner;
+        if (req->hasParam("owner"))            owner = req->getParam("owner")->value();
+        else if (req->hasParam("owner", true)) owner = req->getParam("owner", true)->value();
+        owner.trim();
+        if (owner != "wallbox_schedule" && owner != "integration"
+            && owner != "addon" && owner != "none") {
+            req->send(400, "application/json",
+                "{\"error\":\"owner must be wallbox_schedule|integration|addon|none\"}");
+            return;
+        }
+        configMgr.mut().controlOwner = owner;
+        configMgr.save();
+        Log.printf("[Web] control_owner set to '%s' via API\n", owner.c_str());
+        req->send(200, "application/json",
+            String("{\"ok\":true,\"control_owner\":\"") + owner + "\"}");
+    });
 }
 
 // =====================================================================

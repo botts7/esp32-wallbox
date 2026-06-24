@@ -4511,6 +4511,26 @@ static void registerRoutes() {
     http.on("/api/ble/pause", handleBlePause);
     http.on("/api/charger", handleApiCharger);
     http.on("/api/command", handleApiCommand);
+    // Set the charge-control owner (who may autonomously drive charging).
+    // Auth-only (no CSRF) so the stateless HA integration / Add-on can set it,
+    // matching /api/command. Persists to NVS immediately (no reboot) — so the
+    // selection survives a power cycle. Owner is validated against the known set.
+    http.on("/api/control_owner", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        String owner = http.arg("owner");
+        owner.trim();
+        if (owner != "wallbox_schedule" && owner != "integration"
+            && owner != "addon" && owner != "none") {
+            http.send(400, "application/json",
+                "{\"error\":\"owner must be wallbox_schedule|integration|addon|none\"}");
+            return;
+        }
+        configMgr.mut().controlOwner = owner;
+        configMgr.save();
+        Log.printf("[Web] control_owner set to '%s' via API\n", owner.c_str());
+        http.send(200, "application/json",
+            String("{\"ok\":true,\"control_owner\":\"") + owner + "\"}");
+    });
     // 2.7.0 step 7 — poll endpoint for the async ?wait=0 path. Returns:
     //   200 + body  → response landed, returned in the body
     //   202 + status:pending → request still in flight, or evicted

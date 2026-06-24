@@ -4,6 +4,16 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`POST /api/control_owner`** — set the charge-control owner over HTTP
+  (`owner=wallbox_schedule|integration|addon|none`). Auth-only (no CSRF), like
+  `/api/command`, so the Home Assistant integration / Add-on can set it without
+  opening the gateway's own Settings page. Persists to NVS immediately (no
+  reboot), so the selection survives a power cycle.
+
 ## [3.0.4] - 2026-06-17
 
 Patch release — heap-pressure relief on the largest web pages (#103).
