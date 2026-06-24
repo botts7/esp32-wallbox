@@ -6,6 +6,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dashboard status "Paused" was misleading.** Wallbox status 4 covers both an
+  active Schedule/Solar override (`r_dat.gen != 0`) and a plain stopped/idle
+  session (`gen == 0`). The dashboard now shows **"Connected — not charging"**
+  for the idle case and reserves "Paused" for a real override — matching the HA
+  integration + Add-on so all surfaces agree.
+
 ### Added
 
 - **`POST /api/control_owner`** — set the charge-control owner over HTTP
