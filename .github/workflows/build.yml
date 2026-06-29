@@ -1,6 +1,7 @@
 name: Build Firmware
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
