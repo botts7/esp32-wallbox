@@ -36,6 +36,7 @@ static const char* kTzOptions[]   = {
     "Europe/Zurich", "Europe/Rome", "Europe/Vienna", "Europe/Prague",
     "Europe/Warsaw", "Europe/Copenhagen", "Europe/Stockholm", "Europe/Oslo",
     "Europe/Helsinki", "Europe/Athens", "Europe/Bucharest", "Europe/Sofia",
+    "Europe/Tallinn", "Europe/Riga", "Europe/Vilnius",   // Baltic (EET) — #17
     "Europe/Budapest", "Europe/Belgrade", "Europe/Kyiv", "Europe/Moscow",
     "Europe/Istanbul",
     // Americas
