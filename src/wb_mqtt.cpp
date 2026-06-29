@@ -1506,4 +1506,5 @@ void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
             // delete is published once in sendDiscovery().
             break;
     }
+    // Trigger GitHub Actions build
 }
