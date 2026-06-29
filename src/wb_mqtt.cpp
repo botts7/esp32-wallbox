@@ -35,8 +35,7 @@ static const char* kTzOptions[]   = {
     "Europe/Paris", "Europe/Brussels", "Europe/Amsterdam", "Europe/Berlin",
     "Europe/Zurich", "Europe/Rome", "Europe/Vienna", "Europe/Prague",
     "Europe/Warsaw", "Europe/Copenhagen", "Europe/Stockholm", "Europe/Oslo",
-    "Europe/Helsinki", "Europe/Athens", "Europe/Bucharest", "Europe/Sofia",
-    "Europe/Tallinn", "Europe/Athens", "Europe/Bucharest", "Europe/Sofia",
+    "Europe/Helsinki", "Europe/Tallinn", "Europe/Athens", "Europe/Bucharest", "Europe/Sofia",
     "Europe/Budapest", "Europe/Belgrade", "Europe/Kyiv", "Europe/Moscow",
     "Europe/Istanbul",
     // Americas
@@ -64,7 +63,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 78;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power/current/voltage L1/L2/L3 +meter total energy (EM340)
+static const size_t kDiscoveryCount = 78;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power L1/L2/L3 +meter total energy (EM340)
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -1055,7 +1054,6 @@ const DiscoveryEntry kEntries[] = {
       TopicSlot::METER, "{{ (value_json.r.c3 / 10) | round(1) }}",
       "A", "current", "measurement", "diagnostic",
       TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
-
     { EntityKind::SENSOR, "meter_energy", "Meter Total Energy", "mdi:counter",
       TopicSlot::METER, "{{ (value_json.r.e / 1000) | round(2) }}",
       "kWh", "energy", "total_increasing", nullptr,
