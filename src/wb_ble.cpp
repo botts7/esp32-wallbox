@@ -1433,6 +1433,14 @@ void WallboxBLE::_storeCache(String& dst, uint32_t& seq, const String& value) {
 void WallboxBLE::_pollStatus() {
     if (_state != State::CONNECTED) return;
     String resp = _sendCommandDirect(bapi::MET_GET_STATUS);
+    if (resp.isEmpty() && _state == State::CONNECTED) {
+        // One retry — on a marginal BLE link (e.g. an antenna-less S3 through a
+        // charger enclosure, #20) the periodic r_dat can drop while an occasional
+        // read still gets through, leaving the status cache empty for the whole
+        // session. Cheap insurance; on a healthy link the first read succeeds.
+        delay(50);
+        resp = _sendCommandDirect(bapi::MET_GET_STATUS);
+    }
     if (!resp.isEmpty()) {
         // Zentri/original Pulsar omits `cp` — synthesise charge power from the
         // phase currents so every downstream consumer (dashboard, MQTT,
@@ -1483,6 +1491,11 @@ void WallboxBLE::_pollStatus() {
 void WallboxBLE::_pollRealtime() {
     if (_state != State::CONNECTED) return;
     String resp = _sendCommandDirect(bapi::MET_GET_REALTIME);
+    if (resp.isEmpty() && _state == State::CONNECTED) {
+        // One retry on a marginal link, same rationale as _pollStatus (#20).
+        delay(50);
+        resp = _sendCommandDirect(bapi::MET_GET_REALTIME);
+    }
     if (!resp.isEmpty()) _storeCache(_cachedRealtimeJson, _seqRealtime, resp);
 }
 

@@ -8,6 +8,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Status/realtime poll retries once on a marginal BLE link (#20).** On a weak
+  link (e.g. an antenna-less ESP32-S3 through the charger enclosure) the periodic
+  `r_dat`/`r_sta` read could drop while an occasional read still got through,
+  leaving the cached status empty for the whole session — the dashboard/HA grid
+  then showed `--` even though the charger was reachable. Each poll now retries
+  once on an empty read. (Root-cause still pending a serial log; this is cheap
+  insurance that helps any marginal link.)
 - **Multiple gateways no longer collide in Home Assistant.** MQTT topics are now
   namespaced per gateway (`wallbox/<ha_device_id>/…` instead of a shared
   `wallbox/status`). With two chargers this was making one charger's values
