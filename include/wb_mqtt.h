@@ -58,6 +58,9 @@ private:
 
     PubSubClient* _client = nullptr;
     uint32_t _lastConnectAttempt = 0;
+    // Reconnect gate, grows on repeated failure so an unreachable broker
+    // (rc=-2, #20) can't hammer the loop forever. Reset to 5 s on connect.
+    uint32_t _reconnectGateMs = 5000;
     bool _discoveryPublished = false;
     bool _wasConnected = false;  // edge-trigger for wb_diag counters
 

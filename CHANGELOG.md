@@ -8,6 +8,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **WiFi self-recovers from a wedged stack after long uptime (#13).** A soft
+  `WiFi.reconnect()` couldn't recover a locked-up WiFi stack (peter-mcc: dropped
+  at ~79 h uptime and stayed down until a manual power-cycle). Added an escalating
+  watchdog: after 5 min continuously disconnected the gateway restarts the whole
+  WiFi stack (off/on + `begin`), and after 30 min it reboots — so it recovers on
+  its own instead of needing a power-cycle. A healthy link is never touched.
+- **MQTT stops hammering an unreachable broker (#20).** When the broker can't be
+  reached (`rc=-2`), reconnect attempts now back off exponentially (5 s → 60 s)
+  instead of retrying every 5 s forever — which was wasting the main loop and
+  overflowing the publish ring. (If you use the Integration/Add-on, just turn
+  MQTT off in Settings and it goes quiet entirely.)
 - **Status/realtime poll retries once on a marginal BLE link (#20).** On a weak
   link (e.g. an antenna-less ESP32-S3 through the charger enclosure) the periodic
   `r_dat`/`r_sta` read could drop while an occasional read still got through,

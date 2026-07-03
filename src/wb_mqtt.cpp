@@ -469,7 +469,7 @@ void WallboxMQTT::loop() {
             _wasConnected = false;
             wb_diag::reportDisconnect(wb_diag::Kind::MQTT);
         }
-        if (millis() - _lastConnectAttempt >= 5000) {
+        if (millis() - _lastConnectAttempt >= _reconnectGateMs) {
             _connect();
         }
         return;
@@ -499,6 +499,7 @@ void WallboxMQTT::_connect() {
     // LWT: set availability to offline on disconnect
     if (_client->connect(cfg.mqttClientId.c_str(), user, pass, avail.c_str(), 0, true, "offline")) {
         Log.println("[MQTT] Connected");
+        _reconnectGateMs = 5000;   // reset backoff on success
         _subscribe();
         publishAvailability(true);
         if (!_discoveryPublished) {
@@ -507,6 +508,10 @@ void WallboxMQTT::_connect() {
         }
     } else {
         Log.printf("[MQTT] Failed, rc=%d\n", _client->state());
+        // Exponential backoff up to 60 s so a permanently-unreachable broker
+        // (rc=-2, #20) doesn't retry every 5 s forever, hogging the loop and
+        // overflowing the pending-pub ring.
+        _reconnectGateMs = _reconnectGateMs < 60000 ? _reconnectGateMs * 2 : 60000;
     }
 }
 
