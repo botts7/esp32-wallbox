@@ -3,6 +3,7 @@
 #include "wb_config.h"
 #include "wb_health.h"
 #include "wb_zentri_normalize.h"
+#include "wb_copper_normalize.h"
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
@@ -1439,12 +1440,18 @@ void WallboxBLE::_pollStatus() {
         // cycle's cached meter for measured voltage, else the nominal setting.
         if (_isZentri)
             wb_zentri::normaliseStatus(resp, (float)_mainsVoltage, _cachedMeterJson);
+        // Copper SB / Business firmware names its status fields differently (#20).
+        // Self-detecting no-op until the Copper mapping is implemented.
+        wb_copper::normaliseStatus(resp, (float)_mainsVoltage, _cachedMeterJson);
         _storeCache(_cachedStatusJson, _seqStatus, resp);
     }
     // Energy meter on same cycle — lightweight & useful
     if (_state != State::CONNECTED) return;
     String meter = _sendCommandDirect(bapi::MET_GET_METER);
     if (!meter.isEmpty()) {
+        // Copper SB reports meter fields under different keys (#20). Self-
+        // detecting no-op until the Copper meter mapping is implemented.
+        wb_copper::normaliseMeter(meter);
         _storeCache(_cachedMeterJson, _seqMeter, meter);
         // Meter capability (#129): error code 4 = "feature not supported"
         // (no Power Boost / Power Meter accessory). A valid r object means

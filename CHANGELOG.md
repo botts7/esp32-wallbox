@@ -8,14 +8,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Multiple gateways no longer collide in Home Assistant.** MQTT topics are now
+  namespaced per gateway (`wallbox/<ha_device_id>/…` instead of a shared
+  `wallbox/status`). With two chargers this was making one charger's values
+  cycle into the other's HA entities (e.g. "Max Charging Current" flip-flopping
+  between the two chargers every few seconds). Entities re-point automatically
+  on update — single-gateway installs keep working unchanged. (andypnz)
 - **Dashboard status "Paused" was misleading.** Wallbox status 4 covers both an
   active Schedule/Solar override (`r_dat.gen != 0`) and a plain stopped/idle
   session (`gen == 0`). The dashboard now shows **"Connected — not charging"**
   for the idle case and reserves "Paused" for a real override — matching the HA
   integration + Add-on so all surfaces agree.
 
+### Changed
+
+- **Default HA Device ID is now MAC-unique** (`wallbox_pulsar_<mac6>`) instead of
+  a fixed `wallbox_pulsar_max`, so two out-of-the-box gateways get distinct HA
+  entity IDs. Existing installs keep their saved ID (only a fresh/wiped flash
+  picks up the new default). Multi-charger users should still give each gateway a
+  memorable **HA Device ID** in Settings.
+
 ### Added
 
+- **`gw_fw` in `/api/status`** — the gateway firmware version, so the HA Add-on
+  and Integration can warn when the firmware is too old for the fields they read
+  (instead of silently showing blanks).
+
+- **`POST /api/reboot_gateway`** — auth-only gateway reboot (no CSRF), so the
+  stateless HA integration / Add-on can reboot the gateway. POST (not GET) so a
+  stray browser request can't trigger it; the CSRF-gated `/api/reboot` stays for
+  the web UI. Registered on both the sync and async servers.
 - **`POST /api/control_owner`** — set the charge-control owner over HTTP
   (`owner=wallbox_schedule|integration|addon|none`). Auth-only (no CSRF), like
   `/api/command`, so the Home Assistant integration / Add-on can set it without

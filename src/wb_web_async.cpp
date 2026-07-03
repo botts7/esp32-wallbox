@@ -591,6 +591,15 @@ static void _registerStaticAndPostRoutes() {
             "{\"ok\":true,\"rebooting\":true}");
         webServer.requestReboot();
     });
+    // Auth-only gateway reboot (no CSRF) so the stateless HA integration /
+    // Add-on can reboot the gateway — matches /api/control_owner. POST so a
+    // stray browser request can't trigger it.
+    _async.on("/api/reboot_gateway", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        req->send(200, "application/json",
+            "{\"ok\":true,\"rebooting\":true}");
+        webServer.requestReboot();
+    });
 
     // POST /api/pin — update the stored BLE passcode (NVS) and reboot
     // so the new value takes effect on the next pair attempt. Sync

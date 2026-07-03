@@ -6,8 +6,17 @@
 #include <WiFi.h>
 #include <ArduinoJson.h>
 
-// Topic helpers using NVS config
-static String baseTopic()      { return "wallbox"; }
+// Topic helpers using NVS config. The base is namespaced per gateway
+// (`wallbox/<haDeviceId>`) so two chargers never publish to the same
+// status/command topic — without this, a second gateway's values cycle into
+// the first's HA entities (shared `wallbox/status`). haDeviceId is the same
+// per-device id the HA discovery unique_id uses, and defaults MAC-unique.
+static String baseTopic() {
+    String id = configMgr.get().haDeviceId;
+    id.trim();
+    if (id.isEmpty()) id = "wallbox_pulsar_max";
+    return "wallbox/" + id;
+}
 static String statusTopic()    { return baseTopic() + "/status"; }
 static String realtimeTopic()  { return baseTopic() + "/realtime"; }
 static String availTopic()     { return baseTopic() + "/availability"; }

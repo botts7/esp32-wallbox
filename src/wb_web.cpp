@@ -745,7 +745,10 @@ String wb_buildStatusJson() {
     String json;
     json.reserve(1024);
     json = "{";
-    json += "\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") + "\"";
+    // Gateway firmware version — lets the Add-on / Integration warn on a
+    // firmware too old to emit the fields they read (compatibility axis).
+    json += "\"gw_fw\":\"" WB_VERSION "\"";
+    json += ",\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") + "\"";
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
     json += ",\"ssid\":\"" + WiFi.SSID() + "\"";
     json += ",\"wifi_rssi\":" + String(WiFi.RSSI());
@@ -4473,6 +4476,16 @@ static void registerRoutes() {
         if (!checkAuth()) return;
         if (!checkCsrf()) return;
         http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+        webServer.requestReboot();
+    });
+    // Auth-only gateway reboot (no CSRF) so the stateless HA integration / Add-on
+    // can reboot the gateway, matching /api/control_owner. POST (not GET) so a
+    // stray browser request can't trigger it. The CSRF-gated /api/reboot above
+    // stays for the browser web UI.
+    http.on("/api/reboot_gateway", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+        Log.println("[Web] gateway reboot requested via /api/reboot_gateway");
         webServer.requestReboot();
     });
     // /api/pin?pin=<digits>&csrf=... — local-only update of the
