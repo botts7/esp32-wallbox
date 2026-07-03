@@ -8,6 +8,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Status was blank over HTTP when MQTT wasn't connected (#20).** The bridge that
+  copies the BLE status cache into the web cache (`webServer.updateCache()`) and
+  broadcasts it over the WebSocket ran **only inside `if (mqtt.isConnected())`**.
+  So on any gateway where MQTT wasn't connected — no broker configured, blank
+  host, or an unreachable broker — `/api/charger` served `null` to **both the
+  dashboard and the HACS integration**, even though BLE polling was working
+  perfectly. The web-cache + WebSocket updates now run **unconditionally**; only
+  the MQTT publishes stay gated. Integration/Add-on-only setups (no MQTT) now get
+  live status. Also: the gateway no longer attempts MQTT at all when the broker
+  host is blank.
 - **WiFi self-recovers from a wedged stack after long uptime (#13).** A soft
   `WiFi.reconnect()` couldn't recover a locked-up WiFi stack (peter-mcc: dropped
   at ~79 h uptime and stayed down until a manual power-cycle). Added an escalating

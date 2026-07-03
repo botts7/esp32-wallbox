@@ -461,6 +461,10 @@ void WallboxMQTT::begin() {
 }
 
 void WallboxMQTT::loop() {
+    // No broker configured — don't attempt MQTT at all. Integration/Add-on-only
+    // setups leave the MQTT host blank; without this the gateway pointlessly
+    // tries to connect to "" forever and churns the publish ring. (#20)
+    if (configMgr.get().mqttHost.isEmpty()) return;
     if (!_client->connected()) {
         // Edge-trigger the disconnect event on the first loop iteration
         // where we notice we're down. _wasConnected guards against

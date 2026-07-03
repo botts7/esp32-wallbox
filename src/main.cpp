@@ -49,10 +49,16 @@ static void publishCachedStatusIfNew() {
     if (seq != 0 && seq != _lastSeqStatus && !resp.isEmpty()) {
         _lastSeqStatus = seq;
         lastStatus = resp;
-        wallboxMQTT.publishStatus(resp);
-        wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
+        // Web cache + WS must update even with MQTT down — /api/charger (the
+        // dashboard AND the HA integration read it) is fed from the web cache.
+        // Only the MQTT publishes are gated. (#20: an MQTT-less / unreachable-
+        // broker gateway was serving null status to every HTTP consumer.)
         webServer.updateCache(lastStatus, lastRealtime);
         wbws::broadcast("status", resp);
+        if (wallboxMQTT.isConnected()) {
+            wallboxMQTT.publishStatus(resp);
+            wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
+        }
     }
 }
 static void publishCachedRealtimeIfNew() {
@@ -61,9 +67,11 @@ static void publishCachedRealtimeIfNew() {
     if (seq != 0 && seq != _lastSeqRealtime && !resp.isEmpty()) {
         _lastSeqRealtime = seq;
         lastRealtime = resp;
-        wallboxMQTT.publishRealtime(resp);
-        wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
-        webServer.updateCache(lastStatus, lastRealtime);
+        webServer.updateCache(lastStatus, lastRealtime);   // always (see status drain, #20)
+        if (wallboxMQTT.isConnected()) {
+            wallboxMQTT.publishRealtime(resp);
+            wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
+        }
     }
 }
 // Charge-interval capture — fed from the STATUS cache (BAPI r_dat, which
@@ -85,8 +93,8 @@ static void publishCachedMeterIfNew() {
     wallboxBLE.copyCachedMeter(resp, seq);
     if (seq != 0 && seq != _lastSeqMeter && !resp.isEmpty()) {
         _lastSeqMeter = seq;
-        wallboxMQTT.publishResponse("meter", resp);
-        wbws::broadcast("meter", resp);
+        if (wallboxMQTT.isConnected()) wallboxMQTT.publishResponse("meter", resp);
+        wbws::broadcast("meter", resp);   // always (live WS dashboard, #20)
     }
 }
 static void publishCachedSettingsIfNew() {
@@ -94,8 +102,8 @@ static void publishCachedSettingsIfNew() {
     wallboxBLE.copyCachedSettings(resp, seq);
     if (seq != 0 && seq != _lastSeqSettings && !resp.isEmpty()) {
         _lastSeqSettings = seq;
-        wallboxMQTT.publishSettings(resp);
-        wbws::broadcast("settings", resp);
+        if (wallboxMQTT.isConnected()) wallboxMQTT.publishSettings(resp);
+        wbws::broadcast("settings", resp);   // always (live WS dashboard, #20)
     }
 }
 static void publishCachedNotificationsIfNew() {
@@ -541,6 +549,16 @@ void loop() {
     // Charge-interval capture — ungated (must run even with MQTT down).
     feedChargeLog();
 
+    // Bridge the BLE caches -> web cache + WebSocket ALWAYS (never gated on
+    // MQTT) so /api/charger (the dashboard AND the HA integration read it) and
+    // the live WS keep working when MQTT is disconnected or unused. Each drain
+    // gates only its own MQTT publish internally. (#20 — an MQTT-less /
+    // unreachable-broker gateway was serving null status to every HTTP consumer.)
+    publishCachedStatusIfNew();
+    publishCachedRealtimeIfNew();
+    publishCachedMeterIfNew();
+    publishCachedSettingsIfNew();
+
     // Phase 2 (rc16): periodic BAPI polling runs on the BLE FreeRTOS task
     // (see wb_ble.cpp _pollStatus/_pollRealtime/_pollSettings/_pollNotifications).
     // Main loop's job is to publish to MQTT/WS when the BLE task has fresh
@@ -576,10 +594,8 @@ void loop() {
                 wallboxMQTT.publishResponse(pubMet.c_str(), pubJson);
             }
         }
-        publishCachedStatusIfNew();
-        publishCachedRealtimeIfNew();
-        publishCachedMeterIfNew();
-        publishCachedSettingsIfNew();
+        // Status/realtime/meter/settings drains moved out of this MQTT gate
+        // (above) so the web cache + WS update regardless of MQTT (#20).
         publishCachedNotificationsIfNew();
         publishCachedLseIfNew();
 
