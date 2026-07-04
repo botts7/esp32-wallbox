@@ -4,6 +4,17 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.0-beta.13]
+
+### Fixed
+- **Copper SB (and any Ethernet charger): network status rendering.** In Info →
+  Tools, **WiFi Status** showed `[object Object]` when the charger returns
+  `gwsta` as an object (Copper Business firmware) — it now renders the fields.
+  And **Network Status** (`gnsta`) only showed the first interface, so
+  **Ethernet was dropped** on chargers reporting both Wi-Fi and Ethernet — it now
+  lists every interface (headed by its `type`). Pulsar chargers (numeric
+  `gwsta`, single interface) render exactly as before. *(thanks ManuMaxGit, #20)*
+
 ## [3.2.0-beta.12]
 
 ### Added
