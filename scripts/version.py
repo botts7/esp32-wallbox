@@ -27,3 +27,11 @@ version = _git_version()
 print(f"[version.py] WB_VERSION = {version}")
 
 env.Append(CPPDEFINES=[("WB_VERSION", env.StringifyMacro(version))])  # type: ignore
+
+# Board/build target = the PlatformIO env name (e.g. "esp32s3"), which is also
+# the suffix on the release binary asset (wallbox-gateway-<ver>-esp32s3.bin).
+# Surfaced in /api/status.board so the HA integration's Update entity can fetch
+# the matching asset for OTA. Single source of truth — no separate board string.
+board = env["PIOENV"]  # type: ignore
+print(f"[version.py] WB_BOARD = {board}")
+env.Append(CPPDEFINES=[("WB_BOARD", env.StringifyMacro(board))])  # type: ignore

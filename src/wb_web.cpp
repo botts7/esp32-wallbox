@@ -748,6 +748,10 @@ String wb_buildStatusJson() {
     // Gateway firmware version — lets the Add-on / Integration warn on a
     // firmware too old to emit the fields they read (compatibility axis).
     json += "\"gw_fw\":\"" WB_VERSION "\"";
+    // Build target (PlatformIO env name, e.g. "esp32s3") — matches the release
+    // binary asset suffix so the HA integration's Update entity fetches the right
+    // .bin for OTA. See scripts/version.py (WB_BOARD).
+    json += ",\"board\":\"" WB_BOARD "\"";
     json += ",\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") + "\"";
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
     json += ",\"ssid\":\"" + WiFi.SSID() + "\"";
