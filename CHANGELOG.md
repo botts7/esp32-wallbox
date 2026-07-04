@@ -4,7 +4,16 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [3.2.0-beta.12]
+
+### Added
+
+- **Build target exposed as `/api/status.board`** (e.g. `esp32s3`). The HA
+  integration's firmware Update entity reads this to fetch the release binary
+  matching the gateway's board, so one-click OTA-from-HA always installs the
+  right image. Falls back to `esp32s3` on older firmware that doesn't emit it.
+
+## [3.2.0-beta.11]
 
 ### Fixed
 
