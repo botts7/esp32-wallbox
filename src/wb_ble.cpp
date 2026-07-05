@@ -1479,7 +1479,16 @@ void WallboxBLE::_pollStatus() {
         // caching so it can never reach an MQTT topic, the WS feed, or an
         // HTTP consumer. The cache is the single source for all of them.
         JsonDocument d;
-        if (deserializeJson(d, lse) == DeserializationError::Ok) {
+        DeserializationError err = deserializeJson(d, lse);
+        // Free the raw response now: deserializeJson copies into the document's
+        // own pool, so `d` no longer references `lse`. r_lse is the largest
+        // periodic BAPI payload; releasing the raw copy before we build the
+        // serialized `clean` string means the handler holds at most two copies
+        // (parsed doc + one string) instead of three at its peak — easing
+        // heap-fragmentation pressure at long uptime (#13 crash was in this
+        // read path). Cheap insurance; not a confirmed root cause.
+        lse = String();
+        if (err == DeserializationError::Ok) {
             if (d["r"].is<JsonObject>()) d["r"].remove("user_id");
             String clean;
             serializeJson(d, clean);

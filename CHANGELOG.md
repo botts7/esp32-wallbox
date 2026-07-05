@@ -6,6 +6,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [3.2.0-beta.14]
 
+### Changed
+- **`r_lse` read holds one fewer copy of its payload (heap hardening, #13).**
+  The live-session energy read (`r_lse` — the largest periodic BAPI) freed its
+  raw response only *after* building the sanitized copy, briefly holding three
+  copies at once. It now frees the raw response right after parsing, so the
+  handler peaks at two copies — easing heap-fragmentation pressure at long
+  uptime. Defensive: a rare panic (#13) was traced to this read path on a
+  strong, stable link, pointing at heap pressure rather than a link issue; this
+  is cheap insurance, not a confirmed root cause.
+
 ### Fixed
 - **"Last Charge Burst" MQTT sensor no longer spams the HA log.** It was
   published with `state_class: measurement`, which HA rejects for the `energy`
