@@ -7,6 +7,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [3.2.0-beta.14]
 
 ### Fixed
+- **"Last Charge Burst" MQTT sensor no longer spams the HA log.** It was
+  published with `state_class: measurement`, which HA rejects for the `energy`
+  device class. It's a per-burst snapshot (not a cumulative total), so it now
+  carries no `state_class`. (The per-session green/grid energy sensors were
+  already `total_increasing`.)
 - **Release binaries no longer report `-dirty`.** The pre-gzipped web-page
   headers (`include/_gen_*_body_gz.h`) regenerate on every build, so
   `git describe --dirty` marked *every* release binary `-dirty` — which was

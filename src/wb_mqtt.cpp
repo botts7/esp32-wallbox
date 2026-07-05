@@ -1330,7 +1330,10 @@ const DiscoveryEntry kEntries[] = {
     /* 66 */ { EntityKind::SENSOR, "last_burst_energy", "Last Charge Burst", "mdi:lightning-bolt",
                TopicSlot::GATEWAY,
                "{{ ((value_json.last_burst_wh | default(0)) / 1000) | round(3) }}",
-               "kWh", "energy", "measurement", nullptr,
+               // No state_class: a per-burst snapshot, not a cumulative total.
+               // HA rejects "measurement" for the energy device_class, and
+               // total_increasing would misread a smaller next burst as a reset.
+               "kWh", "energy", nullptr, nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
     /* 67 */ { EntityKind::SENSOR, "charge_log_count", "Recorded Charge Bursts", "mdi:counter",
