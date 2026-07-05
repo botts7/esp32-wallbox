@@ -12,15 +12,42 @@ import subprocess
 Import("env")  # type: ignore  (PlatformIO injects this)
 
 
+def _is_generated(path: str) -> bool:
+    # The pre-gzipped web-page headers are regenerated on every build, so they
+    # dirty the tree even on an otherwise-clean release checkout. Ignore them
+    # when deciding "-dirty" — otherwise every release binary reports -dirty
+    # (which confused users comparing versions, e.g. #13).
+    return path.startswith("include/_gen_") and path.endswith("_body_gz.h")
+
+
+def _is_dirty() -> bool:
+    """Tree has real (non-generated) tracked changes."""
+    try:
+        out = subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except Exception:
+        return False
+    for line in out.splitlines():
+        path = line[3:].strip()
+        if path and not _is_generated(path):
+            return True
+    return False
+
+
 def _git_version() -> str:
     try:
         out = subprocess.check_output(
-            ["git", "describe", "--tags", "--always", "--dirty", "--match", "v*"],
+            ["git", "describe", "--tags", "--always", "--match", "v*"],
             stderr=subprocess.DEVNULL,
         )
-        return out.decode().strip() or "unknown"
+        version = out.decode().strip() or "unknown"
     except Exception:
         return "unknown"
+    if version != "unknown" and _is_dirty():
+        version += "-dirty"
+    return version
 
 
 version = _git_version()

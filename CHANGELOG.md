@@ -4,6 +4,17 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.0-beta.14]
+
+### Fixed
+- **Release binaries no longer report `-dirty`.** The pre-gzipped web-page
+  headers (`include/_gen_*_body_gz.h`) regenerate on every build, so
+  `git describe --dirty` marked *every* release binary `-dirty` — which was
+  confusing when comparing versions (e.g. a downloaded beta.13 logging as
+  `beta.13-dirty`). The version script now ignores those generated files when
+  deciding dirtiness, so a clean release checkout reports an exact version
+  (e.g. `v3.2.0-beta.14`). A real source edit still marks `-dirty`. *(peter-mcc, #13)*
+
 ## [3.2.0-beta.13]
 
 ### Fixed
