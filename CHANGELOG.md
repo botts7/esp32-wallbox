@@ -17,6 +17,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   is cheap insurance, not a confirmed root cause.
 
 ### Fixed
+- **OTA no longer false-rejects a valid upload as "truncated."** The size check
+  compared the firmware bytes written against the request `Content-Length` —
+  which, for a multipart upload (how HA's integration and the OTA page both
+  post), includes the boundary + `Content-Disposition` header + trailing
+  boundary (a few hundred bytes that are *not* written to flash). On longer
+  boundaries this tripped the 256-byte tolerance and aborted a **complete**
+  image, forcing USB re-flashes. The tolerance now clears multipart framing;
+  `Update.end()`'s image checksum remains the real integrity guard. Verified on
+  hardware: an upload the old check rejected now flashes cleanly. *(gambys,
+  ManuMaxGit)*
+- **Start / Stop are now idempotent.** A "start" while already charging, or a
+  "stop" while already stopped, is now **skipped** instead of re-sent. Some
+  chargers (e.g. Pulsar Plus USA firmware) treat the `w_cha` command as a
+  **toggle**, so a redundant write flipped the state the *wrong* way — setting
+  the charging switch to "on" from HomeKit/HA while it was already on turned it
+  off. The gateway now checks the current charging state and no-ops a redundant
+  command, so the switch behaves correctly on every surface (HA, HomeKit,
+  dashboard, MQTT). *(quintani, #23)*
 - **"Last Charge Burst" MQTT sensor no longer spams the HA log.** It was
   published with `state_class: measurement`, which HA rejects for the `energy`
   device class. It's a per-burst snapshot (not a cumulative total), so it now

@@ -1773,6 +1773,15 @@ bool WallboxBLE::isCharging() {
     return false;
 }
 
+bool WallboxBLE::startStopRedundant(bool wantStart) {
+    // A "start" while already charging, or a "stop" while already stopped, is a
+    // redundant w_cha write. Harmless on most chargers, but some (e.g. Pulsar
+    // Plus USA fw) treat w_cha as a TOGGLE and flip the state the wrong way on a
+    // redundant write. Skipping it makes start/stop idempotent for every surface
+    // (HA switch, HomeKit, dashboard, MQTT). (#23)
+    return wantStart ? isCharging() : !isCharging();
+}
+
 bool WallboxBLE::plugReminderActive(uint32_t leadMinutes) {
     if (leadMinutes == 0) return false;     // feature disabled
     if (carConnected()) return false;       // already plugged in — nothing to nudge

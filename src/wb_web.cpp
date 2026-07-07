@@ -1058,6 +1058,15 @@ static void handleApiCommand() {
     // Resolve action → met + par (shared by both paths).
     String action = http.arg("action");
     String value  = http.arg("value");
+    // Idempotent start/stop (#23): skip a start that's already charging, or a
+    // stop that's already stopped — some chargers treat a redundant w_cha as a
+    // TOGGLE and flip the wrong way. Report success (already in target state).
+    if ((action == "start" || action == "stop") &&
+        wallboxBLE.startStopRedundant(action == "start")) {
+        http.send(200, "application/json",
+            "{\"status\":\"ok\",\"skipped\":\"already-in-target-state\"}");
+        return;
+    }
     // Tag the commander for arbitration (advisory; see docs/control-owner.md).
     // Charge-affecting actions record who issued them (optional &owner=, "" ->
     // "manual") so controllers can detect a recent manual/other override.
@@ -4375,7 +4384,16 @@ static void handleOtaUpload() {
             size_t diff = (totalSize < expectedOtaSize)
                             ? expectedOtaSize - totalSize
                             : totalSize - expectedOtaSize;
-            if (diff > 256) {
+            // expectedOtaSize is the request Content-Length, which for a
+            // multipart/form-data upload (how HA's integration + the OTA page
+            // both post) includes the boundary + Content-Disposition header +
+            // trailing boundary — a few hundred bytes that are NOT written to
+            // flash. The old 256-byte tolerance false-tripped on longer
+            // boundaries (got=firmware, expected=firmware+framing), aborting
+            // perfectly valid uploads and forcing USB re-flashes (gambys,
+            // ManuMaxGit). Allow a generous margin for framing; a real
+            // truncation is still caught by Update.end(true)'s image checksum.
+            if (diff > 4096) {
                 Log.printf("[OTA] TRUNCATED: expected ~%u bytes, got %u — aborting\n",
                     (unsigned)expectedOtaSize, (unsigned)totalSize);
                 otaError = true;

@@ -153,6 +153,11 @@ public:
     // or r_sta.charger_status == 1). Lets Resume skip its defensive hard-Stop
     // when the charger is merely paused/waiting (error-114 fix).
     bool isCharging();
+    // startStopRedundant(): true if a start/stop command is a no-op given the
+    // current cached charging state (start while already charging, or stop while
+    // already stopped). Used to make start/stop idempotent so a redundant w_cha
+    // write can't flip the state on chargers that treat it as a toggle (#23).
+    bool startStopRedundant(bool wantStart);
     // plugReminderActive(): true when a charge is due within leadMinutes
     // and the car is NOT plugged in. 0 leadMinutes disables the feature.
     bool plugReminderActive(uint32_t leadMinutes);

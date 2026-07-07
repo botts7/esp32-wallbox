@@ -600,6 +600,12 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
             Log.printf("[CMD] Unknown charging action: %s\n", payload);
             return;
         }
+        // Idempotent start/stop (#23): skip if already in the target state, so a
+        // redundant write can't toggle a charger that treats w_cha as a toggle.
+        if (wallboxBLE.startStopRedundant(val == 1)) {
+            Log.printf("[CMD] charging %s skipped — already in target state\n", payload);
+            return;
+        }
         par = String(val);
         wallboxBLE.enqueueRequest(bapi::MET_START_STOP, par.c_str());
 

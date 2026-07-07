@@ -925,6 +925,17 @@ static void _registerBleRoutes() {
         }
         String value = req->hasParam("value")
             ? req->getParam("value")->value() : String("");
+        // Idempotent start/stop (#23): skip a start that's already charging, or
+        // a stop that's already stopped. Some chargers (e.g. Pulsar Plus USA fw)
+        // treat w_cha as a TOGGLE, so a redundant write flips the state the wrong
+        // way; skipping also avoids a needless BLE round-trip. Report success —
+        // we're already in the requested state.
+        if ((action == "start" || action == "stop") &&
+            wallboxBLE.startStopRedundant(action == "start")) {
+            req->send(200, "application/json",
+                "{\"status\":\"ok\",\"skipped\":\"already-in-target-state\"}");
+            return;
+        }
         // Tag the commander for arbitration (advisory; see docs/control-owner.md).
         // Charge-affecting actions record who issued them (optional &owner=, ""
         // -> "manual") so controllers can detect a recent manual/other override.
@@ -1308,7 +1319,17 @@ static void _registerOtaRoute() {
                     size_t diff = (_asyncOtaTotalSize < expectedOtaSize)
                         ? expectedOtaSize - _asyncOtaTotalSize
                         : _asyncOtaTotalSize - expectedOtaSize;
-                    if (diff > 256) {
+                    // expectedOtaSize is the request Content-Length. This
+                    // handler only ever receives multipart/form-data (HA's
+                    // integration + the OTA page both post that way), so the
+                    // Content-Length includes the boundary + Content-Disposition
+                    // header + trailing boundary — a few hundred bytes that are
+                    // NOT written to flash. The old 256-byte tolerance
+                    // false-tripped on longer boundaries and aborted valid
+                    // uploads, forcing USB re-flashes (gambys, ManuMaxGit). Allow
+                    // a generous margin for framing; a real truncation is still
+                    // caught by Update.end(true)'s image checksum below.
+                    if (diff > 4096) {
                         Log.printf("[OTA-async] TRUNCATED: expected ~%u "
                                    "bytes, got %u — aborting\n",
                                    (unsigned)expectedOtaSize,
