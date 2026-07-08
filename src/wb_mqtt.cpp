@@ -1059,10 +1059,6 @@ const DiscoveryEntry kEntries[] = {
 // individual mains voltage and house current for each phase.
 // Hidden automatically when no meter is present via the existing
 // meterPresent() gate.
-    { EntityKind::SENSOR, "house_current_l1", "House Current L1", "mdi:current-ac",
-      TopicSlot::METER, "{{ (value_json.r.c1 / 10) | round(1) }}",
-      "A", "current", "measurement", "diagnostic",
-      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
     { EntityKind::SENSOR, "house_current_l2", "House Current L2", "mdi:current-ac",
       TopicSlot::METER, "{{ (value_json.r.c2 / 10) | round(1) }}",
       "A", "current", "measurement", "diagnostic",
