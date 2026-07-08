@@ -4,6 +4,19 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.0-beta.15]
+
+### Fixed
+- **A failed OTA no longer leaves BLE stuck off + gives HA a real reason.** OTA
+  pauses BLE (to free resources for the flash); if the flash then failed, the
+  error path never un-paused it, so BLE sat disconnected for the whole 5-min
+  pause window — making a transient flash hiccup look like a dead gateway. The
+  OTA-error path now un-pauses BLE immediately, so it reconnects and a retry
+  works. And the gateway's generic `500 "Upload failed"` now carries the
+  **actual flash-layer reason** (`flash begin failed: …`, `flash write
+  failed: …`, bad magic byte, or truncated), which the HA integration surfaces —
+  so an OTA error is diagnosable instead of opaque.
+
 ## [3.2.0-beta.14]
 
 ### Changed

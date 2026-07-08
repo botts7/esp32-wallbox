@@ -1176,6 +1176,10 @@ static void _registerOtaRoute() {
                 return;
             }
             if (_asyncOtaError) {
+                // A failed OTA paused BLE (freeing resources for the flash) but
+                // the flash never completed — un-pause now so BLE reconnects
+                // instead of sitting down for the whole pause window.
+                wallboxBLE.pause(0);
                 if (otaRetryAfterSec > 0) {
                     AsyncWebServerResponse* res = req->beginResponse(503,
                         "application/json",
@@ -1186,7 +1190,12 @@ static void _registerOtaRoute() {
                         String(otaRetryAfterSec));
                     req->send(res);
                 } else {
-                    req->send(500, "text/plain", "Upload failed");
+                    // Surface the actual flash-layer reason (begin/write/magic/
+                    // truncation) so HA shows something actionable instead of a
+                    // bare "Upload failed".
+                    String why = otaRejectReason.length()
+                        ? otaRejectReason : String("upload failed");
+                    req->send(500, "text/plain", why);
                 }
             } else {
                 req->send(200, "text/plain", "OK");
@@ -1270,6 +1279,8 @@ static void _registerOtaRoute() {
                 if (!ok) {
                     Log.printf("[OTA-async] Begin failed: %s\n",
                         Update.errorString());
+                    otaRejectReason = String("flash begin failed: ")
+                        + Update.errorString();
                     // Restore before returning — `final` may not fire to
                     // clean up later. Idempotent if it does.
                     wb_wdt::restore();
@@ -1296,6 +1307,8 @@ static void _registerOtaRoute() {
                     if (data[0] != 0xE9) {
                         Log.println("[OTA-async] REJECTED: not ESP32 "
                                     "firmware (magic byte != 0xE9)");
+                        otaRejectReason =
+                            "not a valid ESP32 firmware image (bad magic byte)";
                         Update.abort();
                         _asyncOtaError = true;
                         return;
@@ -1305,6 +1318,8 @@ static void _registerOtaRoute() {
                 if (Update.write(data, len) != len) {
                     Log.printf("[OTA-async] Write failed: %s\n",
                         Update.errorString());
+                    otaRejectReason = String("flash write failed: ")
+                        + Update.errorString();
                     _asyncOtaError = true;
                 }
                 _asyncOtaTotalSize += len;
@@ -1334,6 +1349,8 @@ static void _registerOtaRoute() {
                                    "bytes, got %u — aborting\n",
                                    (unsigned)expectedOtaSize,
                                    (unsigned)_asyncOtaTotalSize);
+                        otaRejectReason = "upload truncated (received fewer "
+                                          "bytes than expected)";
                         _asyncOtaError = true;
                     }
                 }
