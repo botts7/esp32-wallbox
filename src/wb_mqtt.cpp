@@ -1037,10 +1037,11 @@ const DiscoveryEntry kEntries[] = {
                "A", "current", "measurement", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
-    // EM340 / Power-Boost meter detail (r_dca): per-phase power + lifetime
-    // total energy. Diagnostic-category per-phase (collapsed in HA); the
-    // total energy feeds the HA Energy dashboard. Unavailable when no meter
-    // accessory is fitted.
+    // EM340 / Power-Boost meter detail (r_dca): per-phase power, mains
+    // voltage and house current, plus lifetime total energy. Diagnostic-
+    // category per-phase (collapsed in HA); the total energy feeds the HA
+    // Energy dashboard. Unavailable (auto-hidden via the meterPresent() gate)
+    // when no meter accessory is fitted.
     { EntityKind::SENSOR, "grid_power_l1", "Grid Power L1", "mdi:flash",
       TopicSlot::METER, "{{ value_json.r.p1 }}",
       "W", "power", "measurement", "diagnostic",
@@ -1061,10 +1062,6 @@ const DiscoveryEntry kEntries[] = {
       TopicSlot::METER, "{{ value_json.r.v3 }}",
       "V", "voltage", "measurement", "diagnostic",
       TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
-// EM340 / Power-Boost per-phase diagnostics (r_dca): expose
-// individual mains voltage and house current for each phase.
-// Hidden automatically when no meter is present via the existing
-// meterPresent() gate.
     { EntityKind::SENSOR, "house_current_l2", "House Current L2", "mdi:current-ac",
       TopicSlot::METER, "{{ (value_json.r.c2 / 10) | round(1) }}",
       "A", "current", "measurement", "diagnostic",
