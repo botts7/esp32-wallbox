@@ -4,7 +4,18 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [3.2.0-beta.15]
+## [3.2.0-rc.1]
+
+Release candidate for **3.2.0**. Rolls up the 3.2.0-beta line; if this soaks
+clean it promotes to the 3.2.0 stable release.
+
+### Added
+- **Per-phase EM340 / Power-Boost meter diagnostics.** New MQTT sensors for
+  per-phase mains voltage (`Mains Voltage L2/L3`) and house current
+  (`House Current L2/L3`), complementing the existing per-phase Grid Power
+  L1/L2/L3 — so a 3-phase meter now exposes full per-phase voltage, current and
+  power. Diagnostic-category, auto-hidden when no meter is fitted; L2/L3 read 0
+  on single-phase. (Community contribution — thanks @hannesjanno, #22.)
 
 ### Fixed
 - **A failed OTA no longer leaves BLE stuck off + gives HA a real reason.** OTA
