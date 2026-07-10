@@ -18,7 +18,10 @@
 // manual / unscheduled charging exactly as well as scheduled.
 //
 // Intervals are mirrored to NVS (like wb_diag) so reboots don't wipe history.
-// Write churn is bounded — one NVS write per burst close, nothing per sample.
+// The in-progress (open) burst is also persisted periodically so a reboot / OTA
+// mid-charge recovers it on the next boot instead of silently dropping the whole
+// charge. Write churn is bounded — per burst: one write on open, one per
+// ~PERSIST_INTERVAL while charging, one on close. Nothing per realtime sample.
 // Forward-only: it cannot reconstruct sessions that finished before this ran.
 
 namespace wb_charge_log {
@@ -37,6 +40,11 @@ void begin();
 // to call on every realtime poll. Must be called from a single task (the main
 // task's realtime drain) — it owns the open-burst state.
 void onRealtime(const String& rdatJson);
+
+// Periodic housekeeping — call from the main loop (self-throttles). Closes an
+// open burst whose r_dat feed has stalled (STALE_TIMEOUT) so it isn't lost, and
+// re-persists the open burst for reboot recovery. `now` = epoch seconds.
+void tick(uint32_t now);
 
 // Serialized JSON for /api/charge_log:
 //   {"charging_now":bool,"open_since":epoch|0,"count":n,

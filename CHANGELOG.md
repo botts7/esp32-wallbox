@@ -6,6 +6,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [3.2.0-rc.2]
 
+### Fixed
+- **Charge-log no longer loses a charge that's interrupted mid-burst.** The
+  in-progress burst lived only in RAM, so a reboot / OTA mid-charge — or an
+  r_dat feed stall that never delivered the "cp dropped" close-sample — silently
+  dropped the whole charge (it's only written on close). The open burst is now
+  persisted to NVS periodically and **recovered on the next boot**, and a stalled
+  open burst is **auto-closed on a timeout** so it can't sit open forever or be
+  lost. (Root-caused from a gateway whose log went silent across a reboot-heavy
+  OTA window; #166.)
+
 ### Added
 - **Gateway die temperature** (`chip_temp`) — the ESP32-S3 internal temperature
   is now in `/api/status` and exposed as an MQTT diagnostic sensor ("Gateway

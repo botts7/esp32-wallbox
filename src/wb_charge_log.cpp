@@ -54,6 +54,35 @@ static void store(const JsonDocument& doc) {
     p.end();
 }
 
+// ---- open-burst persistence (survive a reboot / OTA mid-charge) --------
+// The open burst lives only in RAM, so a reboot mid-charge (or an r_dat feed
+// stall that never delivers the cp-drop close-sample) would silently drop the
+// whole charge. We persist it periodically and recover it on the next boot.
+static const char* NVS_OPEN = "openb";
+static const uint32_t PERSIST_INTERVAL_S = 300;  // re-persist at most this often (flash wear)
+static const uint32_t STALE_TIMEOUT_S    = 600;  // no fresh cp sample this long -> close it
+static uint32_t _lastPersist = 0;
+
+static void saveOpenState() {
+    Preferences p;
+    if (!p.begin(NVS_NS, false)) return;
+    if (_open) {
+        JsonDocument d;
+        d["u"]  = _curUsid;
+        d["st"] = _curStart;
+        d["ls"] = _lastSample;
+        d["wh"] = (uint32_t)(_curWh + 0.5);
+        d["e0"] = _en0;  d["el"] = _enLast;
+        d["g0"] = _gen0; d["gl"] = _genLast;
+        String s;
+        serializeJson(d, s);
+        p.putString(NVS_OPEN, s);
+    } else {
+        p.remove(NVS_OPEN);
+    }
+    p.end();
+}
+
 static void appendInterval(uint32_t usid, uint32_t start, uint32_t stop,
                            uint32_t wh, uint32_t gwh) {
     JsonDocument doc;
@@ -82,6 +111,42 @@ void begin() {
     if (arr.size() > 0) _lastBurstWh = (uint32_t)(arr[arr.size() - 1]["wh"] | 0);
     Log.printf("[chargelog] loaded %u stored charge intervals (last %uWh)\n",
                (unsigned)_count, (unsigned)_lastBurstWh);
+
+    // Recover a burst that a reboot / OTA interrupted mid-charge. It was
+    // persisted periodically (saveOpenState); append what we captured as a
+    // completed interval so the charge isn't lost, then clear the pending state.
+    Preferences po;
+    if (po.begin(NVS_NS, true)) {
+        String s = po.getString(NVS_OPEN, "");
+        po.end();
+        if (s.length()) {
+            JsonDocument d;
+            if (deserializeJson(d, s) == DeserializationError::Ok
+                    && d["st"].as<uint32_t>() > EPOCH_VALID_MIN) {
+                uint32_t st  = d["st"].as<uint32_t>();
+                uint32_t stp = d["ls"].as<uint32_t>();      // last good sample = stop
+                if (stp < st) stp = st;
+                uint32_t wh  = d["wh"].as<uint32_t>();
+                uint32_t den  = d["el"].as<uint32_t>() > d["e0"].as<uint32_t>()
+                                ? d["el"].as<uint32_t>() - d["e0"].as<uint32_t>() : 0;
+                uint32_t dgen = d["gl"].as<uint32_t>() > d["g0"].as<uint32_t>()
+                                ? d["gl"].as<uint32_t>() - d["g0"].as<uint32_t>() : 0;
+                double frac = (den > 0) ? ((double)dgen / (double)den) : 0.0;
+                if (frac > 1.0) frac = 1.0;
+                if (wh > 0) {
+                    appendInterval(d["u"].as<uint32_t>(), st, stp, wh,
+                                   (uint32_t)(wh * frac + 0.5));
+                    _lastBurstWh = wh;
+                    Log.printf("[chargelog] recovered interrupted burst: usid=%u "
+                               "%us..%us %uWh\n", (unsigned)d["u"].as<uint32_t>(),
+                               (unsigned)st, (unsigned)stp, (unsigned)wh);
+                }
+            }
+            // Clear it (recovered or invalid) so it can't re-append next boot.
+            Preferences pw;
+            if (pw.begin(NVS_NS, false)) { pw.remove(NVS_OPEN); pw.end(); }
+        }
+    }
 }
 
 static void closeBurst(uint32_t stop) {
@@ -104,6 +169,7 @@ static void closeBurst(uint32_t stop) {
     _chargingNow = false;
     _openSince = 0;
     _curWh = 0.0;
+    saveOpenState();   // burst closed → clear the persisted pending state
 }
 
 void onRealtime(const String& rdatJson) {
@@ -139,6 +205,8 @@ void onRealtime(const String& rdatJson) {
             _gen0 = _genLast = gen;
             _chargingNow = true;
             _openSince   = now;
+            _lastPersist = now;
+            saveOpenState();   // persist immediately so an early reboot recovers it
             return;  // first sample of the burst — no energy yet
         }
         _enLast = en; _genLast = gen;
@@ -150,6 +218,25 @@ void onRealtime(const String& rdatJson) {
         _lastSample = now;
     } else if (_open) {
         closeBurst(now);
+    }
+}
+
+// Called periodically (independent of the seq-gated realtime feed) so an open
+// burst is never lost when r_dat stops flowing, and is re-persisted for reboot
+// recovery. Safe to call every loop — it self-throttles.
+void tick(uint32_t now) {
+    if (!_open || now < EPOCH_VALID_MIN) return;
+    // r_dat feed stalled (BLE hiccup) — the cp-drop close-sample will never
+    // arrive. Close at the last good sample so the charge is captured, not lost.
+    if (_lastSample && now > _lastSample + STALE_TIMEOUT_S) {
+        Log.printf("[chargelog] stale open burst — no cp sample for %us, closing\n",
+                   (unsigned)(now - _lastSample));
+        closeBurst(_lastSample);
+        return;
+    }
+    if (now > _lastPersist + PERSIST_INTERVAL_S) {
+        _lastPersist = now;
+        saveOpenState();
     }
 }
 

@@ -87,6 +87,10 @@ static void feedChargeLog() {
         _lastChargeLogSeq = seq;
         wb_charge_log::onRealtime(st);
     }
+    // Housekeeping runs every loop (self-throttled) even when the seq is frozen
+    // (r_dat feed stalled) — that's exactly when a stuck-open burst must be
+    // closed so a mid-charge BLE stall / reboot can't silently drop the charge.
+    wb_charge_log::tick((uint32_t)time(nullptr));
 }
 static void publishCachedMeterIfNew() {
     String resp; uint32_t seq = 0;
