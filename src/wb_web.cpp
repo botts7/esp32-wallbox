@@ -1096,7 +1096,14 @@ static void handleApiCommand() {
     }
     else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
     else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
-    else if (action == "current") { met = bapi::MET_SET_CURRENT; par = value; }
+    else if (action == "current") {
+        // Clamp to 6–32 A (mirror the MQTT/integration bound; web forwarded raw).
+        met = bapi::MET_SET_CURRENT;
+        int amps = value.toInt();
+        if (amps < 6)  amps = 6;
+        if (amps > 32) amps = 32;
+        par = String(amps);
+    }
     else if (action == "reboot")  { met = bapi::MET_REBOOT;      par = "null"; }
     else if (action == "bapi") {
         static String s_met;  // outlives this scope via c_str() below

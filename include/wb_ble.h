@@ -376,6 +376,16 @@ private:
     // in flight at a time (serialised by _cmdMutex). The task itself drives
     // loop() ~50 Hz.
     SemaphoreHandle_t _cmdMutex = nullptr;
+
+    // Guards the response parser + buffer (_parser / _lastResponse /
+    // _responseReady) across tasks. The NimBLE notify callback runs on the host
+    // task (core 0) and feeds the parser; _sendCommandDirect runs on the BLE
+    // task (core 1) and reset()s it / moves _lastResponse out. _cmdMutex only
+    // serialises callers — it does NOT cover the callback, so without this a
+    // late/duplicate notification racing the next command's reset corrupts the
+    // String buffer → panic (the marginal-link crash class). Distinct lock so a
+    // brief callback can't block a whole BAPI round-trip.
+    SemaphoreHandle_t _parserMutex = nullptr;
     TaskHandle_t      _taskHandle = nullptr;
     static void _taskFn(void* arg);
 

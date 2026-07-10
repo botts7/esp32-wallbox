@@ -968,7 +968,16 @@ static void _registerBleRoutes() {
         }
         else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
         else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
-        else if (action == "current") { met = bapi::MET_SET_CURRENT; par = value; }
+        else if (action == "current") {
+            // Clamp to the 6–32 A envelope (the charger can misbehave on an
+            // out-of-range setpoint). MQTT + integration already clamp; the web
+            // paths forwarded `value` raw. toInt()==0 on garbage -> safe 6 A floor.
+            met = bapi::MET_SET_CURRENT;
+            int amps = value.toInt();
+            if (amps < 6)  amps = 6;
+            if (amps > 32) amps = 32;
+            par = String(amps);
+        }
         else if (action == "reboot")  { met = bapi::MET_REBOOT;      par = "null"; }
         else if (action == "bapi") {
             // Use a per-request String for the met arg so its c_str()

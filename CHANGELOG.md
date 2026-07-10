@@ -4,6 +4,61 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.0-rc.4]
+
+### Fixed
+- **Charge-log stopped recording since late June — two root causes, both fixed.**
+  1. *Detection*: capture opened a burst only when `cp` (charge power) exceeded
+     0.10 kW, so Eco-Smart **solar** sessions (where `cp` reads ~0 while energy
+     flows) recorded nothing. Detection now also fires on metered session energy
+     (`r_dat.en`) rising, and burst energy is the metered Δen when available
+     (falls back to the cp integral for chargers without `en`, e.g. Zentri).
+  2. *Persistence*: `store()` silently ignored NVS write failures, and growing
+     the interval blob in place fails on a near-full NVS partition — so closed
+     bursts were logged but never saved (the ring sat stuck at a fixed count).
+     Now frees the old value before writing (so the write only needs room for the
+     new blob) and logs any write failure. **Verified on hardware: bursts now
+     persist.**
+- **Charge-log green (solar) attribution was always 0 on MAX/Plus.** It derived
+  the green fraction from `r_dat.gen`, which is the sticky schedule/eco *override
+  flag* on those models, not green energy. Green Wh now comes from the
+  authoritative per-session `r_lse.green_energy`. (Fixes solar being costed at the
+  grid rate.)
+- **BLE response race → panic on marginal links.** The NimBLE notify callback
+  (host task) mutated the response parser/buffer with no lock against
+  `_sendCommandDirect` (BLE task) resetting it — a late/duplicate notification
+  racing the next command's `reset()`/`move()` corrupted the String buffer. A new
+  `_parserMutex` serialises the two. (The recurring `task-watchdog`/`panic`
+  reboots.)
+- **MQTT `resume_schedule` could fault a *paused* charger (error 114).** It sent a
+  hard Stop unconditionally; a Stop while merely paused/waiting can fault the
+  charger. Now gated on `isCharging()`, matching the web/async paths.
+- **`den` (V2H discharge) energy was scaled ÷1000 over MQTT vs ÷100 in the HACS
+  integration — a 10× disagreement.** Aligned to the `r_dat.en` sibling
+  convention (÷100). (Quasar-only; unverified on hardware.)
+- **Removed the bogus MQTT "Green Energy" sensor** (published `r_dat.gen/100` —
+  the override flag as kWh). The authoritative per-session green sensor (r_lse)
+  remains; the stale entity is cleaned up on connect.
+- **`car_connected` mis-read on Zentri/original Pulsar.** It applied the MAX 0–18
+  status-code set to Zentri's different enum; now uses the Zentri set when
+  `_isZentri`.
+- **Zentri keepalive reconnect loop.** Keepalive picked `ping` vs `r_dat` from
+  `isPlus()`, which is false for a runtime-detected Zentri — so a Zentri that
+  lacks `ping` reconnected every 30 s. Now gated on `isPlus() || _isZentri`.
+- **`/api/command?action=current` was unclamped on the web paths.** Now clamped to
+  6–32 A (matching MQTT/integration).
+
+### Changed
+- Integration steady-state polling shaped to protect the gateway BLE pipeline
+  (see the HACS integration changelog): live reads every cycle, rarely-changing
+  config reads on a slow cadence — removing a ~9-concurrent-BAPI burst every 10 s
+  that contributed to the watchdog reboots.
+
+### Added
+- `docs/CHARGER_QUIRKS.md` — consolidated per-model quirk/diff catalog (MAX / Plus
+  / Copper / Quasar / Zentri) covering protocol, field scales/enums, green source,
+  and control commands, plus a ranked list of known per-model issues.
+
 ## [3.2.0-rc.3]
 
 ### Fixed

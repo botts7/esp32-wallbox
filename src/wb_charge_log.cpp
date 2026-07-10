@@ -17,14 +17,23 @@ static const uint32_t EPOCH_VALID_MIN = 1700000000;  // ~2023-11
 static bool     _open        = false;
 static uint32_t _curUsid     = 0;
 static uint32_t _curStart    = 0;   // burst start epoch (UTC)
-static uint32_t _lastSample  = 0;   // epoch of the previous cp>0 sample
-static double   _curWh       = 0.0; // power-integrated Wh so far this burst
-// Green split: r_dat's en/gen are cumulative SESSION energy. Baselines at burst
-// open + latest each sample give the burst's Δen/Δgen; the green FRACTION
-// (Δgen/Δen) is scale-independent, so gwh = wh * fraction stays robust even if
-// en/gen use a different unit scale than the power integral.
-static uint32_t _en0  = 0, _gen0 = 0;   // cumulative en/gen at burst open
-static uint32_t _enLast = 0, _genLast = 0;  // latest cumulative en/gen
+static uint32_t _lastSample  = 0;   // epoch of the previous charging sample
+static double   _curWh       = 0.0; // cp power-integral Wh (fallback energy)
+static bool     _haveEn      = false; // this burst carries metered r_dat.en
+static uint32_t _en0         = 0;   // r_dat.en (centi-kWh) at burst open
+static uint32_t _enLast      = 0;   // latest r_dat.en
+static double   _grn0        = 0.0; // r_lse session green (kWh) at burst open
+
+// en-rising detector — remembers the last en per session so a cp≈0 burst
+// (Eco-Smart solar, where cp reads ~0 while energy is delivered) is still
+// caught when metered energy climbs. Kept across open/closed state.
+static uint32_t _enTrackUsid = 0;
+static uint32_t _enTrackVal  = 0;
+
+// Latest authoritative per-session GREEN energy (kWh) from r_lse, fed by
+// onLseGreen(). This — not r_dat.gen (the sticky override flag) — is the source
+// for a burst's green (solar) Wh.
+static volatile double _lseGreenKwh = 0.0;
 
 // ---- live summary (best-effort cross-task reads) ----
 static volatile bool     _chargingNow = false;
@@ -47,11 +56,23 @@ static void load(JsonDocument& doc) {
 
 static void store(const JsonDocument& doc) {
     Preferences p;
-    if (!p.begin(NVS_NS, false)) return;
+    if (!p.begin(NVS_NS, false)) {
+        Log.println("[chargelog] NVS begin(rw) failed — interval NOT persisted");
+        return;
+    }
     String s;
     serializeJson(doc, s);
-    p.putString(NVS_KEY, s);
+    // Free the old value BEFORE writing the new one. Growing a key in place needs
+    // room for old+new simultaneously; on a near-full NVS partition that write
+    // silently fails and the ring gets stranded at its last-fitting size (this is
+    // why the log sat at a fixed count while bursts kept "closing"). remove()
+    // first frees the space so the write only needs room for the new blob.
+    p.remove(NVS_KEY);
+    size_t wrote = p.putString(NVS_KEY, s);
     p.end();
+    if (wrote == 0 && s.length() > 0)
+        Log.printf("[chargelog] NVS putString failed (%u bytes, partition full?) "
+                   "— interval NOT persisted\n", (unsigned)s.length());
 }
 
 // ---- open-burst persistence (survive a reboot / OTA mid-charge) --------
@@ -63,17 +84,35 @@ static const uint32_t PERSIST_INTERVAL_S = 300;  // re-persist at most this ofte
 static const uint32_t STALE_TIMEOUT_S    = 600;  // no fresh cp sample this long -> close it
 static uint32_t _lastPersist = 0;
 
+// Energy (Wh) captured so far this burst: prefer the METERED delta from
+// r_dat.en (centi-kWh → ×10 Wh) which is the charger's own accounting; fall back
+// to the cp time-integral for models that don't report en (Zentri — synthesized
+// cp only). Both are exact-enough; the metered path also survives cp≈0 solar.
+static uint32_t _burstWh() {
+    if (_haveEn && _enLast > _en0) return (uint32_t)((_enLast - _en0) * 10);
+    return (uint32_t)(_curWh + 0.5);
+}
+
+// Green (solar) Wh this burst from the authoritative r_lse session-green delta.
+// Clamped to [0, wh]. 0 when r_lse was never fed (e.g. Zentri) → treated as grid.
+static uint32_t _burstGreenWh(uint32_t wh) {
+    double dg = (double)_lseGreenKwh - _grn0;
+    if (dg <= 0.0) return 0;
+    uint32_t g = (uint32_t)(dg * 1000.0 + 0.5);
+    return (g > wh) ? wh : g;
+}
+
 static void saveOpenState() {
     Preferences p;
     if (!p.begin(NVS_NS, false)) return;
     if (_open) {
+        uint32_t wh = _burstWh();
         JsonDocument d;
-        d["u"]  = _curUsid;
-        d["st"] = _curStart;
-        d["ls"] = _lastSample;
-        d["wh"] = (uint32_t)(_curWh + 0.5);
-        d["e0"] = _en0;  d["el"] = _enLast;
-        d["g0"] = _gen0; d["gl"] = _genLast;
+        d["u"]   = _curUsid;
+        d["st"]  = _curStart;
+        d["ls"]  = _lastSample;
+        d["wh"]  = wh;                    // metered-or-integrated Wh so far
+        d["gwh"] = _burstGreenWh(wh);     // authoritative green Wh so far
         String s;
         serializeJson(d, s);
         p.putString(NVS_OPEN, s);
@@ -126,13 +165,9 @@ void begin() {
                 uint32_t st  = d["st"].as<uint32_t>();
                 uint32_t stp = d["ls"].as<uint32_t>();      // last good sample = stop
                 if (stp < st) stp = st;
-                uint32_t wh  = d["wh"].as<uint32_t>();
-                uint32_t den  = d["el"].as<uint32_t>() > d["e0"].as<uint32_t>()
-                                ? d["el"].as<uint32_t>() - d["e0"].as<uint32_t>() : 0;
-                uint32_t dgen = d["gl"].as<uint32_t>() > d["g0"].as<uint32_t>()
-                                ? d["gl"].as<uint32_t>() - d["g0"].as<uint32_t>() : 0;
-                double frac = (den > 0) ? ((double)dgen / (double)den) : 0.0;
-                if (frac > 1.0) frac = 1.0;
+                uint32_t wh  = d["wh"].as<uint32_t>();       // persisted computed Wh
+                uint32_t gwh = d["gwh"].as<uint32_t>();      // persisted green Wh
+                if (gwh > wh) gwh = wh;
                 uint32_t u = d["u"].as<uint32_t>();
                 // Idempotent: closeBurst() appends the interval, THEN clears this
                 // openb key (two NVS writes). If a crash landed between them, the
@@ -142,7 +177,7 @@ void begin() {
                     && (uint32_t)(arr[arr.size() - 1]["usid"] | 0) == u
                     && (uint32_t)(arr[arr.size() - 1]["start"] | 0) == st;
                 if (wh > 0 && !already) {
-                    appendInterval(u, st, stp, wh, (uint32_t)(wh * frac + 0.5));
+                    appendInterval(u, st, stp, wh, gwh);
                     _lastBurstWh = wh;
                     Log.printf("[chargelog] recovered interrupted burst: usid=%u "
                                "%us..%us %uWh\n", (unsigned)u,
@@ -160,13 +195,8 @@ static void closeBurst(uint32_t stop) {
     if (!_open) return;
     // Guard against a clock jump making stop < start.
     if (stop < _curStart) stop = _curStart;
-    uint32_t wh = (uint32_t)(_curWh + 0.5);
-    // Green Wh = power-integrated wh scaled by the burst's green fraction.
-    uint32_t den  = (_enLast  > _en0)  ? (_enLast  - _en0)  : 0;
-    uint32_t dgen = (_genLast > _gen0) ? (_genLast - _gen0) : 0;
-    double frac = (den > 0) ? ((double)dgen / (double)den) : 0.0;
-    if (frac > 1.0) frac = 1.0;
-    uint32_t gwh = (uint32_t)(wh * frac + 0.5);
+    uint32_t wh  = _burstWh();
+    uint32_t gwh = _burstGreenWh(wh);
     appendInterval(_curUsid, _curStart, stop, wh, gwh);
     _lastBurstWh = wh;
     Log.printf("[chargelog] burst closed: usid=%u %us..%us %uWh (%uWh green)\n",
@@ -179,6 +209,12 @@ static void closeBurst(uint32_t stop) {
     saveOpenState();   // burst closed → clear the persisted pending state
 }
 
+void onLseGreen(double sessionGreenKwh) {
+    // r_lse's cumulative session green energy (kWh). Non-negative guard only —
+    // baselining/deltaing happens against the open burst in _burstGreenWh().
+    if (sessionGreenKwh >= 0.0) _lseGreenKwh = sessionGreenKwh;
+}
+
 void onRealtime(const String& rdatJson) {
     if (rdatJson.isEmpty()) return;
 
@@ -186,16 +222,29 @@ void onRealtime(const String& rdatJson) {
     if (deserializeJson(doc, rdatJson) != DeserializationError::Ok) return;
     JsonObjectConst r = doc["r"];
     if (r.isNull()) return;
-    if (r["cp"].isNull()) return;                       // no power field
 
-    const float    cp   = r["cp"].as<float>();          // charge power, kW (coerces num/str)
+    const bool hasCp = !r["cp"].isNull();
+    const bool hasEn = !r["en"].isNull();
+    if (!hasCp && !hasEn) return;                       // nothing usable this sample
+
+    const float    cp   = hasCp ? r["cp"].as<float>() : 0.0f;  // charge power, kW
     const uint32_t usid = r["usid"].as<uint32_t>();     // 0 if absent
-    const uint32_t en   = r["en"].as<uint32_t>();       // cumulative session energy
-    const uint32_t gen  = r["gen"].as<uint32_t>();      // cumulative session green energy
+    const uint32_t en   = hasEn ? r["en"].as<uint32_t>() : 0;  // session energy, centi-kWh
     const uint32_t now  = (uint32_t)time(nullptr);
     if (now < EPOCH_VALID_MIN) return;                  // clock not synced yet
 
-    const bool charging = (cp > CP_ON_KW);
+    // en-rising detection: metered session energy climbed since the last sample
+    // of the SAME session. Catches Eco-Smart solar where cp reads ~0. One-sample
+    // latency; the cp>CP_ON path catches the normal case immediately. The
+    // per-session baseline reset stops a usid change from looking like a jump.
+    bool enRising = false;
+    if (hasEn) {
+        if (usid == _enTrackUsid && en > _enTrackVal) enRising = true;
+        _enTrackUsid = usid;
+        _enTrackVal  = en;
+    }
+
+    const bool charging = (cp > CP_ON_KW) || enRising;
 
     if (charging) {
         // A new session id while a burst is open means the old session ended
@@ -208,16 +257,17 @@ void onRealtime(const String& rdatJson) {
             _curStart    = now;
             _lastSample  = now;
             _curWh       = 0.0;
+            _haveEn      = hasEn;
             _en0 = _enLast = en;
-            _gen0 = _genLast = gen;
+            _grn0        = _lseGreenKwh;   // baseline authoritative green at open
             _chargingNow = true;
             _openSince   = now;
             _lastPersist = now;
             saveOpenState();   // persist immediately so an early reboot recovers it
             return;  // first sample of the burst — no energy yet
         }
-        _enLast = en; _genLast = gen;
-        // Integrate energy: Wh += kW * seconds / 3.6  (1 Wh = 3.6 kJ).
+        if (hasEn) { _haveEn = true; _enLast = en; }
+        // cp time-integral (fallback energy for models without en): Wh += kW*s/3.6.
         uint32_t dt = (now > _lastSample) ? (now - _lastSample) : 0;
         if (dt > 0 && dt < 3600) {  // ignore absurd gaps (reboot/clock jump)
             _curWh += (double)cp * (double)dt / 3.6;

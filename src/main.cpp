@@ -80,7 +80,21 @@ static void publishCachedRealtimeIfNew() {
 // when the broker is disconnected (the publishCached*IfNew drains only run
 // inside `if (mqtt.isConnected())`).
 static uint32_t _lastChargeLogSeq = 0;
+static uint32_t _lastChargeLogLseSeq = 0;
 static void feedChargeLog() {
+    // Feed authoritative per-session GREEN energy (r_lse) BEFORE the status
+    // sample, so a burst opening on this tick baselines against fresh green.
+    // r_dat.gen is the schedule/eco override flag, not green energy.
+    String lse; uint32_t lseSeq = 0;
+    wallboxBLE.copyCachedLse(lse, lseSeq);
+    if (lseSeq != 0 && lseSeq != _lastChargeLogLseSeq && !lse.isEmpty()) {
+        _lastChargeLogLseSeq = lseSeq;
+        JsonDocument ld;
+        if (deserializeJson(ld, lse) == DeserializationError::Ok) {
+            JsonVariantConst g = ld["r"]["green_energy"];
+            if (!g.isNull()) wb_charge_log::onLseGreen(g.as<double>());
+        }
+    }
     String st; uint32_t seq = 0;
     wallboxBLE.copyCachedStatus(st, seq);
     if (seq != 0 && seq != _lastChargeLogSeq && !st.isEmpty()) {

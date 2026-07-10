@@ -11,11 +11,17 @@
 // charged from 7pm. That makes every time-of-use cost/heatmap wrong.
 //
 // This module recovers the real windows by watching the live charge power
-// (BAPI r_dat field `cp`, kW) on each realtime sample and recording every
-// charging *burst* (a contiguous cp>0 period) as an interval. A session can
-// have many intervals (pause/resume, dynamic load, solar throttle); a night
-// with no charging has none. It is pure observation of cp, so it captures
+// (BAPI r_dat field `cp`, kW) AND the metered session energy (r_dat.en) on each
+// realtime sample, recording every charging *burst* (a contiguous charging
+// period) as an interval. A session can have many intervals (pause/resume,
+// dynamic load, solar throttle); a night with no charging has none. It captures
 // manual / unscheduled charging exactly as well as scheduled.
+//
+// Detection is cp>CP_ON OR en-rising: some chargers/modes report cp≈0 while still
+// delivering energy (e.g. Eco-Smart *solar* on a Pulsar MAX), so gating on cp
+// alone silently dropped those bursts. en (centi-kWh) rising within a session is
+// the model-safe fallback. Energy per burst is the metered Δen when available,
+// else the cp time-integral (Zentri, which has no en — only a synthesized cp).
 //
 // Intervals are mirrored to NVS (like wb_diag) so reboots don't wipe history.
 // The in-progress (open) burst is also persisted periodically so a reboot / OTA
@@ -40,6 +46,13 @@ void begin();
 // to call on every realtime poll. Must be called from a single task (the main
 // task's realtime drain) — it owns the open-burst state.
 void onRealtime(const String& rdatJson);
+
+// Feed the latest r_lse sample's cumulative session GREEN energy (kWh, already
+// scaled). Used to attribute the open burst's green (solar) Wh from the
+// authoritative per-session figure — r_dat.gen is the schedule/eco override flag
+// on MAX/Plus, NOT green energy. No-op if never fed (green falls back to 0, i.e.
+// the burst is treated as all-grid). Call from the same task as onRealtime.
+void onLseGreen(double sessionGreenKwh);
 
 // Periodic housekeeping — call from the main loop (self-throttles). Closes an
 // open burst whose r_dat feed has stalled (STALE_TIMEOUT) so it isn't lost, and

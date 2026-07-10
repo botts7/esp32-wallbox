@@ -73,7 +73,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 77;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power L1/L2/L3 +meter total energy (EM340) +chip_temp (#162)
+static const size_t kDiscoveryCount = 76;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power L1/L2/L3 +meter total energy (EM340) +chip_temp (#162) -green_energy (v3.2.0: r_dat.gen is the override flag, not energy)
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -610,12 +610,16 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         wallboxBLE.enqueueRequest(bapi::MET_START_STOP, par.c_str());
 
     } else if (sub == "resume_schedule") {
-        // Clears the schedule/eco-smart manual-override flag — what
-        // the Wallbox app's Resume button does. Defensive prefix:
-        // send Stop first because s_cmode mode=0 rejects (subcode 6)
-        // when actively charging. Stop is a no-op when not charging.
-        const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
-        wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
+        // Clears the schedule/eco-smart manual-override flag — what the Wallbox
+        // app's Resume button does. Defensive prefix: send Stop first because
+        // s_cmode mode=0 rejects (subcode 6) when actively charging. But a hard
+        // Stop (par=2 on the MAX) while merely paused/waiting is NOT a no-op — it
+        // can fault the charger (error 114). So gate the Stop on isCharging(),
+        // matching the web/async paths (was unconditional — bug).
+        if (wallboxBLE.isCharging()) {
+            const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
+            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
+        }
         wallboxBLE.enqueueRequest("s_cmode", "{\"mode\":0}");
 
     } else if (sub == "current") {
@@ -752,15 +756,23 @@ void WallboxMQTT::publishCarConnected(const String& statusJson, const String& re
         if (deserializeJson(rd, realtimeJson) == DeserializationError::Ok)
             cs = rd["r"]["charger_status"] | -1;
     }
-    // Local r_dat.st codes where a car is physically plugged in.
-    bool connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
-                      st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
-    // Locked (st==6) carries no plug info in the local BLE protocol — Wallbox
-    // folds locked/no-car and locked/car-connected into the same code 6.
-    // STOPGAP: observed r_sta.charger_status == 19 when locked WITH a car.
-    // This is an unverified, firmware-specific heuristic pending a
-    // locked-with-NO-car measurement to confirm 19 is plug-specific.
-    if (st == 6 && cs == 19) connected = true;
+    bool connected;
+    if (wallboxBLE.isZentri()) {
+        // Zentri/original Pulsar uses a DIFFERENT st enum (0=ready/no-car,
+        // 1=charging, 2=connected, 3=waiting, 4=ramp) — applying the MAX 0-18
+        // set here mis-reported plug state. Anything >= 1 means a car is present.
+        connected = (st >= 1 && st <= 4);
+    } else {
+        // Local r_dat.st codes where a car is physically plugged in (MAX/Plus).
+        connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
+                     st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
+        // Locked (st==6) carries no plug info in the local BLE protocol — Wallbox
+        // folds locked/no-car and locked/car-connected into the same code 6.
+        // STOPGAP: observed r_sta.charger_status == 19 when locked WITH a car.
+        // This is an unverified, firmware-specific heuristic pending a
+        // locked-with-NO-car measurement to confirm 19 is plug-specific.
+        if (st == 6 && cs == 19) connected = true;
+    }
     String topic = baseTopic() + "/car_connected";
     _client->publish(topic.c_str(), connected ? "ON" : "OFF", true);  // retain
 }
@@ -828,6 +840,12 @@ void WallboxMQTT::sendDiscovery() {
         // sensor is the canonical user-facing value).
         String stale = cfg.haDiscoveryPrefix + "/sensor/" + cfg.haDeviceId + "/charger_status_code/config";
         _client->publish(stale.c_str(), "", true);
+        // v3.2.0: "Green Energy" (was value_json.r.gen/100) removed — r_dat.gen is
+        // the sticky schedule/eco override FLAG on MAX/Plus, not accumulated green
+        // energy (reads 0 during a real Eco-Smart solar session). The authoritative
+        // per-session green is the r_lse "Green Energy (Session)" sensor.
+        String staleGreen = cfg.haDiscoveryPrefix + "/sensor/" + cfg.haDeviceId + "/green_energy/config";
+        _client->publish(staleGreen.c_str(), "", true);
     }
 
     // Populate the topic cache once per arm. The switch cases read
@@ -934,13 +952,15 @@ const DiscoveryEntry kEntries[] = {
                "kWh", "energy", "total_increasing", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
-    /*  6 */ { EntityKind::SENSOR, "green_energy", "Green Energy", "mdi:leaf",
-               TopicSlot::STATUS, "{{ (value_json.r.gen / 100) | round(2) }}",
-               "kWh", "energy", "total_increasing", nullptr,
-               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    // (green_energy from r_dat.gen removed in v3.2.0 — gen is the override flag,
+    //  not energy; see the stale-cleanup above and r_lse "Green Energy (Session)".)
 
-    /*  7 */ { EntityKind::SENSOR, "discharge_energy", "Discharge Energy (V2H)", "mdi:battery-arrow-up",
-               TopicSlot::STATUS, "{{ (value_json.r.den / 1000) | round(3) }}",
+    /*  6 */ { EntityKind::SENSOR, "discharge_energy", "Discharge Energy (V2H)", "mdi:battery-arrow-up",
+               // r_dat.den is a sibling of en/grid/gen in the same object → centi-kWh
+               // (÷100), NOT ÷1000. Was ÷1000 (10× low) and disagreed with the
+               // integration's ÷100. Aligned to the r_dat.en convention.
+               // (Quasar-only; unverified on hardware — no Quasar in the fleet yet.)
+               TopicSlot::STATUS, "{{ (value_json.r.den / 100) | round(2) }}",
                "kWh", "energy", "total_increasing", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 

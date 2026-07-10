@@ -99,6 +99,7 @@ void WallboxBLE::begin(const char* addr) {
     // The mutex serialises _sendCommandDirect() callers (notably: the BLE task's
     // own keepalive, and the main task's poll cycles).
     if (!_cmdMutex) _cmdMutex = xSemaphoreCreateMutex();
+    if (!_parserMutex) _parserMutex = xSemaphoreCreateMutex();
     if (!_cacheMutex) _cacheMutex = xSemaphoreCreateMutex();
     // 2.7.0 step 1: BLE request queue infrastructure. Allocated here
     // alongside the existing mutexes; no callers yet — this is the
@@ -191,9 +192,13 @@ void WallboxBLE::loop() {
         }
 
         // Keepalive if idle (no commands sent recently)
-        // Plus doesn't implement `ping` — use r_dat (status) which is universal
+        // Plus doesn't implement `ping` — use r_dat (status) which is universal.
+        // Zentri/original Pulsar also lacks `ping`; it's detected only at runtime
+        // (_isZentri), which does NOT feed isPlus(), so gate on it explicitly or a
+        // Zentri keepalives with `ping` and reconnect-loops every PING_INTERVAL_MS.
         if (millis() - _lastActivityTime >= PING_INTERVAL_MS) {
-            const char* keepalive = isPlus() ? bapi::MET_GET_STATUS : bapi::MET_PING;
+            const char* keepalive = (isPlus() || _isZentri) ? bapi::MET_GET_STATUS
+                                                            : bapi::MET_PING;
             String resp = _sendCommandDirect(keepalive, "null", 2000);
             if (resp.isEmpty()) {
                 Log.printf("[BLE] Keepalive %s timeout — reconnecting\n", keepalive);
@@ -1083,20 +1088,28 @@ void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_
         Log.printf("[BLE] RX raw (%u): %s|%s\n", (unsigned)len, hex.c_str(), ascii.c_str());
     }
 
+    // Feed the parser under _parserMutex so this host-task callback can't race
+    // _sendCommandDirect's reset()/move() on the BLE task. Without the lock a
+    // late/duplicate notification (marginal link) mutates the parser's String
+    // buffer while the next command resets it → heap corruption → panic. If the
+    // lock can't be taken (only ever held briefly by reset/move), drop this
+    // frame rather than race — the command times out and retries.
+    SemaphoreHandle_t pm = _instance->_parserMutex;
+    if (pm && xSemaphoreTake(pm, pdMS_TO_TICKS(100)) != pdTRUE) return;
     bool complete = _instance->_parser.feed(data, len);
     if (complete) {
         // Move-out: ownership of the parser's accumulated buffer
-        // transfers to _lastResponse instead of being copied. Cuts
-        // the BAPI response pipeline from 3-4 simultaneous String
-        // copies down to 2 (parser->_lastResponse->caller). The
-        // remaining copy is the caller's `resp` in _sendCommandDirect
-        // which a v3.1 follow-up will also collapse.
+        // transfers to _lastResponse instead of being copied.
         _instance->_lastResponse = _instance->_parser.takeBuffer();
         _instance->_responseReady = true;
         _instance->_seenBapiThisConnection = true;
-        if (_instance->_responseCb) {
-            _instance->_responseCb(_instance->_lastResponse);
-        }
+    }
+    if (pm) xSemaphoreGive(pm);
+    // Legacy response callback runs OUTSIDE the lock (it may be slow and must not
+    // stall a BAPI round-trip). By here _lastResponse is set and _cmdMutex keeps
+    // the owning caller from resetting until it consumes the response.
+    if (complete && _instance->_responseCb) {
+        _instance->_responseCb(_instance->_lastResponse);
     }
 }
 
@@ -1276,8 +1289,13 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
     String cmd = bapi::buildCmd(met, par, id);
     String framed = bapi::frame(cmd);
 
+    // Reset the parser under _parserMutex — a late notification from the PREVIOUS
+    // command could still be feeding the parser on the host task; resetting it
+    // concurrently would corrupt the buffer.
+    if (_parserMutex) xSemaphoreTake(_parserMutex, portMAX_DELAY);
     _parser.reset();
     _responseReady = false;
+    if (_parserMutex) xSemaphoreGive(_parserMutex);
 
     Log.printf("[BLE] TX %s\n", met);
 
@@ -1347,13 +1365,15 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
         return "";
     }
 
-    Log.printf("[BLE] RX %s (%d bytes)\n", met, _lastResponse.length());
-    // Move ownership of the response buffer out instead of copying.
-    // _cmdMutex serialises BAPI calls, so _lastResponse is exclusively
-    // ours from notify-completion until the next reset(). After this
-    // move, _lastResponse is empty; the next BAPI request will
-    // overwrite via takeBuffer() in the notify callback.
-    String resp = std::move(_lastResponse);
+    // Move ownership of the response buffer out under _parserMutex so a late/
+    // duplicate notification's takeBuffer()→_lastResponse write can't race this
+    // read+move (that race corrupts the String → panic). _cmdMutex serialises
+    // callers; _parserMutex serialises against the host-task notify callback.
+    String resp;
+    if (_parserMutex) xSemaphoreTake(_parserMutex, portMAX_DELAY);
+    resp = std::move(_lastResponse);
+    if (_parserMutex) xSemaphoreGive(_parserMutex);
+    Log.printf("[BLE] RX %s (%d bytes)\n", met, resp.length());
     if (_cmdMutex) xSemaphoreGive(_cmdMutex);
     return resp;  // RVO + move = zero additional copies on the return
 }
