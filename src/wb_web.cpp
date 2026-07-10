@@ -756,6 +756,9 @@ String wb_buildStatusJson() {
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
     json += ",\"ssid\":\"" + WiFi.SSID() + "\"";
     json += ",\"wifi_rssi\":" + String(WiFi.RSSI());
+    // ESP32-S3 internal die temperature (°C). Diagnostic — lets users watch for
+    // thermal issues (e.g. a hot garage) rather than guessing (task #162, _Mike).
+    json += ",\"chip_temp\":" + String(temperatureRead(), 1);
     json += ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"";
     json += ",\"zentri\":" + String(wallboxBLE.isZentri() ? "true" : "false");
     // #129: meter capability — surfaces hide grid/solar when false (charger

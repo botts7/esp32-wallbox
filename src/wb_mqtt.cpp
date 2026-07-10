@@ -73,7 +73,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 76;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power L1/L2/L3 +meter total energy (EM340)
+static const size_t kDiscoveryCount = 77;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power L1/L2/L3 +meter total energy (EM340) +chip_temp (#162)
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -1275,6 +1275,13 @@ const DiscoveryEntry kEntries[] = {
                TopicSlot::GATEWAY, "{{ value_json.wifi_rssi | default(0) }}",
                "dBm", "signal_strength", "measurement", "diagnostic",
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // ESP32-S3 internal die temperature — diagnostic, for spotting thermal
+    // issues (hot enclosure/garage) rather than guessing (#162).
+    { EntityKind::SENSOR, "chip_temp", "Gateway Temperature", "mdi:thermometer",
+      TopicSlot::GATEWAY, "{{ value_json.chip_temp | default(0) }}",
+      "°C", "temperature", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
     // Surfaces the Wallbox app's "Schedule paused" + "Solar charging
     // paused" labels. The `gen` field in r_dat is the sticky

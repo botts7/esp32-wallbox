@@ -27,6 +27,27 @@ static const char* PLUS_SVC_UUID = "331a36f5-2459-45ea-9d95-6142f0c4b307";
 static const char* PLUS_CHR_UUID = "a9da6040-0823-4995-94ec-9ce41ca28833";
 static const char* PLUS_TXC_UUID = "a73e9a10-628f-4494-a099-12efaf72258f";
 
+// Decode the common NimBLE host (ble_hs) return codes to a short name, so a
+// user's pasted log reads "err 0x07 ENOTCONN (link dropped)" instead of a bare
+// hex we have to look up by hand. Covers the codes that actually turn up on the
+// connect/pair/encrypt paths; unknown values fall through to just the hex.
+static const char* bleErrName(int e) {
+    switch (e) {
+        case 0x03: return "EINVAL (bad argument)";
+        case 0x06: return "ENOMEM (out of memory)";
+        case 0x07: return "ENOTCONN (link dropped mid-op)";
+        case 0x08: return "ENOTSUP (unsupported)";
+        case 0x0d: return "ETIMEOUT (timed out)";
+        case 0x0f: return "EBUSY (stack busy)";
+        case 0x10: return "EREJECT (peer rejected)";
+        case 0x17: return "EAUTHEN (auth/pairing failed)";
+        case 0x18: return "EAUTHOR (not authorised)";
+        case 0x19: return "EENCRYPT (encryption failed)";
+        case 0x1a: return "EENCRYPT_KEY_SZ (key size)";
+        default:   return "";
+    }
+}
+
 class WBClientCallbacks : public NimBLEClientCallbacks {
     uint32_t onPassKeyRequest() override {
         uint32_t pk = wallboxBLE.blePasskey();
@@ -57,7 +78,8 @@ class WBClientCallbacks : public NimBLEClientCallbacks {
     // m_lastErr), so getLastError() here is the last GATT error — often the rc
     // of the write that preceded the drop. Logged as context.
     void onDisconnect(NimBLEClient* pClient) override {
-        Log.printf("[BLE] Disconnected — last GATT err=%d\n", pClient->getLastError());
+        int de = pClient->getLastError();
+        Log.printf("[BLE] Disconnected — last GATT err=%d %s\n", de, bleErrName(de));
     }
 };
 static WBClientCallbacks _secCallbacks;
@@ -588,9 +610,10 @@ void WallboxBLE::_connect() {
             // small delay matches the fallback path's behaviour.
             delay(200);
         } else {
-            Log.printf("[BLE] secureConnection() failed (err 0x%02x) — "
+            int se = _client->getLastError();
+            Log.printf("[BLE] secureConnection() failed (err 0x%02x %s) — "
                        "continuing unpaired; writes may be rejected\n",
-                       _client->getLastError());
+                       se, bleErrName(se));
         }
     } else {
         Log.println("[BLE] Zentri: skipping SMP pair (unauthenticated handshake protocol)");
@@ -618,7 +641,8 @@ void WallboxBLE::_connect() {
                 delay(200);
                 notifyOk = notifyChr->registerForNotify(_notifyCb);
             } else {
-                Log.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
+                int ee = _client->getLastError();
+                Log.printf("[BLE] Encryption failed (err 0x%02x %s)\n", ee, bleErrName(ee));
             }
         }
     }

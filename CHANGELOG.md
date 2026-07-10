@@ -4,6 +4,19 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.0-rc.2]
+
+### Added
+- **Gateway die temperature** (`chip_temp`) — the ESP32-S3 internal temperature
+  is now in `/api/status` and exposed as an MQTT diagnostic sensor ("Gateway
+  Temperature"), so thermal issues (hot enclosure/garage) are visible instead of
+  guessed (#162).
+
+### Changed
+- **BLE error logs now decode the NimBLE code** — e.g. `err 0x07 ENOTCONN (link
+  dropped mid-op)` instead of a bare hex — on the secureConnection / encryption /
+  disconnect paths, so pasted logs are self-diagnosing (#161).
+
 ## [3.2.0-rc.1]
 
 Release candidate for **3.2.0**. Rolls up the 3.2.0-beta line; if this soaks
