@@ -4,6 +4,24 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.0-rc.3]
+
+### Fixed
+- **Gateway Temperature MQTT sensor was stuck at 0 °C.** `chip_temp` was added to
+  `/api/status` (HTTP) but not to the separate MQTT gateway payload
+  (`publishGatewayInfo`), so the discovery entity read a missing field → 0. Now
+  published on both. (Found in the pre-stable code review.)
+- **OTA: a rejected/duplicate upload could un-pause BLE mid-flash of the real
+  one.** The error path's BLE un-pause fired on *any* OTA error, including
+  admission rejects (auth / "another OTA in progress" / capacity) that return
+  *before* BLE is paused — so a second concurrent OTA POST could cancel the
+  in-flight upload's pause and reintroduce the OTA panic race. The un-pause is
+  now gated on this upload having actually taken the pause.
+- **Charge-log recovery is now idempotent.** A crash in the split-second between
+  the two NVS writes on burst close (append interval → clear pending state)
+  could double-append the same interval on the next boot. Recovery now skips a
+  burst that already matches the newest stored interval (usid+start).
+
 ## [3.2.0-rc.2]
 
 ### Fixed

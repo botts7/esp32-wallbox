@@ -1153,6 +1153,13 @@ static void _registerJsonBodyRoutes() {
 static bool   _asyncOtaError        = false;
 static bool   _asyncOtaShouldReboot = false;
 static size_t _asyncOtaTotalSize    = 0;
+// True once THIS upload has actually paused BLE for the flash (past the
+// admission checks). Only then may the error path un-pause — so an early
+// reject (auth / another-OTA-in-progress / canAcceptOta) that returns BEFORE
+// the pause can't cancel a pause it never took (which, for a concurrent upload,
+// would un-pause BLE mid-flash of the real one — the panic race the pause
+// exists to prevent).
+static bool   _otaBlePaused         = false;
 // Set by the body handler when a non-multipart (raw) body hits /api/ota.
 // A real OTA is multipart/form-data and is dispatched to the upload
 // handler; anything reaching the body handler is malformed.
@@ -1177,9 +1184,13 @@ static void _registerOtaRoute() {
             }
             if (_asyncOtaError) {
                 // A failed OTA paused BLE (freeing resources for the flash) but
-                // the flash never completed — un-pause now so BLE reconnects
-                // instead of sitting down for the whole pause window.
-                wallboxBLE.pause(0);
+                // the flash never completed — un-pause so BLE reconnects instead
+                // of sitting down for the whole pause window. Gated: only if THIS
+                // upload actually took the pause (not an early admission reject).
+                if (_otaBlePaused) {
+                    wallboxBLE.pause(0);
+                    _otaBlePaused = false;
+                }
                 if (otaRetryAfterSec > 0) {
                     AsyncWebServerResponse* res = req->beginResponse(503,
                         "application/json",
@@ -1220,6 +1231,7 @@ static void _registerOtaRoute() {
                 _asyncOtaError = false;
                 _asyncOtaShouldReboot = false;
                 _asyncOtaTotalSize = 0;
+                _otaBlePaused = false;   // set true only once we take the pause
 
                 // SECURITY: auth check BEFORE Update.begin() erases
                 // the partition. _checkAuth handles the 401 response;
@@ -1251,6 +1263,7 @@ static void _registerOtaRoute() {
                 otaInProgress = true;
 
                 wallboxBLE.pause(5 * 60 * 1000);  // 5 min
+                _otaBlePaused = true;             // now the error path may un-pause
 
                 size_t expected = (size_t)req->contentLength();
                 expectedOtaSize = expected;

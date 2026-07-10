@@ -133,12 +133,19 @@ void begin() {
                                 ? d["gl"].as<uint32_t>() - d["g0"].as<uint32_t>() : 0;
                 double frac = (den > 0) ? ((double)dgen / (double)den) : 0.0;
                 if (frac > 1.0) frac = 1.0;
-                if (wh > 0) {
-                    appendInterval(d["u"].as<uint32_t>(), st, stp, wh,
-                                   (uint32_t)(wh * frac + 0.5));
+                uint32_t u = d["u"].as<uint32_t>();
+                // Idempotent: closeBurst() appends the interval, THEN clears this
+                // openb key (two NVS writes). If a crash landed between them, the
+                // burst is already the newest stored interval — don't duplicate
+                // it. (Match on usid+start.)
+                bool already = arr.size() > 0
+                    && (uint32_t)(arr[arr.size() - 1]["usid"] | 0) == u
+                    && (uint32_t)(arr[arr.size() - 1]["start"] | 0) == st;
+                if (wh > 0 && !already) {
+                    appendInterval(u, st, stp, wh, (uint32_t)(wh * frac + 0.5));
                     _lastBurstWh = wh;
                     Log.printf("[chargelog] recovered interrupted burst: usid=%u "
-                               "%us..%us %uWh\n", (unsigned)d["u"].as<uint32_t>(),
+                               "%us..%us %uWh\n", (unsigned)u,
                                (unsigned)st, (unsigned)stp, (unsigned)wh);
                 }
             }
