@@ -37,7 +37,7 @@ untested/scaffold**; **Zentri / original Pulsar = single-source (gambys #12)**.
 | `st` | 0..18 | 0..18 | **small enum 0..4** (4=ramp) | ? (scaffold) | 0..18 (+11 discharge) |
 | `cp` (kW) | native | native | **absent → synthesized** from L1/L2/L3 (`wb_zentri_normalize.cpp:54-61`) | absent (TODO) | native |
 | `en` (session kWh) | centi-kWh | centi-kWh | **absent → 0** | ? | yes |
-| `gen` | **override flag** (not energy) | **override flag** | absent | ? | override flag |
+| `gen` | **green energy** (Wh) on MAX Pro fw 6.13.x ⚠ | **override flag** (older fw) | absent | ? | model-dependent |
 | `grid` | yes | yes | absent | ? | yes |
 | `den` (V2H) | yes | yes | absent | absent | yes (core) |
 | `L1/L2/L3` (deci-A) | yes | yes | **only power source** | **"only Current L1"** | yes |

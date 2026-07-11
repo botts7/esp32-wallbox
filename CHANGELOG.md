@@ -39,6 +39,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Removed the bogus MQTT "Green Energy" sensor** (published `r_dat.gen/100` —
   the override flag as kWh). The authoritative per-session green sensor (r_lse)
   remains; the stale entity is cleaned up on connect.
+- **New `schedule_paused` flag in `/api/status`** — the authoritative "manual
+  override active" signal (schedules/Eco-Smart suspended). Computed from
+  `r_lse.control_mode == 1` (model-agnostic), falling back to `r_dat.gen != 0`
+  only for chargers without r_lse (Zentri/original Pulsar, where `gen` genuinely
+  is the override flag). This replaces the surfaces' broken `gen != 0` guesses:
+  on the MAX Pro `gen` is accumulated *green energy*, so the dashboard/add-on
+  banner false-triggered during solar and never cleared on Resume. Integration +
+  Add-on now read this single field.
 - **`car_connected` mis-read on Zentri/original Pulsar.** It applied the MAX 0–18
   status-code set to Zentri's different enum; now uses the Zentri set when
   `_isZentri`.

@@ -831,6 +831,39 @@ String wb_buildStatusJson() {
     json += ",\"ble_last_activity_s\":" + String(wallboxBLE.lastActivityAge() / 1000);
     json += ",\"auth_enabled\":" + String(configMgr.get().authEnabled && configMgr.get().authPass.length() > 0 ? "true" : "false");
     json += ",\"sta_connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
+    // schedule_paused: manual override active (schedules / Eco-Smart suspended,
+    // the Wallbox app's "Resume" state). Authoritative signal is
+    // r_lse.control_mode == 1 (0 = automatic); this is model-agnostic. r_dat.gen
+    // is NOT a reliable flag — on the MAX Pro it's accumulated green energy, not
+    // an override flag — so fall back to gen != 0 ONLY for chargers that don't
+    // expose control_mode (Zentri / original Pulsar, where gen IS the flag).
+    // Single source of truth: the Integration + Add-on read this instead of
+    // guessing from gen.
+    {
+        String lse; uint32_t lseSeq = 0;
+        wallboxBLE.copyCachedLse(lse, lseSeq);
+        int cmode = -1;
+        if (!lse.isEmpty()) {
+            JsonDocument ld;
+            if (deserializeJson(ld, lse) == DeserializationError::Ok)
+                cmode = ld["r"]["control_mode"] | -1;
+        }
+        bool paused;
+        if (cmode >= 0) {
+            paused = (cmode == 1);
+        } else {
+            String stj; uint32_t sSeq = 0;
+            wallboxBLE.copyCachedStatus(stj, sSeq);
+            int gen = 0;
+            if (!stj.isEmpty()) {
+                JsonDocument sd;
+                if (deserializeJson(sd, stj) == DeserializationError::Ok)
+                    gen = sd["r"]["gen"] | 0;
+            }
+            paused = (gen != 0);
+        }
+        json += ",\"schedule_paused\":" + String(paused ? "true" : "false");
+    }
     json += "}";
     return json;
 }
