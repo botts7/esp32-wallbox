@@ -1299,7 +1299,10 @@ const DiscoveryEntry kEntries[] = {
     // ESP32-S3 internal die temperature — diagnostic, for spotting thermal
     // issues (hot enclosure/garage) rather than guessing (#162).
     { EntityKind::SENSOR, "chip_temp", "Gateway Temperature", "mdi:thermometer",
-      TopicSlot::GATEWAY, "{{ value_json.chip_temp | default(0) }}",
+      // Render empty (→ HA "unavailable") when chip_temp is null — hardware
+      // without a real internal temp sensor (classic ESP32/WROOM) emits null so
+      // this shows unavailable instead of a fake 0 °C.
+      TopicSlot::GATEWAY, "{% if value_json.chip_temp is not none %}{{ value_json.chip_temp | round(1) }}{% endif %}",
       "°C", "temperature", "measurement", "diagnostic",
       TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 

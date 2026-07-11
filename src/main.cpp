@@ -179,12 +179,14 @@ static void publishGatewayInfo() {
     json += String((uint32_t)esp_get_minimum_free_heap_size());
     json += ",\"wifi_rssi\":";
     json += String(WiFi.RSSI());
-    // S3 die temperature — MUST match the /api/status field so the MQTT
+    // Die temperature — MUST match the /api/status field so the MQTT
     // "Gateway Temperature" discovery entity (reads value_json.chip_temp) isn't
     // stuck at 0. This gateway payload is a separate builder from
     // wb_buildStatusJson(), so the field has to be added in both. (#162)
+    // wb_chipTempJson() emits null on hardware without a real sensor (classic
+    // ESP32/WROOM) so HA shows the sensor unavailable, not a fake value.
     json += ",\"chip_temp\":";
-    json += String(temperatureRead(), 1);
+    json += wb_chipTempJson();
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
     // Gateway-side firmware version (gateway, not the BLE module) — so HA
     // can show which build is running and alert on unexpected downgrade.

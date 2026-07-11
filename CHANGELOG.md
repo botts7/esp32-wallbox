@@ -47,6 +47,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on the MAX Pro `gen` is accumulated *green energy*, so the dashboard/add-on
   banner false-triggered during solar and never cleared on Resume. Integration +
   Add-on now read this single field.
+- **Gateway Temperature is `null` on hardware without a real internal sensor.**
+  `temperatureRead()` returns a fixed/garbage value on the classic ESP32 (WROOM —
+  the future esp32dev target), so `/api/status` + the MQTT gateway payload now emit
+  `chip_temp: null` there (via a shared `wb_chipTempJson()`), and the MQTT template
+  renders empty → HA shows the sensor *unavailable* instead of a misleading number.
+  ESP32-S3/S2/C3/C6 are unchanged (real reading).
 - **`car_connected` mis-read on Zentri/original Pulsar.** It applied the MAX 0–18
   status-code set to Zentri's different enum; now uses the Zentri set when
   `_isZentri`.

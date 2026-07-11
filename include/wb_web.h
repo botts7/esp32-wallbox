@@ -2,6 +2,22 @@
 
 #include <Arduino.h>
 
+// Gateway die-temperature as a JSON value. ESP32-S3/S2/C3/C6 have a usable
+// internal temperature sensor; the classic ESP32 (WROOM — future esp32dev
+// target, #154) does NOT — temperatureRead() there returns a fixed/garbage value
+// (~53.3 °C). So emit the real reading only where it's meaningful, else JSON
+// `null` so HA shows the "Gateway Temperature" sensor as unavailable instead of a
+// misleading number. Shared by /api/status (wb_web.cpp) and the MQTT gateway
+// payload (main.cpp) so both stay consistent.
+inline String wb_chipTempJson() {
+#if defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32S2) || \
+    defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C6)
+    return String(temperatureRead(), 1);
+#else
+    return String("null");
+#endif
+}
+
 // Web server for configuration UI.
 // In AP mode: captive portal for initial WiFi/MQTT/BLE setup.
 // In STA mode: config page accessible at device IP.
