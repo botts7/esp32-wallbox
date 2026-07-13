@@ -90,6 +90,14 @@ public:
     bool isConnected() const { return _state == State::CONNECTED; }
     const char* stateStr() const;
 
+    // Gate the pending-MQTT-publish ring: the BLE task only queues a response
+    // for MQTT publishing when this is true (main sets it from the MQTT
+    // connection state). Without it, on-demand /api/command passthroughs pile
+    // into a ring nobody drains when MQTT is disabled / no broker configured
+    // (HACS-integration-only setups) — filling it and logging "ring full,
+    // dropping" on every poll forever (#25).
+    void setMqttPubEnabled(bool en) { _mqttPubEnabled = en; }
+
     // Temporarily release BLE so the official app can connect
     void pause(uint32_t ms);
     bool isPaused() const { return _pausedUntil > millis(); }
@@ -500,6 +508,10 @@ private:
     uint8_t    _pendingPubHead = 0;   // next eviction (write) index
     uint8_t    _pendingPubTail = 0;   // next read index
     SemaphoreHandle_t _pendingPubMutex = nullptr;
+    // Only queue responses for MQTT publish when MQTT is actually up (set by main
+    // from the MQTT connection state). Default false so we never queue before the
+    // first connection — and never at all when MQTT is disabled/unconfigured (#25).
+    volatile bool _mqttPubEnabled = false;
     void _enqueueMqttPub(const String& met, std::shared_ptr<String> json);
 
     // 2.7.0 step 4: the "direct" BAPI write+wait path. Same body as

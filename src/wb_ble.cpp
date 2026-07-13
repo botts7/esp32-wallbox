@@ -294,7 +294,13 @@ void WallboxBLE::loop() {
                 if (doWake && req.waiter) {
                     xTaskNotify(req.waiter, req.reqId, eSetValueWithOverwrite);
                 }
-                if (doMqtt && sharedResp && sharedResp->length()) {
+                // Only queue for MQTT publish when MQTT is actually connected.
+                // Without this, on-demand /api/command passthroughs pile into a
+                // ring nobody drains when MQTT is disabled / no broker configured
+                // (HACS-integration-only setups) → "ring full, dropping" forever
+                // + sustained pressure. The response is still returned via the
+                // wake path (doWake) and cached, so nothing is lost. (#25)
+                if (doMqtt && _mqttPubEnabled && sharedResp && sharedResp->length()) {
                     _enqueueMqttPub(String(req.met), sharedResp);
                 }
             }

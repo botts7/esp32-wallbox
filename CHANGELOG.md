@@ -7,6 +7,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [3.2.0-rc.4]
 
 ### Fixed
+- **MQTT publish ring filled and dropped forever (then panicked) when MQTT was
+  disabled / no broker configured (#25).** The BLE task queued every on-demand
+  `/api/command` passthrough response (r_lse, r_not, g_alo…) for MQTT publish even
+  with MQTT off — so HACS-integration-only setups logged `pending MQTT pub ring
+  full, dropping met=…` on every poll indefinitely, with the sustained ring churn
+  the likely panic trigger. Responses are now queued for MQTT only when MQTT is
+  actually connected (the wake path + caches still return them, so nothing is
+  lost). Reported by geertvanvaerenbergh.
 - **Charge-log stopped recording since late June — two root causes, both fixed.**
   1. *Detection*: capture opened a burst only when `cp` (charge power) exceeded
      0.10 kW, so Eco-Smart **solar** sessions (where `cp` reads ~0 while energy

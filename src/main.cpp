@@ -510,6 +510,10 @@ void loop() {
 
     // Run MQTT loop
     wallboxMQTT.loop();
+    // Tell the BLE task whether to queue responses for MQTT publish. When MQTT is
+    // disabled / no broker (HACS-integration-only), this stays false so the BLE
+    // task never fills the pending-pub ring with drops on every poll (#25).
+    wallboxBLE.setMqttPubEnabled(wallboxMQTT.isConnected());
 
     // Run WS loop (handle client connects/disconnects + frames)
     wbws::loop();
