@@ -4,6 +4,19 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- **Gateway MQTT/status payload could become invalid JSON**, which HA logged as
+  `Invalid state message '' from wallbox/…/response/gateway` (the gateway sensors
+  briefly went unavailable until the next clean publish). The `/api/status` and
+  MQTT gateway payloads are hand-built via string concatenation, so a
+  device-reported string with a stray quote / backslash / control char (a partial
+  BLE read, or an unusual WiFi SSID) — or `chip_temp` coming back `NaN` from the
+  ESP32 temp sensor — produced malformed JSON. Device strings are now JSON-escaped
+  (`wb_jsonEsc`) in both builders, and `chip_temp` emits `null` on a NaN/inf read.
+  (Latent robustness bug, not an rc.4 regression.)
+
 ## [3.2.0-rc.4]
 
 ### Fixed

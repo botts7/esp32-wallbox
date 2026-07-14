@@ -754,7 +754,7 @@ String wb_buildStatusJson() {
     json += ",\"board\":\"" WB_BOARD "\"";
     json += ",\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") + "\"";
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
-    json += ",\"ssid\":\"" + WiFi.SSID() + "\"";
+    json += ",\"ssid\":\"" + wb_jsonEsc(WiFi.SSID()) + "\"";
     json += ",\"wifi_rssi\":" + String(WiFi.RSSI());
     // ESP32-S3 internal die temperature (°C). Diagnostic — lets users watch for
     // thermal issues (e.g. a hot garage) rather than guessing (task #162, _Mike).
@@ -799,18 +799,18 @@ String wb_buildStatusJson() {
     json += ",\"rx\":" + String(wallboxBLE.rxCount());
     json += ",\"uptime\":" + String(millis() / 1000);
     json += ",\"heap\":" + String(ESP.getFreeHeap());
-    json += ",\"dev_mfg\":\"" + wallboxBLE.deviceManufacturer() + "\"";
-    json += ",\"dev_model\":\"" + wallboxBLE.deviceModel() + "\"";
-    json += ",\"dev_fw\":\"" + wallboxBLE.deviceFirmware() + "\"";
-    json += ",\"dev_name\":\"" + wallboxBLE.deviceName() + "\"";
-    json += ",\"chg_sn\":\"" + wallboxBLE.chargerSerial() + "\"";
-    json += ",\"chg_mac\":\"" + wallboxBLE.chargerMac() + "\"";
-    json += ",\"chg_grounding\":\"" + wallboxBLE.chargerGrounding() + "\"";
+    json += ",\"dev_mfg\":\"" + wb_jsonEsc(wallboxBLE.deviceManufacturer()) + "\"";
+    json += ",\"dev_model\":\"" + wb_jsonEsc(wallboxBLE.deviceModel()) + "\"";
+    json += ",\"dev_fw\":\"" + wb_jsonEsc(wallboxBLE.deviceFirmware()) + "\"";
+    json += ",\"dev_name\":\"" + wb_jsonEsc(wallboxBLE.deviceName()) + "\"";
+    json += ",\"chg_sn\":\"" + wb_jsonEsc(wallboxBLE.chargerSerial()) + "\"";
+    json += ",\"chg_mac\":\"" + wb_jsonEsc(wallboxBLE.chargerMac()) + "\"";
+    json += ",\"chg_grounding\":\"" + wb_jsonEsc(wallboxBLE.chargerGrounding()) + "\"";
     // chg_app_fw — charger application firmware (the version Wallbox app
     // shows), distinct from dev_fw which is the BLE module firmware.
     // chg_project — canonical model identifier (e.g. "prj15-pulsar-max").
-    json += ",\"chg_app_fw\":\"" + wallboxBLE.chargerAppFirmware() + "\"";
-    json += ",\"chg_project\":\"" + wallboxBLE.chargerProject() + "\"";
+    json += ",\"chg_app_fw\":\"" + wb_jsonEsc(wallboxBLE.chargerAppFirmware()) + "\"";
+    json += ",\"chg_project\":\"" + wb_jsonEsc(wallboxBLE.chargerProject()) + "\"";
     // Emit null instead of -1 when r_ses doesn't expose a usable count
     // (Plus and some MAX firmwares don't fill in `last`). HA's
     // `value_json.chg_sessions` template renders null as unavailable.
@@ -821,8 +821,8 @@ String wb_buildStatusJson() {
     }
     json += ",\"chg_power_boost\":" + String((int)wallboxBLE.chargerPowerBoost());
     json += ",\"chg_lock_state\":" + String((int)wallboxBLE.chargerLockState());
-    json += ",\"chg_net_ssid\":\"" + wallboxBLE.chargerNetworkSsid() + "\"";
-    json += ",\"chg_net_ip\":\"" + wallboxBLE.chargerNetworkIp() + "\"";
+    json += ",\"chg_net_ssid\":\"" + wb_jsonEsc(wallboxBLE.chargerNetworkSsid()) + "\"";
+    json += ",\"chg_net_ip\":\"" + wb_jsonEsc(wallboxBLE.chargerNetworkIp()) + "\"";
     json += ",\"chg_net_signal\":" + String(wallboxBLE.chargerNetworkSignal());
     json += ",\"chg_fw_changed\":" + String(wallboxBLE.firmwareChanged() ? "true" : "false");
     json += ",\"chg_fw_prev\":\"" + wallboxBLE.previousFirmware() + "\"";
