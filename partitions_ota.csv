@@ -1,8 +1,25 @@
 # Wallbox BLE Gateway - OTA-capable partition table
 # Two app partitions for OTA swap, NVS for settings persistence
-# Name,   Type, SubType, Offset,   Size
-nvs,      data, nvs,     0x9000,   0x5000,
-otadata,  data, ota,     0xe000,   0x2000,
-app0,     app,  ota_0,   0x10000,  0x1F0000,
-app1,     app,  ota_1,   0x200000, 0x1F0000,
-nvs2,     data, nvs,     0x3F0000, 0x10000,
+#
+# coredump (#168): Arduino's precompiled IDF libs already ship with
+# CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH + DATA_FORMAT_ELF, so the panic
+# handler has always been ready to write a full ELF core — it just had
+# nowhere to put it. This partition is that somewhere. Without it every
+# watchdog/panic reboot throws its backtrace away and we're left guessing.
+#
+# The 128K comes out of the app partitions (0x1F0000 -> 0x1E0000 each,
+# still ~525K of headroom over the current 1.44M image). nvs (0x9000) and
+# nvs2 (0x3F0000) keep their EXACT offsets so settings and the charge log
+# survive the re-flash — do not move them.
+#
+# NOTE: a partition-table change cannot be applied over OTA. Existing
+# installs keep their old table (and simply get no coredumps) until a USB
+# re-flash; new USB installs get it from the start. See docs/INSTALL.md.
+#
+# Name,   Type, SubType,  Offset,   Size
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  ota_0,    0x10000,  0x1E0000,
+app1,     app,  ota_1,    0x1F0000, 0x1E0000,
+coredump, data, coredump, 0x3D0000, 0x20000,
+nvs2,     data, nvs,      0x3F0000, 0x10000,
