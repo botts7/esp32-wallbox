@@ -10,6 +10,16 @@ namespace wb_wdt {
 static uint32_t _origTimeoutS = DEFAULT_WDT_TIMEOUT_S;
 static bool     _extended     = false;
 
+// The panic flag the WDT boots with. esp_task_wdt_init()'s second arg is
+// "panic on timeout": true = an elapsed TWDT resets the box, false = it
+// only logs. The framework boots with CONFIG_ESP_TASK_WDT_PANIC=1, so
+// true is what we must hand back in restore().
+#ifdef CONFIG_ESP_TASK_WDT_PANIC
+static const bool PANIC_DEFAULT = true;
+#else
+static const bool PANIC_DEFAULT = false;
+#endif
+
 void extendTo(uint32_t seconds) {
     if (!_extended) {
         // Nothing extended yet — capture the *current* default. We don't
@@ -28,9 +38,18 @@ void extendTo(uint32_t seconds) {
 
 void restore() {
     if (!_extended) return;
-    esp_task_wdt_init(_origTimeoutS, false);
+    // Restore the timeout AND the panic flag. Passing `false` here (as we
+    // used to) left the WDT unable to actually reset the box for the rest
+    // of the uptime: extendTo() drops panic deliberately so a long OTA
+    // erase can't reboot us mid-flash, but every restore() after that
+    // silently kept the watchdog toothless — a later wedge would log and
+    // hang instead of recovering, and #168's crash evidence would be lost
+    // with it. Symmetry matters: restore() must undo BOTH of extendTo()'s
+    // changes, not just the one it's named after.
+    esp_task_wdt_init(_origTimeoutS, PANIC_DEFAULT);
     _extended = false;
-    Log.printf("[WDT] Restored to %us\n", (unsigned)_origTimeoutS);
+    Log.printf("[WDT] Restored to %us (panic=%d)\n",
+               (unsigned)_origTimeoutS, PANIC_DEFAULT ? 1 : 0);
 }
 
 }  // namespace wb_wdt
