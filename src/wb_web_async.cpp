@@ -5,6 +5,7 @@
 #include "wb_health.h"
 #include "wb_diag.h"
 #include "wb_charge_log.h"
+#include "wb_coredump.h"
 #include "wb_ota_history.h"
 #include "wb_ble.h"
 #include "wb_web.h"  // for webServer.requestReboot()
@@ -398,6 +399,70 @@ static void _registerReadOnlyRoutes() {
             "application/json", wb_buildBootHistoryJson());
         res->addHeader("Cache-Control", "no-store");
         req->send(res);
+    });
+
+    // GET /api/coredump/summary — the crashing task + backtrace from the
+    // last panic/watchdog reset (#168). Needs no ELF and no USB cable: this
+    // is what turns "it rebooted, no idea why" into a named task and a stack.
+    _async.on("/api/coredump/summary", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "application/json", wb_coredump::summaryJson());
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
+    // GET /api/coredump — the raw ELF core for full symbolisation. Streamed
+    // chunked straight off flash: the image runs to hundreds of KB and
+    // building it into a String would blow the heap (see #103).
+    _async.on("/api/coredump", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        // Deliberately STRICTER than _checkAuth: a core dump is an unmasked
+        // RAM image and can contain the MQTT password, the auth password and
+        // anything else that was in memory. _checkAuth waves everything
+        // through when auth is disabled, which is fine for /api/status but
+        // would hand a full credential-bearing memory image to any client on
+        // the LAN. /api/config/export already masks its secrets; there is no
+        // way to mask a memory snapshot, so we refuse instead. The summary
+        // endpoint (task name + PCs, no secrets) stays open so crash triage
+        // still works without auth.
+        if (!configMgr.get().authEnabled ||
+            configMgr.get().authPass.length() == 0) {
+            req->send(403, "application/json",
+                "{\"error\":\"auth must be enabled to download a core dump\","
+                "\"reason\":\"the dump is a raw RAM image and may contain "
+                "credentials\",\"hint\":\"use /api/coredump/summary for the "
+                "crashing task and backtrace, which carries no secrets\"}");
+            return;
+        }
+        if (!wb_coredump::present()) {
+            req->send(404, "application/json",
+                "{\"error\":\"no coredump stored\"}");
+            return;
+        }
+        AsyncWebServerResponse* res = req->beginChunkedResponse(
+            "application/octet-stream",
+            [](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+                return wb_coredump::readChunk(index, buf, maxLen);
+            });
+        res->addHeader("Content-Disposition",
+                       "attachment; filename=\"coredump.elf\"");
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
+    // POST /api/coredump/clear — erase so the next crash starts clean.
+    // POST (not GET) because it destroys evidence: a browser prefetch or a
+    // crawler must not be able to wipe a crash we haven't read yet.
+    _async.on("/api/coredump/clear", HTTP_POST,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        bool ok = wb_coredump::erase();
+        req->send(ok ? 200 : 500, "application/json",
+                  ok ? "{\"status\":\"cleared\"}"
+                     : "{\"error\":\"erase failed\"}");
     });
 
     // GET /api/ota/history — newest-first list of OTA attempts.
