@@ -59,6 +59,14 @@ static uint32_t _backoffMs           = 0;
 static uint32_t _nextAttemptAtMs     = 0;
 static const uint32_t kDriverGiveUpMs = 60000;
 
+// Escalating WiFi watchdog (#13, peter-mcc): a soft WiFi.reconnect() can't
+// recover a wedged WiFi stack after long uptime. After 5 min continuously
+// down we restart the whole WiFi stack; after 30 min we reboot (exactly what
+// a manual power-cycle does). Reset on GOT_IP so a healthy link stays untouched.
+static const uint32_t kWifiFullRestartMs = 300000;    // 5 min
+static const uint32_t kWifiRebootMs      = 1800000;   // 30 min
+static bool _didFullWifiRestart          = false;
+
 // Walk the backoff ladder: 1s → 2s → 5s → 15s → 60s → stays at 60s.
 static uint32_t _nextBackoff(uint32_t cur) {
     if (cur < 1000)  return 1000;
@@ -207,8 +215,9 @@ void tick() {
         // GOT_IP means whatever path got us back — driver auto-reconnect
         // OR our explicit reconnect — succeeded. Reset backoff so the
         // next disconnect starts fresh from 1 s.
-        _backoffMs       = 0;
-        _nextAttemptAtMs = 0;
+        _backoffMs            = 0;
+        _nextAttemptAtMs      = 0;
+        _didFullWifiRestart   = false;   // re-arm the escalating watchdog
     }
     if (_pendingMdnsRefresh) {
         _pendingMdnsRefresh = false;
@@ -230,7 +239,31 @@ void tick() {
     //   (c) the backoff deadline has elapsed
     if (_connected) return;
     if (_lastConnectedAt == 0) return;  // never connected this boot — let begin()/AP-mode handle it
-    if ((uint32_t)(now - _lastConnectedAt) < kDriverGiveUpMs) return;
+
+    // ---- Escalating watchdog (#13): recover a wedged WiFi stack ----
+    // A soft WiFi.reconnect() (below) only re-associates; it can't fix a stack
+    // that has locked up after long uptime. Escalate by downtime.
+    uint32_t downMs = (uint32_t)(now - _lastConnectedAt);
+    if (downMs >= kWifiRebootMs) {
+        Log.println("[WiFi] down >30 min and still no link — rebooting to recover");
+        delay(50);
+        ESP.restart();
+    }
+    if (downMs >= kWifiFullRestartMs && !_didFullWifiRestart) {
+        _didFullWifiRestart = true;
+        Log.println("[WiFi] down >5 min — restarting the WiFi stack (off/on + begin)");
+        const WBConfig& cfg = configMgr.get();
+        WiFi.disconnect(true, true);
+        WiFi.mode(WIFI_OFF);
+        delay(100);
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(cfg.wifiSSID.c_str(), cfg.wifiPass.c_str());
+        _backoffMs       = _nextBackoff(_backoffMs);
+        _nextAttemptAtMs = now + _backoffMs;
+        return;
+    }
+
+    if (downMs < kDriverGiveUpMs) return;
     if (_nextAttemptAtMs != 0 && (int32_t)(now - _nextAttemptAtMs) < 0) return;
 
     // The driver has given up and our backoff window has elapsed.

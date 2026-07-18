@@ -5,6 +5,7 @@
 #include "wb_health.h"
 #include "wb_diag.h"
 #include "wb_charge_log.h"
+#include "wb_coredump.h"
 #include "wb_ota_history.h"
 #include "wb_ble.h"
 #include "wb_web.h"  // for webServer.requestReboot()
@@ -400,6 +401,70 @@ static void _registerReadOnlyRoutes() {
         req->send(res);
     });
 
+    // GET /api/coredump/summary — the crashing task + backtrace from the
+    // last panic/watchdog reset (#168). Needs no ELF and no USB cable: this
+    // is what turns "it rebooted, no idea why" into a named task and a stack.
+    _async.on("/api/coredump/summary", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        AsyncWebServerResponse* res = req->beginResponse(200,
+            "application/json", wb_coredump::summaryJson());
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
+    // GET /api/coredump — the raw ELF core for full symbolisation. Streamed
+    // chunked straight off flash: the image runs to hundreds of KB and
+    // building it into a String would blow the heap (see #103).
+    _async.on("/api/coredump", HTTP_GET,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        // Deliberately STRICTER than _checkAuth: a core dump is an unmasked
+        // RAM image and can contain the MQTT password, the auth password and
+        // anything else that was in memory. _checkAuth waves everything
+        // through when auth is disabled, which is fine for /api/status but
+        // would hand a full credential-bearing memory image to any client on
+        // the LAN. /api/config/export already masks its secrets; there is no
+        // way to mask a memory snapshot, so we refuse instead. The summary
+        // endpoint (task name + PCs, no secrets) stays open so crash triage
+        // still works without auth.
+        if (!configMgr.get().authEnabled ||
+            configMgr.get().authPass.length() == 0) {
+            req->send(403, "application/json",
+                "{\"error\":\"auth must be enabled to download a core dump\","
+                "\"reason\":\"the dump is a raw RAM image and may contain "
+                "credentials\",\"hint\":\"use /api/coredump/summary for the "
+                "crashing task and backtrace, which carries no secrets\"}");
+            return;
+        }
+        if (!wb_coredump::present()) {
+            req->send(404, "application/json",
+                "{\"error\":\"no coredump stored\"}");
+            return;
+        }
+        AsyncWebServerResponse* res = req->beginChunkedResponse(
+            "application/octet-stream",
+            [](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+                return wb_coredump::readChunk(index, buf, maxLen);
+            });
+        res->addHeader("Content-Disposition",
+                       "attachment; filename=\"coredump.elf\"");
+        res->addHeader("Cache-Control", "no-store");
+        req->send(res);
+    });
+
+    // POST /api/coredump/clear — erase so the next crash starts clean.
+    // POST (not GET) because it destroys evidence: a browser prefetch or a
+    // crawler must not be able to wipe a crash we haven't read yet.
+    _async.on("/api/coredump/clear", HTTP_POST,
+              [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        bool ok = wb_coredump::erase();
+        req->send(ok ? 200 : 500, "application/json",
+                  ok ? "{\"status\":\"cleared\"}"
+                     : "{\"error\":\"erase failed\"}");
+    });
+
     // GET /api/ota/history — newest-first list of OTA attempts.
     // GET /api/config/export — JSON dump of current config with
     // secret fields masked. Audit fix: was missed during the
@@ -591,6 +656,15 @@ static void _registerStaticAndPostRoutes() {
             "{\"ok\":true,\"rebooting\":true}");
         webServer.requestReboot();
     });
+    // Auth-only gateway reboot (no CSRF) so the stateless HA integration /
+    // Add-on can reboot the gateway — matches /api/control_owner. POST so a
+    // stray browser request can't trigger it.
+    _async.on("/api/reboot_gateway", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        req->send(200, "application/json",
+            "{\"ok\":true,\"rebooting\":true}");
+        webServer.requestReboot();
+    });
 
     // POST /api/pin — update the stored BLE passcode (NVS) and reboot
     // so the new value takes effect on the next pair attempt. Sync
@@ -620,6 +694,28 @@ static void _registerStaticAndPostRoutes() {
         req->send(200, "application/json",
             "{\"ok\":true,\"rebooting\":true}");
         webServer.requestReboot();
+    });
+
+    // Set the charge-control owner. Auth-only (no CSRF) so the stateless HA
+    // integration / Add-on can set it, matching /api/command. Persists to NVS
+    // immediately (no reboot) so the selection survives a power cycle.
+    _async.on("/api/control_owner", HTTP_POST, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        String owner;
+        if (req->hasParam("owner"))            owner = req->getParam("owner")->value();
+        else if (req->hasParam("owner", true)) owner = req->getParam("owner", true)->value();
+        owner.trim();
+        if (owner != "wallbox_schedule" && owner != "integration"
+            && owner != "addon" && owner != "none") {
+            req->send(400, "application/json",
+                "{\"error\":\"owner must be wallbox_schedule|integration|addon|none\"}");
+            return;
+        }
+        configMgr.mut().controlOwner = owner;
+        configMgr.save();
+        Log.printf("[Web] control_owner set to '%s' via API\n", owner.c_str());
+        req->send(200, "application/json",
+            String("{\"ok\":true,\"control_owner\":\"") + owner + "\"}");
     });
 }
 
@@ -894,6 +990,17 @@ static void _registerBleRoutes() {
         }
         String value = req->hasParam("value")
             ? req->getParam("value")->value() : String("");
+        // Idempotent start/stop (#23): skip a start that's already charging, or
+        // a stop that's already stopped. Some chargers (e.g. Pulsar Plus USA fw)
+        // treat w_cha as a TOGGLE, so a redundant write flips the state the wrong
+        // way; skipping also avoids a needless BLE round-trip. Report success —
+        // we're already in the requested state.
+        if ((action == "start" || action == "stop") &&
+            wallboxBLE.startStopRedundant(action == "start")) {
+            req->send(200, "application/json",
+                "{\"status\":\"ok\",\"skipped\":\"already-in-target-state\"}");
+            return;
+        }
         // Tag the commander for arbitration (advisory; see docs/control-owner.md).
         // Charge-affecting actions record who issued them (optional &owner=, ""
         // -> "manual") so controllers can detect a recent manual/other override.
@@ -926,7 +1033,16 @@ static void _registerBleRoutes() {
         }
         else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
         else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
-        else if (action == "current") { met = bapi::MET_SET_CURRENT; par = value; }
+        else if (action == "current") {
+            // Clamp to the 6–32 A envelope (the charger can misbehave on an
+            // out-of-range setpoint). MQTT + integration already clamp; the web
+            // paths forwarded `value` raw. toInt()==0 on garbage -> safe 6 A floor.
+            met = bapi::MET_SET_CURRENT;
+            int amps = value.toInt();
+            if (amps < 6)  amps = 6;
+            if (amps > 32) amps = 32;
+            par = String(amps);
+        }
         else if (action == "reboot")  { met = bapi::MET_REBOOT;      par = "null"; }
         else if (action == "bapi") {
             // Use a per-request String for the met arg so its c_str()
@@ -1111,6 +1227,13 @@ static void _registerJsonBodyRoutes() {
 static bool   _asyncOtaError        = false;
 static bool   _asyncOtaShouldReboot = false;
 static size_t _asyncOtaTotalSize    = 0;
+// True once THIS upload has actually paused BLE for the flash (past the
+// admission checks). Only then may the error path un-pause — so an early
+// reject (auth / another-OTA-in-progress / canAcceptOta) that returns BEFORE
+// the pause can't cancel a pause it never took (which, for a concurrent upload,
+// would un-pause BLE mid-flash of the real one — the panic race the pause
+// exists to prevent).
+static bool   _otaBlePaused         = false;
 // Set by the body handler when a non-multipart (raw) body hits /api/ota.
 // A real OTA is multipart/form-data and is dispatched to the upload
 // handler; anything reaching the body handler is malformed.
@@ -1134,6 +1257,14 @@ static void _registerOtaRoute() {
                 return;
             }
             if (_asyncOtaError) {
+                // A failed OTA paused BLE (freeing resources for the flash) but
+                // the flash never completed — un-pause so BLE reconnects instead
+                // of sitting down for the whole pause window. Gated: only if THIS
+                // upload actually took the pause (not an early admission reject).
+                if (_otaBlePaused) {
+                    wallboxBLE.pause(0);
+                    _otaBlePaused = false;
+                }
                 if (otaRetryAfterSec > 0) {
                     AsyncWebServerResponse* res = req->beginResponse(503,
                         "application/json",
@@ -1144,7 +1275,12 @@ static void _registerOtaRoute() {
                         String(otaRetryAfterSec));
                     req->send(res);
                 } else {
-                    req->send(500, "text/plain", "Upload failed");
+                    // Surface the actual flash-layer reason (begin/write/magic/
+                    // truncation) so HA shows something actionable instead of a
+                    // bare "Upload failed".
+                    String why = otaRejectReason.length()
+                        ? otaRejectReason : String("upload failed");
+                    req->send(500, "text/plain", why);
                 }
             } else {
                 req->send(200, "text/plain", "OK");
@@ -1169,6 +1305,7 @@ static void _registerOtaRoute() {
                 _asyncOtaError = false;
                 _asyncOtaShouldReboot = false;
                 _asyncOtaTotalSize = 0;
+                _otaBlePaused = false;   // set true only once we take the pause
 
                 // SECURITY: auth check BEFORE Update.begin() erases
                 // the partition. _checkAuth handles the 401 response;
@@ -1200,6 +1337,7 @@ static void _registerOtaRoute() {
                 otaInProgress = true;
 
                 wallboxBLE.pause(5 * 60 * 1000);  // 5 min
+                _otaBlePaused = true;             // now the error path may un-pause
 
                 size_t expected = (size_t)req->contentLength();
                 expectedOtaSize = expected;
@@ -1228,6 +1366,8 @@ static void _registerOtaRoute() {
                 if (!ok) {
                     Log.printf("[OTA-async] Begin failed: %s\n",
                         Update.errorString());
+                    otaRejectReason = String("flash begin failed: ")
+                        + Update.errorString();
                     // Restore before returning — `final` may not fire to
                     // clean up later. Idempotent if it does.
                     wb_wdt::restore();
@@ -1254,6 +1394,8 @@ static void _registerOtaRoute() {
                     if (data[0] != 0xE9) {
                         Log.println("[OTA-async] REJECTED: not ESP32 "
                                     "firmware (magic byte != 0xE9)");
+                        otaRejectReason =
+                            "not a valid ESP32 firmware image (bad magic byte)";
                         Update.abort();
                         _asyncOtaError = true;
                         return;
@@ -1263,6 +1405,8 @@ static void _registerOtaRoute() {
                 if (Update.write(data, len) != len) {
                     Log.printf("[OTA-async] Write failed: %s\n",
                         Update.errorString());
+                    otaRejectReason = String("flash write failed: ")
+                        + Update.errorString();
                     _asyncOtaError = true;
                 }
                 _asyncOtaTotalSize += len;
@@ -1277,11 +1421,23 @@ static void _registerOtaRoute() {
                     size_t diff = (_asyncOtaTotalSize < expectedOtaSize)
                         ? expectedOtaSize - _asyncOtaTotalSize
                         : _asyncOtaTotalSize - expectedOtaSize;
-                    if (diff > 256) {
+                    // expectedOtaSize is the request Content-Length. This
+                    // handler only ever receives multipart/form-data (HA's
+                    // integration + the OTA page both post that way), so the
+                    // Content-Length includes the boundary + Content-Disposition
+                    // header + trailing boundary — a few hundred bytes that are
+                    // NOT written to flash. The old 256-byte tolerance
+                    // false-tripped on longer boundaries and aborted valid
+                    // uploads, forcing USB re-flashes (gambys, ManuMaxGit). Allow
+                    // a generous margin for framing; a real truncation is still
+                    // caught by Update.end(true)'s image checksum below.
+                    if (diff > 4096) {
                         Log.printf("[OTA-async] TRUNCATED: expected ~%u "
                                    "bytes, got %u — aborting\n",
                                    (unsigned)expectedOtaSize,
                                    (unsigned)_asyncOtaTotalSize);
+                        otaRejectReason = "upload truncated (received fewer "
+                                          "bytes than expected)";
                         _asyncOtaError = true;
                     }
                 }
@@ -1300,6 +1456,9 @@ static void _registerOtaRoute() {
                 } else if (Update.end(true)) {
                     Log.printf("[OTA-async] Success! %u bytes written\n",
                         (unsigned)_asyncOtaTotalSize);
+                    // The installed (TO) version is backfilled by recordBoot()
+                    // when the new firmware boots — #13 follow-up. See
+                    // wb_ota_history.cpp for why we can't read it here.
                     wb_ota_history::recordOta(millis() / 1000,
                         WB_VERSION, _asyncOtaTotalSize, true, "ok");
                     wb_health::markOtaSuccess();

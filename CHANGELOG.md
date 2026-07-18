@@ -4,6 +4,324 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+## [3.2.0] - 2026-07-18
+
+Promotes **3.2.0-rc.4** to stable, plus the post-rc.4 diagnostics and robustness
+fixes below. See the `3.2.0-rc.*` and `3.2.0-beta.*` sections for the full
+pre-release history.
+
+### Added
+- **Crash diagnostics (coredump).** A dedicated coredump partition captures a
+  full ELF core on any panic / task-watchdog reset. `/api/coredump/summary`
+  reports the crashing task, program counter and backtrace over HTTP — no serial
+  cable and no ELF needed; `/api/coredump` downloads the raw core (auth-gated,
+  since it is a raw RAM image). *Requires a one-time USB re-flash to add the
+  partition; existing OTA installs are unaffected and simply do not capture
+  cores until re-flashed.*
+- Direct link to the GitHub releases / changelog from the /info Firmware
+  section. *(peter-mcc, #13)*
+
+### Fixed
+- **Gateway MQTT/status payload could become invalid JSON**, which HA logged as
+  `Invalid state message '' from wallbox/…/response/gateway` (the gateway sensors
+  briefly went unavailable until the next clean publish). The `/api/status` and
+  MQTT gateway payloads are hand-built via string concatenation, so a
+  device-reported string with a stray quote / backslash / control char (a partial
+  BLE read, or an unusual WiFi SSID) — or `chip_temp` coming back `NaN` from the
+  ESP32 temp sensor — produced malformed JSON. Device strings are now JSON-escaped
+  (`wb_jsonEsc`) in both builders, and `chip_temp` emits `null` on a NaN/inf read.
+  (Latent robustness bug, not an rc.4 regression.)
+- **OTA history showed the version you upgraded _from_, not the one it
+  installed** — an rc.4 upload displayed as "beta.14". The installed version is
+  now backfilled when the new firmware boots, so the row reads `beta.14 → rc.4`.
+  *(peter-mcc, #13)*
+- **OTA history had silently stopped recording** on some gateways: a full /
+  fragmented NVS made the write fail with no error, leaving a stale list. The
+  store now frees the key before rewriting so the write lands, and logs a
+  failure instead of losing it quietly (same silent-fail class as the earlier
+  charge-log fix).
+- **Task-watchdog could be left unable to reboot the device** after an OTA: the
+  watchdog timeout is extended during the flash-erase, but `restore()` put back
+  the timeout without its panic flag — so for the rest of that uptime a later
+  wedge would hang instead of recovering. `restore()` now restores the panic
+  flag too.
+
+## [3.2.0-rc.4]
+
+### Fixed
+- **MQTT publish ring filled and dropped forever (then panicked) when MQTT was
+  disabled / no broker configured (#25).** The BLE task queued every on-demand
+  `/api/command` passthrough response (r_lse, r_not, g_alo…) for MQTT publish even
+  with MQTT off — so HACS-integration-only setups logged `pending MQTT pub ring
+  full, dropping met=…` on every poll indefinitely, with the sustained ring churn
+  the likely panic trigger. Responses are now queued for MQTT only when MQTT is
+  actually connected (the wake path + caches still return them, so nothing is
+  lost). Reported by geertvanvaerenbergh.
+- **Charge-log stopped recording since late June — two root causes, both fixed.**
+  1. *Detection*: capture opened a burst only when `cp` (charge power) exceeded
+     0.10 kW, so Eco-Smart **solar** sessions (where `cp` reads ~0 while energy
+     flows) recorded nothing. Detection now also fires on metered session energy
+     (`r_dat.en`) rising, and burst energy is the metered Δen when available
+     (falls back to the cp integral for chargers without `en`, e.g. Zentri).
+  2. *Persistence*: `store()` silently ignored NVS write failures, and growing
+     the interval blob in place fails on a near-full NVS partition — so closed
+     bursts were logged but never saved (the ring sat stuck at a fixed count).
+     Now frees the old value before writing (so the write only needs room for the
+     new blob) and logs any write failure. **Verified on hardware: bursts now
+     persist.**
+- **Charge-log green (solar) attribution was always 0 on MAX/Plus.** It derived
+  the green fraction from `r_dat.gen`, which is the sticky schedule/eco *override
+  flag* on those models, not green energy. Green Wh now comes from the
+  authoritative per-session `r_lse.green_energy`. (Fixes solar being costed at the
+  grid rate.)
+- **BLE response race → panic on marginal links.** The NimBLE notify callback
+  (host task) mutated the response parser/buffer with no lock against
+  `_sendCommandDirect` (BLE task) resetting it — a late/duplicate notification
+  racing the next command's `reset()`/`move()` corrupted the String buffer. A new
+  `_parserMutex` serialises the two. (The recurring `task-watchdog`/`panic`
+  reboots.)
+- **MQTT `resume_schedule` could fault a *paused* charger (error 114).** It sent a
+  hard Stop unconditionally; a Stop while merely paused/waiting can fault the
+  charger. Now gated on `isCharging()`, matching the web/async paths.
+- **`den` (V2H discharge) energy was scaled ÷1000 over MQTT vs ÷100 in the HACS
+  integration — a 10× disagreement.** Aligned to the `r_dat.en` sibling
+  convention (÷100). (Quasar-only; unverified on hardware.)
+- **Removed the bogus MQTT "Green Energy" sensor** (published `r_dat.gen/100` —
+  the override flag as kWh). The authoritative per-session green sensor (r_lse)
+  remains; the stale entity is cleaned up on connect.
+- **New `schedule_paused` flag in `/api/status`** — the authoritative "manual
+  override active" signal (schedules/Eco-Smart suspended). Computed from
+  `r_lse.control_mode == 1` (model-agnostic), falling back to `r_dat.gen != 0`
+  only for chargers without r_lse (Zentri/original Pulsar, where `gen` genuinely
+  is the override flag). This replaces the surfaces' broken `gen != 0` guesses:
+  on the MAX Pro `gen` is accumulated *green energy*, so the dashboard/add-on
+  banner false-triggered during solar and never cleared on Resume. Integration +
+  Add-on now read this single field.
+- **Gateway Temperature is `null` on hardware without a real internal sensor.**
+  `temperatureRead()` returns a fixed/garbage value on the classic ESP32 (WROOM —
+  the future esp32dev target), so `/api/status` + the MQTT gateway payload now emit
+  `chip_temp: null` there (via a shared `wb_chipTempJson()`), and the MQTT template
+  renders empty → HA shows the sensor *unavailable* instead of a misleading number.
+  ESP32-S3/S2/C3/C6 are unchanged (real reading).
+- **`car_connected` mis-read on Zentri/original Pulsar.** It applied the MAX 0–18
+  status-code set to Zentri's different enum; now uses the Zentri set when
+  `_isZentri`.
+- **Zentri keepalive reconnect loop.** Keepalive picked `ping` vs `r_dat` from
+  `isPlus()`, which is false for a runtime-detected Zentri — so a Zentri that
+  lacks `ping` reconnected every 30 s. Now gated on `isPlus() || _isZentri`.
+- **`/api/command?action=current` was unclamped on the web paths.** Now clamped to
+  6–32 A (matching MQTT/integration).
+
+### Changed
+- Integration steady-state polling shaped to protect the gateway BLE pipeline
+  (see the HACS integration changelog): live reads every cycle, rarely-changing
+  config reads on a slow cadence — removing a ~9-concurrent-BAPI burst every 10 s
+  that contributed to the watchdog reboots.
+
+### Added
+- `docs/CHARGER_QUIRKS.md` — consolidated per-model quirk/diff catalog (MAX / Plus
+  / Copper / Quasar / Zentri) covering protocol, field scales/enums, green source,
+  and control commands, plus a ranked list of known per-model issues.
+
+## [3.2.0-rc.3]
+
+### Fixed
+- **Gateway Temperature MQTT sensor was stuck at 0 °C.** `chip_temp` was added to
+  `/api/status` (HTTP) but not to the separate MQTT gateway payload
+  (`publishGatewayInfo`), so the discovery entity read a missing field → 0. Now
+  published on both. (Found in the pre-stable code review.)
+- **OTA: a rejected/duplicate upload could un-pause BLE mid-flash of the real
+  one.** The error path's BLE un-pause fired on *any* OTA error, including
+  admission rejects (auth / "another OTA in progress" / capacity) that return
+  *before* BLE is paused — so a second concurrent OTA POST could cancel the
+  in-flight upload's pause and reintroduce the OTA panic race. The un-pause is
+  now gated on this upload having actually taken the pause.
+- **Charge-log recovery is now idempotent.** A crash in the split-second between
+  the two NVS writes on burst close (append interval → clear pending state)
+  could double-append the same interval on the next boot. Recovery now skips a
+  burst that already matches the newest stored interval (usid+start).
+
+## [3.2.0-rc.2]
+
+### Fixed
+- **Charge-log no longer loses a charge that's interrupted mid-burst.** The
+  in-progress burst lived only in RAM, so a reboot / OTA mid-charge — or an
+  r_dat feed stall that never delivered the "cp dropped" close-sample — silently
+  dropped the whole charge (it's only written on close). The open burst is now
+  persisted to NVS periodically and **recovered on the next boot**, and a stalled
+  open burst is **auto-closed on a timeout** so it can't sit open forever or be
+  lost. (Root-caused from a gateway whose log went silent across a reboot-heavy
+  OTA window; #166.)
+
+### Added
+- **Gateway die temperature** (`chip_temp`) — the ESP32-S3 internal temperature
+  is now in `/api/status` and exposed as an MQTT diagnostic sensor ("Gateway
+  Temperature"), so thermal issues (hot enclosure/garage) are visible instead of
+  guessed (#162).
+
+### Changed
+- **BLE error logs now decode the NimBLE code** — e.g. `err 0x07 ENOTCONN (link
+  dropped mid-op)` instead of a bare hex — on the secureConnection / encryption /
+  disconnect paths, so pasted logs are self-diagnosing (#161).
+
+## [3.2.0-rc.1]
+
+Release candidate for **3.2.0**. Rolls up the 3.2.0-beta line; if this soaks
+clean it promotes to the 3.2.0 stable release.
+
+### Added
+- **Per-phase EM340 / Power-Boost meter diagnostics.** New MQTT sensors for
+  per-phase mains voltage (`Mains Voltage L2/L3`) and house current
+  (`House Current L2/L3`), complementing the existing per-phase Grid Power
+  L1/L2/L3 — so a 3-phase meter now exposes full per-phase voltage, current and
+  power. Diagnostic-category, auto-hidden when no meter is fitted; L2/L3 read 0
+  on single-phase. (Community contribution — thanks @hannesjanno, #22.)
+
+### Fixed
+- **A failed OTA no longer leaves BLE stuck off + gives HA a real reason.** OTA
+  pauses BLE (to free resources for the flash); if the flash then failed, the
+  error path never un-paused it, so BLE sat disconnected for the whole 5-min
+  pause window — making a transient flash hiccup look like a dead gateway. The
+  OTA-error path now un-pauses BLE immediately, so it reconnects and a retry
+  works. And the gateway's generic `500 "Upload failed"` now carries the
+  **actual flash-layer reason** (`flash begin failed: …`, `flash write
+  failed: …`, bad magic byte, or truncated), which the HA integration surfaces —
+  so an OTA error is diagnosable instead of opaque.
+
+## [3.2.0-beta.14]
+
+### Changed
+- **`r_lse` read holds one fewer copy of its payload (heap hardening, #13).**
+  The live-session energy read (`r_lse` — the largest periodic BAPI) freed its
+  raw response only *after* building the sanitized copy, briefly holding three
+  copies at once. It now frees the raw response right after parsing, so the
+  handler peaks at two copies — easing heap-fragmentation pressure at long
+  uptime. Defensive: a rare panic (#13) was traced to this read path on a
+  strong, stable link, pointing at heap pressure rather than a link issue; this
+  is cheap insurance, not a confirmed root cause.
+
+### Fixed
+- **OTA no longer false-rejects a valid upload as "truncated."** The size check
+  compared the firmware bytes written against the request `Content-Length` —
+  which, for a multipart upload (how HA's integration and the OTA page both
+  post), includes the boundary + `Content-Disposition` header + trailing
+  boundary (a few hundred bytes that are *not* written to flash). On longer
+  boundaries this tripped the 256-byte tolerance and aborted a **complete**
+  image, forcing USB re-flashes. The tolerance now clears multipart framing;
+  `Update.end()`'s image checksum remains the real integrity guard. Verified on
+  hardware: an upload the old check rejected now flashes cleanly. *(gambys,
+  ManuMaxGit)*
+- **Start / Stop are now idempotent.** A "start" while already charging, or a
+  "stop" while already stopped, is now **skipped** instead of re-sent. Some
+  chargers (e.g. Pulsar Plus USA firmware) treat the `w_cha` command as a
+  **toggle**, so a redundant write flipped the state the *wrong* way — setting
+  the charging switch to "on" from HomeKit/HA while it was already on turned it
+  off. The gateway now checks the current charging state and no-ops a redundant
+  command, so the switch behaves correctly on every surface (HA, HomeKit,
+  dashboard, MQTT). *(quintani, #23)*
+- **"Last Charge Burst" MQTT sensor no longer spams the HA log.** It was
+  published with `state_class: measurement`, which HA rejects for the `energy`
+  device class. It's a per-burst snapshot (not a cumulative total), so it now
+  carries no `state_class`. (The per-session green/grid energy sensors were
+  already `total_increasing`.)
+- **Release binaries no longer report `-dirty`.** The pre-gzipped web-page
+  headers (`include/_gen_*_body_gz.h`) regenerate on every build, so
+  `git describe --dirty` marked *every* release binary `-dirty` — which was
+  confusing when comparing versions (e.g. a downloaded beta.13 logging as
+  `beta.13-dirty`). The version script now ignores those generated files when
+  deciding dirtiness, so a clean release checkout reports an exact version
+  (e.g. `v3.2.0-beta.14`). A real source edit still marks `-dirty`. *(peter-mcc, #13)*
+
+## [3.2.0-beta.13]
+
+### Fixed
+- **Copper SB (and any Ethernet charger): network status rendering.** In Info →
+  Tools, **WiFi Status** showed `[object Object]` when the charger returns
+  `gwsta` as an object (Copper Business firmware) — it now renders the fields.
+  And **Network Status** (`gnsta`) only showed the first interface, so
+  **Ethernet was dropped** on chargers reporting both Wi-Fi and Ethernet — it now
+  lists every interface (headed by its `type`). Pulsar chargers (numeric
+  `gwsta`, single interface) render exactly as before. *(thanks ManuMaxGit, #20)*
+
+## [3.2.0-beta.12]
+
+### Added
+
+- **Build target exposed as `/api/status.board`** (e.g. `esp32s3`). The HA
+  integration's firmware Update entity reads this to fetch the release binary
+  matching the gateway's board, so one-click OTA-from-HA always installs the
+  right image. Falls back to `esp32s3` on older firmware that doesn't emit it.
+
+## [3.2.0-beta.11]
+
+### Fixed
+
+- **Status was blank over HTTP when MQTT wasn't connected (#20).** The bridge that
+  copies the BLE status cache into the web cache (`webServer.updateCache()`) and
+  broadcasts it over the WebSocket ran **only inside `if (mqtt.isConnected())`**.
+  So on any gateway where MQTT wasn't connected — no broker configured, blank
+  host, or an unreachable broker — `/api/charger` served `null` to **both the
+  dashboard and the HACS integration**, even though BLE polling was working
+  perfectly. The web-cache + WebSocket updates now run **unconditionally**; only
+  the MQTT publishes stay gated. Integration/Add-on-only setups (no MQTT) now get
+  live status. Also: the gateway no longer attempts MQTT at all when the broker
+  host is blank.
+- **WiFi self-recovers from a wedged stack after long uptime (#13).** A soft
+  `WiFi.reconnect()` couldn't recover a locked-up WiFi stack (peter-mcc: dropped
+  at ~79 h uptime and stayed down until a manual power-cycle). Added an escalating
+  watchdog: after 5 min continuously disconnected the gateway restarts the whole
+  WiFi stack (off/on + `begin`), and after 30 min it reboots — so it recovers on
+  its own instead of needing a power-cycle. A healthy link is never touched.
+- **MQTT stops hammering an unreachable broker (#20).** When the broker can't be
+  reached (`rc=-2`), reconnect attempts now back off exponentially (5 s → 60 s)
+  instead of retrying every 5 s forever — which was wasting the main loop and
+  overflowing the publish ring. (If you use the Integration/Add-on, just turn
+  MQTT off in Settings and it goes quiet entirely.)
+- **Status/realtime poll retries once on a marginal BLE link (#20).** On a weak
+  link (e.g. an antenna-less ESP32-S3 through the charger enclosure) the periodic
+  `r_dat`/`r_sta` read could drop while an occasional read still got through,
+  leaving the cached status empty for the whole session — the dashboard/HA grid
+  then showed `--` even though the charger was reachable. Each poll now retries
+  once on an empty read. (Root-cause still pending a serial log; this is cheap
+  insurance that helps any marginal link.)
+- **Multiple gateways no longer collide in Home Assistant.** MQTT topics are now
+  namespaced per gateway (`wallbox/<ha_device_id>/…` instead of a shared
+  `wallbox/status`). With two chargers this was making one charger's values
+  cycle into the other's HA entities (e.g. "Max Charging Current" flip-flopping
+  between the two chargers every few seconds). Entities re-point automatically
+  on update — single-gateway installs keep working unchanged. (andypnz)
+- **Dashboard status "Paused" was misleading.** Wallbox status 4 covers both an
+  active Schedule/Solar override (`r_dat.gen != 0`) and a plain stopped/idle
+  session (`gen == 0`). The dashboard now shows **"Connected — not charging"**
+  for the idle case and reserves "Paused" for a real override — matching the HA
+  integration + Add-on so all surfaces agree.
+
+### Changed
+
+- **Default HA Device ID is now MAC-unique** (`wallbox_pulsar_<mac6>`) instead of
+  a fixed `wallbox_pulsar_max`, so two out-of-the-box gateways get distinct HA
+  entity IDs. Existing installs keep their saved ID (only a fresh/wiped flash
+  picks up the new default). Multi-charger users should still give each gateway a
+  memorable **HA Device ID** in Settings.
+
+### Added
+
+- **`gw_fw` in `/api/status`** — the gateway firmware version, so the HA Add-on
+  and Integration can warn when the firmware is too old for the fields they read
+  (instead of silently showing blanks).
+
+- **`POST /api/reboot_gateway`** — auth-only gateway reboot (no CSRF), so the
+  stateless HA integration / Add-on can reboot the gateway. POST (not GET) so a
+  stray browser request can't trigger it; the CSRF-gated `/api/reboot` stays for
+  the web UI. Registered on both the sync and async servers.
+- **`POST /api/control_owner`** — set the charge-control owner over HTTP
+  (`owner=wallbox_schedule|integration|addon|none`). Auth-only (no CSRF), like
+  `/api/command`, so the Home Assistant integration / Add-on can set it without
+  opening the gateway's own Settings page. Persists to NVS immediately (no
+  reboot), so the selection survives a power cycle.
+
 ## [3.0.4] - 2026-06-17
 
 Patch release — heap-pressure relief on the largest web pages (#103).

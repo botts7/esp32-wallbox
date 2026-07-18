@@ -6,8 +6,17 @@
 #include <WiFi.h>
 #include <ArduinoJson.h>
 
-// Topic helpers using NVS config
-static String baseTopic()      { return "wallbox"; }
+// Topic helpers using NVS config. The base is namespaced per gateway
+// (`wallbox/<haDeviceId>`) so two chargers never publish to the same
+// status/command topic — without this, a second gateway's values cycle into
+// the first's HA entities (shared `wallbox/status`). haDeviceId is the same
+// per-device id the HA discovery unique_id uses, and defaults MAC-unique.
+static String baseTopic() {
+    String id = configMgr.get().haDeviceId;
+    id.trim();
+    if (id.isEmpty()) id = "wallbox_pulsar_max";
+    return "wallbox/" + id;
+}
 static String statusTopic()    { return baseTopic() + "/status"; }
 static String realtimeTopic()  { return baseTopic() + "/realtime"; }
 static String availTopic()     { return baseTopic() + "/availability"; }
@@ -36,6 +45,7 @@ static const char* kTzOptions[]   = {
     "Europe/Zurich", "Europe/Rome", "Europe/Vienna", "Europe/Prague",
     "Europe/Warsaw", "Europe/Copenhagen", "Europe/Stockholm", "Europe/Oslo",
     "Europe/Helsinki", "Europe/Athens", "Europe/Bucharest", "Europe/Sofia",
+    "Europe/Tallinn", "Europe/Riga", "Europe/Vilnius",   // Baltic (EET) — #17
     "Europe/Budapest", "Europe/Belgrade", "Europe/Kyiv", "Europe/Moscow",
     "Europe/Istanbul",
     // Americas
@@ -63,7 +73,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 72;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power L1/L2/L3 +meter total energy (EM340)
+static const size_t kDiscoveryCount = 76;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power L1/L2/L3 +meter total energy (EM340) +chip_temp (#162) -green_energy (v3.2.0: r_dat.gen is the override flag, not energy)
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -451,6 +461,10 @@ void WallboxMQTT::begin() {
 }
 
 void WallboxMQTT::loop() {
+    // No broker configured — don't attempt MQTT at all. Integration/Add-on-only
+    // setups leave the MQTT host blank; without this the gateway pointlessly
+    // tries to connect to "" forever and churns the publish ring. (#20)
+    if (configMgr.get().mqttHost.isEmpty()) return;
     if (!_client->connected()) {
         // Edge-trigger the disconnect event on the first loop iteration
         // where we notice we're down. _wasConnected guards against
@@ -459,7 +473,7 @@ void WallboxMQTT::loop() {
             _wasConnected = false;
             wb_diag::reportDisconnect(wb_diag::Kind::MQTT);
         }
-        if (millis() - _lastConnectAttempt >= 5000) {
+        if (millis() - _lastConnectAttempt >= _reconnectGateMs) {
             _connect();
         }
         return;
@@ -489,6 +503,7 @@ void WallboxMQTT::_connect() {
     // LWT: set availability to offline on disconnect
     if (_client->connect(cfg.mqttClientId.c_str(), user, pass, avail.c_str(), 0, true, "offline")) {
         Log.println("[MQTT] Connected");
+        _reconnectGateMs = 5000;   // reset backoff on success
         _subscribe();
         publishAvailability(true);
         if (!_discoveryPublished) {
@@ -497,6 +512,10 @@ void WallboxMQTT::_connect() {
         }
     } else {
         Log.printf("[MQTT] Failed, rc=%d\n", _client->state());
+        // Exponential backoff up to 60 s so a permanently-unreachable broker
+        // (rc=-2, #20) doesn't retry every 5 s forever, hogging the loop and
+        // overflowing the pending-pub ring.
+        _reconnectGateMs = _reconnectGateMs < 60000 ? _reconnectGateMs * 2 : 60000;
     }
 }
 
@@ -581,16 +600,26 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
             Log.printf("[CMD] Unknown charging action: %s\n", payload);
             return;
         }
+        // Idempotent start/stop (#23): skip if already in the target state, so a
+        // redundant write can't toggle a charger that treats w_cha as a toggle.
+        if (wallboxBLE.startStopRedundant(val == 1)) {
+            Log.printf("[CMD] charging %s skipped — already in target state\n", payload);
+            return;
+        }
         par = String(val);
         wallboxBLE.enqueueRequest(bapi::MET_START_STOP, par.c_str());
 
     } else if (sub == "resume_schedule") {
-        // Clears the schedule/eco-smart manual-override flag — what
-        // the Wallbox app's Resume button does. Defensive prefix:
-        // send Stop first because s_cmode mode=0 rejects (subcode 6)
-        // when actively charging. Stop is a no-op when not charging.
-        const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
-        wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
+        // Clears the schedule/eco-smart manual-override flag — what the Wallbox
+        // app's Resume button does. Defensive prefix: send Stop first because
+        // s_cmode mode=0 rejects (subcode 6) when actively charging. But a hard
+        // Stop (par=2 on the MAX) while merely paused/waiting is NOT a no-op — it
+        // can fault the charger (error 114). So gate the Stop on isCharging(),
+        // matching the web/async paths (was unconditional — bug).
+        if (wallboxBLE.isCharging()) {
+            const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
+            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
+        }
         wallboxBLE.enqueueRequest("s_cmode", "{\"mode\":0}");
 
     } else if (sub == "current") {
@@ -727,15 +756,23 @@ void WallboxMQTT::publishCarConnected(const String& statusJson, const String& re
         if (deserializeJson(rd, realtimeJson) == DeserializationError::Ok)
             cs = rd["r"]["charger_status"] | -1;
     }
-    // Local r_dat.st codes where a car is physically plugged in.
-    bool connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
-                      st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
-    // Locked (st==6) carries no plug info in the local BLE protocol — Wallbox
-    // folds locked/no-car and locked/car-connected into the same code 6.
-    // STOPGAP: observed r_sta.charger_status == 19 when locked WITH a car.
-    // This is an unverified, firmware-specific heuristic pending a
-    // locked-with-NO-car measurement to confirm 19 is plug-specific.
-    if (st == 6 && cs == 19) connected = true;
+    bool connected;
+    if (wallboxBLE.isZentri()) {
+        // Zentri/original Pulsar uses a DIFFERENT st enum (0=ready/no-car,
+        // 1=charging, 2=connected, 3=waiting, 4=ramp) — applying the MAX 0-18
+        // set here mis-reported plug state. Anything >= 1 means a car is present.
+        connected = (st >= 1 && st <= 4);
+    } else {
+        // Local r_dat.st codes where a car is physically plugged in (MAX/Plus).
+        connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
+                     st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
+        // Locked (st==6) carries no plug info in the local BLE protocol — Wallbox
+        // folds locked/no-car and locked/car-connected into the same code 6.
+        // STOPGAP: observed r_sta.charger_status == 19 when locked WITH a car.
+        // This is an unverified, firmware-specific heuristic pending a
+        // locked-with-NO-car measurement to confirm 19 is plug-specific.
+        if (st == 6 && cs == 19) connected = true;
+    }
     String topic = baseTopic() + "/car_connected";
     _client->publish(topic.c_str(), connected ? "ON" : "OFF", true);  // retain
 }
@@ -803,6 +840,12 @@ void WallboxMQTT::sendDiscovery() {
         // sensor is the canonical user-facing value).
         String stale = cfg.haDiscoveryPrefix + "/sensor/" + cfg.haDeviceId + "/charger_status_code/config";
         _client->publish(stale.c_str(), "", true);
+        // v3.2.0: "Green Energy" (was value_json.r.gen/100) removed — r_dat.gen is
+        // the sticky schedule/eco override FLAG on MAX/Plus, not accumulated green
+        // energy (reads 0 during a real Eco-Smart solar session). The authoritative
+        // per-session green is the r_lse "Green Energy (Session)" sensor.
+        String staleGreen = cfg.haDiscoveryPrefix + "/sensor/" + cfg.haDeviceId + "/green_energy/config";
+        _client->publish(staleGreen.c_str(), "", true);
     }
 
     // Populate the topic cache once per arm. The switch cases read
@@ -909,13 +952,15 @@ const DiscoveryEntry kEntries[] = {
                "kWh", "energy", "total_increasing", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
-    /*  6 */ { EntityKind::SENSOR, "green_energy", "Green Energy", "mdi:leaf",
-               TopicSlot::STATUS, "{{ (value_json.r.gen / 100) | round(2) }}",
-               "kWh", "energy", "total_increasing", nullptr,
-               TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    // (green_energy from r_dat.gen removed in v3.2.0 — gen is the override flag,
+    //  not energy; see the stale-cleanup above and r_lse "Green Energy (Session)".)
 
-    /*  7 */ { EntityKind::SENSOR, "discharge_energy", "Discharge Energy (V2H)", "mdi:battery-arrow-up",
-               TopicSlot::STATUS, "{{ (value_json.r.den / 1000) | round(3) }}",
+    /*  6 */ { EntityKind::SENSOR, "discharge_energy", "Discharge Energy (V2H)", "mdi:battery-arrow-up",
+               // r_dat.den is a sibling of en/grid/gen in the same object → centi-kWh
+               // (÷100), NOT ÷1000. Was ÷1000 (10× low) and disagreed with the
+               // integration's ÷100. Aligned to the r_dat.en convention.
+               // (Quasar-only; unverified on hardware — no Quasar in the fleet yet.)
+               TopicSlot::STATUS, "{{ (value_json.r.den / 100) | round(2) }}",
                "kWh", "energy", "total_increasing", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
@@ -1012,10 +1057,11 @@ const DiscoveryEntry kEntries[] = {
                "A", "current", "measurement", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
-    // EM340 / Power-Boost meter detail (r_dca): per-phase power + lifetime
-    // total energy. Diagnostic-category per-phase (collapsed in HA); the
-    // total energy feeds the HA Energy dashboard. Unavailable when no meter
-    // accessory is fitted.
+    // EM340 / Power-Boost meter detail (r_dca): per-phase power, mains
+    // voltage and house current, plus lifetime total energy. Diagnostic-
+    // category per-phase (collapsed in HA); the total energy feeds the HA
+    // Energy dashboard. Unavailable (auto-hidden via the meterPresent() gate)
+    // when no meter accessory is fitted.
     { EntityKind::SENSOR, "grid_power_l1", "Grid Power L1", "mdi:flash",
       TopicSlot::METER, "{{ value_json.r.p1 }}",
       "W", "power", "measurement", "diagnostic",
@@ -1027,6 +1073,22 @@ const DiscoveryEntry kEntries[] = {
     { EntityKind::SENSOR, "grid_power_l3", "Grid Power L3", "mdi:flash",
       TopicSlot::METER, "{{ value_json.r.p3 }}",
       "W", "power", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    { EntityKind::SENSOR, "mains_voltage_l2", "Mains Voltage L2", "mdi:sine-wave",
+      TopicSlot::METER, "{{ value_json.r.v2 }}",
+      "V", "voltage", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    { EntityKind::SENSOR, "mains_voltage_l3", "Mains Voltage L3", "mdi:sine-wave",
+      TopicSlot::METER, "{{ value_json.r.v3 }}",
+      "V", "voltage", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    { EntityKind::SENSOR, "house_current_l2", "House Current L2", "mdi:current-ac",
+      TopicSlot::METER, "{{ (value_json.r.c2 / 10) | round(1) }}",
+      "A", "current", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+    { EntityKind::SENSOR, "house_current_l3", "House Current L3", "mdi:current-ac",
+      TopicSlot::METER, "{{ (value_json.r.c3 / 10) | round(1) }}",
+      "A", "current", "measurement", "diagnostic",
       TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
     { EntityKind::SENSOR, "meter_energy", "Meter Total Energy", "mdi:counter",
       TopicSlot::METER, "{{ (value_json.r.e / 1000) | round(2) }}",
@@ -1234,6 +1296,16 @@ const DiscoveryEntry kEntries[] = {
                "dBm", "signal_strength", "measurement", "diagnostic",
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
+    // ESP32-S3 internal die temperature — diagnostic, for spotting thermal
+    // issues (hot enclosure/garage) rather than guessing (#162).
+    { EntityKind::SENSOR, "chip_temp", "Gateway Temperature", "mdi:thermometer",
+      // Render empty (→ HA "unavailable") when chip_temp is null — hardware
+      // without a real internal temp sensor (classic ESP32/WROOM) emits null so
+      // this shows unavailable instead of a fake 0 °C.
+      TopicSlot::GATEWAY, "{% if value_json.chip_temp is not none %}{{ value_json.chip_temp | round(1) }}{% endif %}",
+      "°C", "temperature", "measurement", "diagnostic",
+      TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
     // Surfaces the Wallbox app's "Schedule paused" + "Solar charging
     // paused" labels. The `gen` field in r_dat is the sticky
     // manual-override flag: 0 = schedule armed (will fire normally),
@@ -1311,7 +1383,10 @@ const DiscoveryEntry kEntries[] = {
     /* 66 */ { EntityKind::SENSOR, "last_burst_energy", "Last Charge Burst", "mdi:lightning-bolt",
                TopicSlot::GATEWAY,
                "{{ ((value_json.last_burst_wh | default(0)) / 1000) | round(3) }}",
-               "kWh", "energy", "measurement", nullptr,
+               // No state_class: a per-burst snapshot, not a cumulative total.
+               // HA rejects "measurement" for the energy device_class, and
+               // total_increasing would misread a smaller next burst as a reset.
+               "kWh", "energy", nullptr, nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
     /* 67 */ { EntityKind::SENSOR, "charge_log_count", "Recorded Charge Bursts", "mdi:counter",

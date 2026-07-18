@@ -89,11 +89,22 @@ jobs:
           EOF
           cat .pio/build/esp32s3/install.json
 
+      - name: Name firmware asset for integration OTA
+        if: github.event_name == 'release'
+        run: |
+          # The HA integration's OTA picks the release asset whose name ends
+          # '-<board>.bin' (custom_components/.../update.py pick_asset). Provide a
+          # board-named copy of the app firmware alongside the generic
+          # ESP-Web-Tools parts (firmware/bootloader/partitions + install.json).
+          cp .pio/build/esp32s3/firmware.bin \
+             ".pio/build/esp32s3/wallbox-gateway-${GITHUB_REF_NAME}-esp32s3.bin"
+
       - name: Attach to release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            .pio/build/esp32s3/wallbox-gateway-*-esp32s3.bin
             .pio/build/esp32s3/firmware.bin
             .pio/build/esp32s3/bootloader.bin
             .pio/build/esp32s3/partitions.bin

@@ -3,6 +3,7 @@
 #include "wb_config.h"
 #include "wb_health.h"
 #include "wb_zentri_normalize.h"
+#include "wb_copper_normalize.h"
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
@@ -25,6 +26,27 @@ static const char* MAX_CHR_UUID  = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
 static const char* PLUS_SVC_UUID = "331a36f5-2459-45ea-9d95-6142f0c4b307";
 static const char* PLUS_CHR_UUID = "a9da6040-0823-4995-94ec-9ce41ca28833";
 static const char* PLUS_TXC_UUID = "a73e9a10-628f-4494-a099-12efaf72258f";
+
+// Decode the common NimBLE host (ble_hs) return codes to a short name, so a
+// user's pasted log reads "err 0x07 ENOTCONN (link dropped)" instead of a bare
+// hex we have to look up by hand. Covers the codes that actually turn up on the
+// connect/pair/encrypt paths; unknown values fall through to just the hex.
+static const char* bleErrName(int e) {
+    switch (e) {
+        case 0x03: return "EINVAL (bad argument)";
+        case 0x06: return "ENOMEM (out of memory)";
+        case 0x07: return "ENOTCONN (link dropped mid-op)";
+        case 0x08: return "ENOTSUP (unsupported)";
+        case 0x0d: return "ETIMEOUT (timed out)";
+        case 0x0f: return "EBUSY (stack busy)";
+        case 0x10: return "EREJECT (peer rejected)";
+        case 0x17: return "EAUTHEN (auth/pairing failed)";
+        case 0x18: return "EAUTHOR (not authorised)";
+        case 0x19: return "EENCRYPT (encryption failed)";
+        case 0x1a: return "EENCRYPT_KEY_SZ (key size)";
+        default:   return "";
+    }
+}
 
 class WBClientCallbacks : public NimBLEClientCallbacks {
     uint32_t onPassKeyRequest() override {
@@ -56,7 +78,8 @@ class WBClientCallbacks : public NimBLEClientCallbacks {
     // m_lastErr), so getLastError() here is the last GATT error — often the rc
     // of the write that preceded the drop. Logged as context.
     void onDisconnect(NimBLEClient* pClient) override {
-        Log.printf("[BLE] Disconnected — last GATT err=%d\n", pClient->getLastError());
+        int de = pClient->getLastError();
+        Log.printf("[BLE] Disconnected — last GATT err=%d %s\n", de, bleErrName(de));
     }
 };
 static WBClientCallbacks _secCallbacks;
@@ -76,6 +99,7 @@ void WallboxBLE::begin(const char* addr) {
     // The mutex serialises _sendCommandDirect() callers (notably: the BLE task's
     // own keepalive, and the main task's poll cycles).
     if (!_cmdMutex) _cmdMutex = xSemaphoreCreateMutex();
+    if (!_parserMutex) _parserMutex = xSemaphoreCreateMutex();
     if (!_cacheMutex) _cacheMutex = xSemaphoreCreateMutex();
     // 2.7.0 step 1: BLE request queue infrastructure. Allocated here
     // alongside the existing mutexes; no callers yet — this is the
@@ -168,9 +192,13 @@ void WallboxBLE::loop() {
         }
 
         // Keepalive if idle (no commands sent recently)
-        // Plus doesn't implement `ping` — use r_dat (status) which is universal
+        // Plus doesn't implement `ping` — use r_dat (status) which is universal.
+        // Zentri/original Pulsar also lacks `ping`; it's detected only at runtime
+        // (_isZentri), which does NOT feed isPlus(), so gate on it explicitly or a
+        // Zentri keepalives with `ping` and reconnect-loops every PING_INTERVAL_MS.
         if (millis() - _lastActivityTime >= PING_INTERVAL_MS) {
-            const char* keepalive = isPlus() ? bapi::MET_GET_STATUS : bapi::MET_PING;
+            const char* keepalive = (isPlus() || _isZentri) ? bapi::MET_GET_STATUS
+                                                            : bapi::MET_PING;
             String resp = _sendCommandDirect(keepalive, "null", 2000);
             if (resp.isEmpty()) {
                 Log.printf("[BLE] Keepalive %s timeout — reconnecting\n", keepalive);
@@ -266,7 +294,13 @@ void WallboxBLE::loop() {
                 if (doWake && req.waiter) {
                     xTaskNotify(req.waiter, req.reqId, eSetValueWithOverwrite);
                 }
-                if (doMqtt && sharedResp && sharedResp->length()) {
+                // Only queue for MQTT publish when MQTT is actually connected.
+                // Without this, on-demand /api/command passthroughs pile into a
+                // ring nobody drains when MQTT is disabled / no broker configured
+                // (HACS-integration-only setups) → "ring full, dropping" forever
+                // + sustained pressure. The response is still returned via the
+                // wake path (doWake) and cached, so nothing is lost. (#25)
+                if (doMqtt && _mqttPubEnabled && sharedResp && sharedResp->length()) {
                     _enqueueMqttPub(String(req.met), sharedResp);
                 }
             }
@@ -587,9 +621,10 @@ void WallboxBLE::_connect() {
             // small delay matches the fallback path's behaviour.
             delay(200);
         } else {
-            Log.printf("[BLE] secureConnection() failed (err 0x%02x) — "
+            int se = _client->getLastError();
+            Log.printf("[BLE] secureConnection() failed (err 0x%02x %s) — "
                        "continuing unpaired; writes may be rejected\n",
-                       _client->getLastError());
+                       se, bleErrName(se));
         }
     } else {
         Log.println("[BLE] Zentri: skipping SMP pair (unauthenticated handshake protocol)");
@@ -617,7 +652,8 @@ void WallboxBLE::_connect() {
                 delay(200);
                 notifyOk = notifyChr->registerForNotify(_notifyCb);
             } else {
-                Log.printf("[BLE] Encryption failed (err 0x%02x)\n", _client->getLastError());
+                int ee = _client->getLastError();
+                Log.printf("[BLE] Encryption failed (err 0x%02x %s)\n", ee, bleErrName(ee));
             }
         }
     }
@@ -1058,20 +1094,28 @@ void WallboxBLE::_notifyCb(NimBLERemoteCharacteristic* chr, uint8_t* data, size_
         Log.printf("[BLE] RX raw (%u): %s|%s\n", (unsigned)len, hex.c_str(), ascii.c_str());
     }
 
+    // Feed the parser under _parserMutex so this host-task callback can't race
+    // _sendCommandDirect's reset()/move() on the BLE task. Without the lock a
+    // late/duplicate notification (marginal link) mutates the parser's String
+    // buffer while the next command resets it → heap corruption → panic. If the
+    // lock can't be taken (only ever held briefly by reset/move), drop this
+    // frame rather than race — the command times out and retries.
+    SemaphoreHandle_t pm = _instance->_parserMutex;
+    if (pm && xSemaphoreTake(pm, pdMS_TO_TICKS(100)) != pdTRUE) return;
     bool complete = _instance->_parser.feed(data, len);
     if (complete) {
         // Move-out: ownership of the parser's accumulated buffer
-        // transfers to _lastResponse instead of being copied. Cuts
-        // the BAPI response pipeline from 3-4 simultaneous String
-        // copies down to 2 (parser->_lastResponse->caller). The
-        // remaining copy is the caller's `resp` in _sendCommandDirect
-        // which a v3.1 follow-up will also collapse.
+        // transfers to _lastResponse instead of being copied.
         _instance->_lastResponse = _instance->_parser.takeBuffer();
         _instance->_responseReady = true;
         _instance->_seenBapiThisConnection = true;
-        if (_instance->_responseCb) {
-            _instance->_responseCb(_instance->_lastResponse);
-        }
+    }
+    if (pm) xSemaphoreGive(pm);
+    // Legacy response callback runs OUTSIDE the lock (it may be slow and must not
+    // stall a BAPI round-trip). By here _lastResponse is set and _cmdMutex keeps
+    // the owning caller from resetting until it consumes the response.
+    if (complete && _instance->_responseCb) {
+        _instance->_responseCb(_instance->_lastResponse);
     }
 }
 
@@ -1251,8 +1295,13 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
     String cmd = bapi::buildCmd(met, par, id);
     String framed = bapi::frame(cmd);
 
+    // Reset the parser under _parserMutex — a late notification from the PREVIOUS
+    // command could still be feeding the parser on the host task; resetting it
+    // concurrently would corrupt the buffer.
+    if (_parserMutex) xSemaphoreTake(_parserMutex, portMAX_DELAY);
     _parser.reset();
     _responseReady = false;
+    if (_parserMutex) xSemaphoreGive(_parserMutex);
 
     Log.printf("[BLE] TX %s\n", met);
 
@@ -1322,13 +1371,15 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
         return "";
     }
 
-    Log.printf("[BLE] RX %s (%d bytes)\n", met, _lastResponse.length());
-    // Move ownership of the response buffer out instead of copying.
-    // _cmdMutex serialises BAPI calls, so _lastResponse is exclusively
-    // ours from notify-completion until the next reset(). After this
-    // move, _lastResponse is empty; the next BAPI request will
-    // overwrite via takeBuffer() in the notify callback.
-    String resp = std::move(_lastResponse);
+    // Move ownership of the response buffer out under _parserMutex so a late/
+    // duplicate notification's takeBuffer()→_lastResponse write can't race this
+    // read+move (that race corrupts the String → panic). _cmdMutex serialises
+    // callers; _parserMutex serialises against the host-task notify callback.
+    String resp;
+    if (_parserMutex) xSemaphoreTake(_parserMutex, portMAX_DELAY);
+    resp = std::move(_lastResponse);
+    if (_parserMutex) xSemaphoreGive(_parserMutex);
+    Log.printf("[BLE] RX %s (%d bytes)\n", met, resp.length());
     if (_cmdMutex) xSemaphoreGive(_cmdMutex);
     return resp;  // RVO + move = zero additional copies on the return
 }
@@ -1432,6 +1483,14 @@ void WallboxBLE::_storeCache(String& dst, uint32_t& seq, const String& value) {
 void WallboxBLE::_pollStatus() {
     if (_state != State::CONNECTED) return;
     String resp = _sendCommandDirect(bapi::MET_GET_STATUS);
+    if (resp.isEmpty() && _state == State::CONNECTED) {
+        // One retry — on a marginal BLE link (e.g. an antenna-less S3 through a
+        // charger enclosure, #20) the periodic r_dat can drop while an occasional
+        // read still gets through, leaving the status cache empty for the whole
+        // session. Cheap insurance; on a healthy link the first read succeeds.
+        delay(50);
+        resp = _sendCommandDirect(bapi::MET_GET_STATUS);
+    }
     if (!resp.isEmpty()) {
         // Zentri/original Pulsar omits `cp` — synthesise charge power from the
         // phase currents so every downstream consumer (dashboard, MQTT,
@@ -1439,12 +1498,18 @@ void WallboxBLE::_pollStatus() {
         // cycle's cached meter for measured voltage, else the nominal setting.
         if (_isZentri)
             wb_zentri::normaliseStatus(resp, (float)_mainsVoltage, _cachedMeterJson);
+        // Copper SB / Business firmware names its status fields differently (#20).
+        // Self-detecting no-op until the Copper mapping is implemented.
+        wb_copper::normaliseStatus(resp, (float)_mainsVoltage, _cachedMeterJson);
         _storeCache(_cachedStatusJson, _seqStatus, resp);
     }
     // Energy meter on same cycle — lightweight & useful
     if (_state != State::CONNECTED) return;
     String meter = _sendCommandDirect(bapi::MET_GET_METER);
     if (!meter.isEmpty()) {
+        // Copper SB reports meter fields under different keys (#20). Self-
+        // detecting no-op until the Copper meter mapping is implemented.
+        wb_copper::normaliseMeter(meter);
         _storeCache(_cachedMeterJson, _seqMeter, meter);
         // Meter capability (#129): error code 4 = "feature not supported"
         // (no Power Boost / Power Meter accessory). A valid r object means
@@ -1464,7 +1529,16 @@ void WallboxBLE::_pollStatus() {
         // caching so it can never reach an MQTT topic, the WS feed, or an
         // HTTP consumer. The cache is the single source for all of them.
         JsonDocument d;
-        if (deserializeJson(d, lse) == DeserializationError::Ok) {
+        DeserializationError err = deserializeJson(d, lse);
+        // Free the raw response now: deserializeJson copies into the document's
+        // own pool, so `d` no longer references `lse`. r_lse is the largest
+        // periodic BAPI payload; releasing the raw copy before we build the
+        // serialized `clean` string means the handler holds at most two copies
+        // (parsed doc + one string) instead of three at its peak — easing
+        // heap-fragmentation pressure at long uptime (#13 crash was in this
+        // read path). Cheap insurance; not a confirmed root cause.
+        lse = String();
+        if (err == DeserializationError::Ok) {
             if (d["r"].is<JsonObject>()) d["r"].remove("user_id");
             String clean;
             serializeJson(d, clean);
@@ -1476,6 +1550,11 @@ void WallboxBLE::_pollStatus() {
 void WallboxBLE::_pollRealtime() {
     if (_state != State::CONNECTED) return;
     String resp = _sendCommandDirect(bapi::MET_GET_REALTIME);
+    if (resp.isEmpty() && _state == State::CONNECTED) {
+        // One retry on a marginal link, same rationale as _pollStatus (#20).
+        delay(50);
+        resp = _sendCommandDirect(bapi::MET_GET_REALTIME);
+    }
     if (!resp.isEmpty()) _storeCache(_cachedRealtimeJson, _seqRealtime, resp);
 }
 
@@ -1742,6 +1821,15 @@ bool WallboxBLE::isCharging() {
             (rd["r"]["charger_status"] | -1) == 1) return true;
     }
     return false;
+}
+
+bool WallboxBLE::startStopRedundant(bool wantStart) {
+    // A "start" while already charging, or a "stop" while already stopped, is a
+    // redundant w_cha write. Harmless on most chargers, but some (e.g. Pulsar
+    // Plus USA fw) treat w_cha as a TOGGLE and flip the state the wrong way on a
+    // redundant write. Skipping it makes start/stop idempotent for every surface
+    // (HA switch, HomeKit, dashboard, MQTT). (#23)
+    return wantStart ? isCharging() : !isCharging();
 }
 
 bool WallboxBLE::plugReminderActive(uint32_t leadMinutes) {

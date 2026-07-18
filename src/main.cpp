@@ -49,10 +49,16 @@ static void publishCachedStatusIfNew() {
     if (seq != 0 && seq != _lastSeqStatus && !resp.isEmpty()) {
         _lastSeqStatus = seq;
         lastStatus = resp;
-        wallboxMQTT.publishStatus(resp);
-        wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
+        // Web cache + WS must update even with MQTT down — /api/charger (the
+        // dashboard AND the HA integration read it) is fed from the web cache.
+        // Only the MQTT publishes are gated. (#20: an MQTT-less / unreachable-
+        // broker gateway was serving null status to every HTTP consumer.)
         webServer.updateCache(lastStatus, lastRealtime);
         wbws::broadcast("status", resp);
+        if (wallboxMQTT.isConnected()) {
+            wallboxMQTT.publishStatus(resp);
+            wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
+        }
     }
 }
 static void publishCachedRealtimeIfNew() {
@@ -61,9 +67,11 @@ static void publishCachedRealtimeIfNew() {
     if (seq != 0 && seq != _lastSeqRealtime && !resp.isEmpty()) {
         _lastSeqRealtime = seq;
         lastRealtime = resp;
-        wallboxMQTT.publishRealtime(resp);
-        wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
-        webServer.updateCache(lastStatus, lastRealtime);
+        webServer.updateCache(lastStatus, lastRealtime);   // always (see status drain, #20)
+        if (wallboxMQTT.isConnected()) {
+            wallboxMQTT.publishRealtime(resp);
+            wallboxMQTT.publishCarConnected(lastStatus, lastRealtime);
+        }
     }
 }
 // Charge-interval capture — fed from the STATUS cache (BAPI r_dat, which
@@ -72,21 +80,39 @@ static void publishCachedRealtimeIfNew() {
 // when the broker is disconnected (the publishCached*IfNew drains only run
 // inside `if (mqtt.isConnected())`).
 static uint32_t _lastChargeLogSeq = 0;
+static uint32_t _lastChargeLogLseSeq = 0;
 static void feedChargeLog() {
+    // Feed authoritative per-session GREEN energy (r_lse) BEFORE the status
+    // sample, so a burst opening on this tick baselines against fresh green.
+    // r_dat.gen is the schedule/eco override flag, not green energy.
+    String lse; uint32_t lseSeq = 0;
+    wallboxBLE.copyCachedLse(lse, lseSeq);
+    if (lseSeq != 0 && lseSeq != _lastChargeLogLseSeq && !lse.isEmpty()) {
+        _lastChargeLogLseSeq = lseSeq;
+        JsonDocument ld;
+        if (deserializeJson(ld, lse) == DeserializationError::Ok) {
+            JsonVariantConst g = ld["r"]["green_energy"];
+            if (!g.isNull()) wb_charge_log::onLseGreen(g.as<double>());
+        }
+    }
     String st; uint32_t seq = 0;
     wallboxBLE.copyCachedStatus(st, seq);
     if (seq != 0 && seq != _lastChargeLogSeq && !st.isEmpty()) {
         _lastChargeLogSeq = seq;
         wb_charge_log::onRealtime(st);
     }
+    // Housekeeping runs every loop (self-throttled) even when the seq is frozen
+    // (r_dat feed stalled) — that's exactly when a stuck-open burst must be
+    // closed so a mid-charge BLE stall / reboot can't silently drop the charge.
+    wb_charge_log::tick((uint32_t)time(nullptr));
 }
 static void publishCachedMeterIfNew() {
     String resp; uint32_t seq = 0;
     wallboxBLE.copyCachedMeter(resp, seq);
     if (seq != 0 && seq != _lastSeqMeter && !resp.isEmpty()) {
         _lastSeqMeter = seq;
-        wallboxMQTT.publishResponse("meter", resp);
-        wbws::broadcast("meter", resp);
+        if (wallboxMQTT.isConnected()) wallboxMQTT.publishResponse("meter", resp);
+        wbws::broadcast("meter", resp);   // always (live WS dashboard, #20)
     }
 }
 static void publishCachedSettingsIfNew() {
@@ -94,8 +120,8 @@ static void publishCachedSettingsIfNew() {
     wallboxBLE.copyCachedSettings(resp, seq);
     if (seq != 0 && seq != _lastSeqSettings && !resp.isEmpty()) {
         _lastSeqSettings = seq;
-        wallboxMQTT.publishSettings(resp);
-        wbws::broadcast("settings", resp);
+        if (wallboxMQTT.isConnected()) wallboxMQTT.publishSettings(resp);
+        wbws::broadcast("settings", resp);   // always (live WS dashboard, #20)
     }
 }
 static void publishCachedNotificationsIfNew() {
@@ -153,6 +179,14 @@ static void publishGatewayInfo() {
     json += String((uint32_t)esp_get_minimum_free_heap_size());
     json += ",\"wifi_rssi\":";
     json += String(WiFi.RSSI());
+    // Die temperature — MUST match the /api/status field so the MQTT
+    // "Gateway Temperature" discovery entity (reads value_json.chip_temp) isn't
+    // stuck at 0. This gateway payload is a separate builder from
+    // wb_buildStatusJson(), so the field has to be added in both. (#162)
+    // wb_chipTempJson() emits null on hardware without a real sensor (classic
+    // ESP32/WROOM) so HA shows the sensor unavailable, not a fake value.
+    json += ",\"chip_temp\":";
+    json += wb_chipTempJson();
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
     // Gateway-side firmware version (gateway, not the BLE module) — so HA
     // can show which build is running and alert on unexpected downgrade.
@@ -181,14 +215,14 @@ static void publishGatewayInfo() {
     json += (wallboxBLE.isPaused() ? "true" : "false");
     json += ",\"ble_pause_remaining_s\":";
     json += String(wallboxBLE.pauseRemainingMs() / 1000);
-    json += ",\"chg_grounding\":\"" + wallboxBLE.chargerGrounding() + "\"";
+    json += ",\"chg_grounding\":\"" + wb_jsonEsc(wallboxBLE.chargerGrounding()) + "\"";
     // Charger application firmware (the version Wallbox app shows) +
     // canonical project name from fw_v_ BAPI. Distinct from dev_fw
     // (the BLE radio module's firmware) — peter-mcc #4 flagged the
     // confusion when our HA "BLE Firmware" label was being compared
     // to the Wallbox app's charger-firmware number.
-    json += ",\"chg_app_fw\":\"" + wallboxBLE.chargerAppFirmware() + "\"";
-    json += ",\"chg_project\":\"" + wallboxBLE.chargerProject() + "\"";
+    json += ",\"chg_app_fw\":\"" + wb_jsonEsc(wallboxBLE.chargerAppFirmware()) + "\"";
+    json += ",\"chg_project\":\"" + wb_jsonEsc(wallboxBLE.chargerProject()) + "\"";
     {
         int32_t sc = wallboxBLE.chargerSessionCount();
         json += sc >= 0 ? (",\"chg_sessions\":" + String((int)sc))
@@ -196,15 +230,15 @@ static void publishGatewayInfo() {
     }
     json += ",\"chg_power_boost\":" + String((int)wallboxBLE.chargerPowerBoost());
     json += ",\"chg_lock_state\":" + String((int)wallboxBLE.chargerLockState());
-    json += ",\"chg_net_ssid\":\"" + wallboxBLE.chargerNetworkSsid() + "\"";
-    json += ",\"chg_net_ip\":\"" + wallboxBLE.chargerNetworkIp() + "\"";
+    json += ",\"chg_net_ssid\":\"" + wb_jsonEsc(wallboxBLE.chargerNetworkSsid()) + "\"";
+    json += ",\"chg_net_ip\":\"" + wb_jsonEsc(wallboxBLE.chargerNetworkIp()) + "\"";
     json += ",\"chg_net_signal\":" + String(wallboxBLE.chargerNetworkSignal());
-    json += ",\"dev_mfg\":\"" + wallboxBLE.deviceManufacturer() + "\"";
-    json += ",\"dev_model\":\"" + wallboxBLE.deviceModel() + "\"";
-    json += ",\"dev_fw\":\"" + wallboxBLE.deviceFirmware() + "\"";
-    json += ",\"dev_name\":\"" + wallboxBLE.deviceName() + "\"";
-    json += ",\"chg_sn\":\"" + wallboxBLE.chargerSerial() + "\"";
-    json += ",\"chg_mac\":\"" + wallboxBLE.chargerMac() + "\"";
+    json += ",\"dev_mfg\":\"" + wb_jsonEsc(wallboxBLE.deviceManufacturer()) + "\"";
+    json += ",\"dev_model\":\"" + wb_jsonEsc(wallboxBLE.deviceModel()) + "\"";
+    json += ",\"dev_fw\":\"" + wb_jsonEsc(wallboxBLE.deviceFirmware()) + "\"";
+    json += ",\"dev_name\":\"" + wb_jsonEsc(wallboxBLE.deviceName()) + "\"";
+    json += ",\"chg_sn\":\"" + wb_jsonEsc(wallboxBLE.chargerSerial()) + "\"";
+    json += ",\"chg_mac\":\"" + wb_jsonEsc(wallboxBLE.chargerMac()) + "\"";
     // Charge-reminder engine (#127) — gateway-computed, consumed by the
     // HA next_scheduled_charge + plug_reminder discovery entities.
     {
@@ -476,6 +510,10 @@ void loop() {
 
     // Run MQTT loop
     wallboxMQTT.loop();
+    // Tell the BLE task whether to queue responses for MQTT publish. When MQTT is
+    // disabled / no broker (HACS-integration-only), this stays false so the BLE
+    // task never fills the pending-pub ring with drops on every poll (#25).
+    wallboxBLE.setMqttPubEnabled(wallboxMQTT.isConnected());
 
     // Run WS loop (handle client connects/disconnects + frames)
     wbws::loop();
@@ -541,6 +579,16 @@ void loop() {
     // Charge-interval capture — ungated (must run even with MQTT down).
     feedChargeLog();
 
+    // Bridge the BLE caches -> web cache + WebSocket ALWAYS (never gated on
+    // MQTT) so /api/charger (the dashboard AND the HA integration read it) and
+    // the live WS keep working when MQTT is disconnected or unused. Each drain
+    // gates only its own MQTT publish internally. (#20 — an MQTT-less /
+    // unreachable-broker gateway was serving null status to every HTTP consumer.)
+    publishCachedStatusIfNew();
+    publishCachedRealtimeIfNew();
+    publishCachedMeterIfNew();
+    publishCachedSettingsIfNew();
+
     // Phase 2 (rc16): periodic BAPI polling runs on the BLE FreeRTOS task
     // (see wb_ble.cpp _pollStatus/_pollRealtime/_pollSettings/_pollNotifications).
     // Main loop's job is to publish to MQTT/WS when the BLE task has fresh
@@ -576,10 +624,8 @@ void loop() {
                 wallboxMQTT.publishResponse(pubMet.c_str(), pubJson);
             }
         }
-        publishCachedStatusIfNew();
-        publishCachedRealtimeIfNew();
-        publishCachedMeterIfNew();
-        publishCachedSettingsIfNew();
+        // Status/realtime/meter/settings drains moved out of this MQTT gate
+        // (above) so the web cache + WS update regardless of MQTT (#20).
         publishCachedNotificationsIfNew();
         publishCachedLseIfNew();
 

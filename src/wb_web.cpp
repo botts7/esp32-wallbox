@@ -745,10 +745,20 @@ String wb_buildStatusJson() {
     String json;
     json.reserve(1024);
     json = "{";
-    json += "\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") + "\"";
+    // Gateway firmware version — lets the Add-on / Integration warn on a
+    // firmware too old to emit the fields they read (compatibility axis).
+    json += "\"gw_fw\":\"" WB_VERSION "\"";
+    // Build target (PlatformIO env name, e.g. "esp32s3") — matches the release
+    // binary asset suffix so the HA integration's Update entity fetches the right
+    // .bin for OTA. See scripts/version.py (WB_BOARD).
+    json += ",\"board\":\"" WB_BOARD "\"";
+    json += ",\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") + "\"";
     json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
-    json += ",\"ssid\":\"" + WiFi.SSID() + "\"";
+    json += ",\"ssid\":\"" + wb_jsonEsc(WiFi.SSID()) + "\"";
     json += ",\"wifi_rssi\":" + String(WiFi.RSSI());
+    // ESP32-S3 internal die temperature (°C). Diagnostic — lets users watch for
+    // thermal issues (e.g. a hot garage) rather than guessing (task #162, _Mike).
+    json += ",\"chip_temp\":" + wb_chipTempJson();  // null on hw without a real sensor
     json += ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"";
     json += ",\"zentri\":" + String(wallboxBLE.isZentri() ? "true" : "false");
     // #129: meter capability — surfaces hide grid/solar when false (charger
@@ -789,18 +799,18 @@ String wb_buildStatusJson() {
     json += ",\"rx\":" + String(wallboxBLE.rxCount());
     json += ",\"uptime\":" + String(millis() / 1000);
     json += ",\"heap\":" + String(ESP.getFreeHeap());
-    json += ",\"dev_mfg\":\"" + wallboxBLE.deviceManufacturer() + "\"";
-    json += ",\"dev_model\":\"" + wallboxBLE.deviceModel() + "\"";
-    json += ",\"dev_fw\":\"" + wallboxBLE.deviceFirmware() + "\"";
-    json += ",\"dev_name\":\"" + wallboxBLE.deviceName() + "\"";
-    json += ",\"chg_sn\":\"" + wallboxBLE.chargerSerial() + "\"";
-    json += ",\"chg_mac\":\"" + wallboxBLE.chargerMac() + "\"";
-    json += ",\"chg_grounding\":\"" + wallboxBLE.chargerGrounding() + "\"";
+    json += ",\"dev_mfg\":\"" + wb_jsonEsc(wallboxBLE.deviceManufacturer()) + "\"";
+    json += ",\"dev_model\":\"" + wb_jsonEsc(wallboxBLE.deviceModel()) + "\"";
+    json += ",\"dev_fw\":\"" + wb_jsonEsc(wallboxBLE.deviceFirmware()) + "\"";
+    json += ",\"dev_name\":\"" + wb_jsonEsc(wallboxBLE.deviceName()) + "\"";
+    json += ",\"chg_sn\":\"" + wb_jsonEsc(wallboxBLE.chargerSerial()) + "\"";
+    json += ",\"chg_mac\":\"" + wb_jsonEsc(wallboxBLE.chargerMac()) + "\"";
+    json += ",\"chg_grounding\":\"" + wb_jsonEsc(wallboxBLE.chargerGrounding()) + "\"";
     // chg_app_fw — charger application firmware (the version Wallbox app
     // shows), distinct from dev_fw which is the BLE module firmware.
     // chg_project — canonical model identifier (e.g. "prj15-pulsar-max").
-    json += ",\"chg_app_fw\":\"" + wallboxBLE.chargerAppFirmware() + "\"";
-    json += ",\"chg_project\":\"" + wallboxBLE.chargerProject() + "\"";
+    json += ",\"chg_app_fw\":\"" + wb_jsonEsc(wallboxBLE.chargerAppFirmware()) + "\"";
+    json += ",\"chg_project\":\"" + wb_jsonEsc(wallboxBLE.chargerProject()) + "\"";
     // Emit null instead of -1 when r_ses doesn't expose a usable count
     // (Plus and some MAX firmwares don't fill in `last`). HA's
     // `value_json.chg_sessions` template renders null as unavailable.
@@ -811,8 +821,8 @@ String wb_buildStatusJson() {
     }
     json += ",\"chg_power_boost\":" + String((int)wallboxBLE.chargerPowerBoost());
     json += ",\"chg_lock_state\":" + String((int)wallboxBLE.chargerLockState());
-    json += ",\"chg_net_ssid\":\"" + wallboxBLE.chargerNetworkSsid() + "\"";
-    json += ",\"chg_net_ip\":\"" + wallboxBLE.chargerNetworkIp() + "\"";
+    json += ",\"chg_net_ssid\":\"" + wb_jsonEsc(wallboxBLE.chargerNetworkSsid()) + "\"";
+    json += ",\"chg_net_ip\":\"" + wb_jsonEsc(wallboxBLE.chargerNetworkIp()) + "\"";
     json += ",\"chg_net_signal\":" + String(wallboxBLE.chargerNetworkSignal());
     json += ",\"chg_fw_changed\":" + String(wallboxBLE.firmwareChanged() ? "true" : "false");
     json += ",\"chg_fw_prev\":\"" + wallboxBLE.previousFirmware() + "\"";
@@ -821,6 +831,39 @@ String wb_buildStatusJson() {
     json += ",\"ble_last_activity_s\":" + String(wallboxBLE.lastActivityAge() / 1000);
     json += ",\"auth_enabled\":" + String(configMgr.get().authEnabled && configMgr.get().authPass.length() > 0 ? "true" : "false");
     json += ",\"sta_connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
+    // schedule_paused: manual override active (schedules / Eco-Smart suspended,
+    // the Wallbox app's "Resume" state). Authoritative signal is
+    // r_lse.control_mode == 1 (0 = automatic); this is model-agnostic. r_dat.gen
+    // is NOT a reliable flag — on the MAX Pro it's accumulated green energy, not
+    // an override flag — so fall back to gen != 0 ONLY for chargers that don't
+    // expose control_mode (Zentri / original Pulsar, where gen IS the flag).
+    // Single source of truth: the Integration + Add-on read this instead of
+    // guessing from gen.
+    {
+        String lse; uint32_t lseSeq = 0;
+        wallboxBLE.copyCachedLse(lse, lseSeq);
+        int cmode = -1;
+        if (!lse.isEmpty()) {
+            JsonDocument ld;
+            if (deserializeJson(ld, lse) == DeserializationError::Ok)
+                cmode = ld["r"]["control_mode"] | -1;
+        }
+        bool paused;
+        if (cmode >= 0) {
+            paused = (cmode == 1);
+        } else {
+            String stj; uint32_t sSeq = 0;
+            wallboxBLE.copyCachedStatus(stj, sSeq);
+            int gen = 0;
+            if (!stj.isEmpty()) {
+                JsonDocument sd;
+                if (deserializeJson(sd, stj) == DeserializationError::Ok)
+                    gen = sd["r"]["gen"] | 0;
+            }
+            paused = (gen != 0);
+        }
+        json += ",\"schedule_paused\":" + String(paused ? "true" : "false");
+    }
     json += "}";
     return json;
 }
@@ -1051,6 +1094,15 @@ static void handleApiCommand() {
     // Resolve action → met + par (shared by both paths).
     String action = http.arg("action");
     String value  = http.arg("value");
+    // Idempotent start/stop (#23): skip a start that's already charging, or a
+    // stop that's already stopped — some chargers treat a redundant w_cha as a
+    // TOGGLE and flip the wrong way. Report success (already in target state).
+    if ((action == "start" || action == "stop") &&
+        wallboxBLE.startStopRedundant(action == "start")) {
+        http.send(200, "application/json",
+            "{\"status\":\"ok\",\"skipped\":\"already-in-target-state\"}");
+        return;
+    }
     // Tag the commander for arbitration (advisory; see docs/control-owner.md).
     // Charge-affecting actions record who issued them (optional &owner=, "" ->
     // "manual") so controllers can detect a recent manual/other override.
@@ -1077,7 +1129,14 @@ static void handleApiCommand() {
     }
     else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
     else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
-    else if (action == "current") { met = bapi::MET_SET_CURRENT; par = value; }
+    else if (action == "current") {
+        // Clamp to 6–32 A (mirror the MQTT/integration bound; web forwarded raw).
+        met = bapi::MET_SET_CURRENT;
+        int amps = value.toInt();
+        if (amps < 6)  amps = 6;
+        if (amps > 32) amps = 32;
+        par = String(amps);
+    }
     else if (action == "reboot")  { met = bapi::MET_REBOOT;      par = "null"; }
     else if (action == "bapi") {
         static String s_met;  // outlives this scope via c_str() below
@@ -1389,7 +1448,7 @@ function _clearLive(){
   var cr=document.getElementById('charge-reminder');if(cr)cr.style.display='none';
   try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
 }
-function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=(window._zentri&&ZN[s.st]!==undefined)?ZN[s.st]:SN[s.st];_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
+function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=(window._zentri&&ZN[s.st]!==undefined)?ZN[s.st]:SN[s.st];if(s.st===4&&!window._zentri&&!(typeof s.gen==='number'&&s.gen!==0))n='Connected — not charging';_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
 function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
 function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null'){/* BLE not delivering charger status — reset power flow + session cache so the animation can't outlive a BLE drop on stale localStorage values */_pfState.cp=null;_pfState.en=null;_pfRender();return}var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(!d||!d.r){_pfState.house=null;_pfRender();return}applyMeterData(d.r)}).catch(function(){_pfState.house=null;_pfRender()})}
 // Hook WS push handlers
@@ -3024,6 +3083,11 @@ static const char* INFO_BODY_SOURCE = R"HTML(
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F4E6;</span><h2>Firmware</h2></div>
   <a href='/ota' class='btn btn-outline' style='text-decoration:none;display:block;margin-bottom:8px'>&#x1F4E6; Upload firmware (OTA)</a>
+  <!-- Direct link to the releases page so users can grab the latest build /
+       read the changelog without hunting for the repo. peter-mcc #13 suggestion.
+       rel=noopener: a target=_blank link must not give the opened page access
+       to window.opener. -->
+  <a href='https://github.com/botts7/esp32-wallbox/releases' target='_blank' rel='noopener noreferrer' style='font-size:.82em;color:var(--accent);text-decoration:none;display:block;margin-bottom:8px'>&#x2197; Latest releases &amp; changelog on GitHub</a>
   <div id='boot-reason' style='font-size:.82em;color:var(--text3);margin-top:6px;margin-bottom:6px'></div>
   <div id='ota-history' style='display:none;margin-top:8px'>
     <div style='font-size:.82em;color:var(--text2);margin-bottom:6px'>Recent OTA attempts:</div>
@@ -3169,7 +3233,12 @@ function loadOtaHistory(){return fetch('/api/ota/history').then(function(r){retu
   }else{
     var sz=e.bytes?(' '+Math.round(e.bytes/1024)+'KB'):'';
     var rsn=e.ok?'':(' — '+(e.reason||'failed'));
-    h+='<div style="margin:3px 0">'+dot+' '+ver+sz+rsn+'</div>';
+    // Show what the upload INSTALLED, not just what was running when it
+    // started. e.to (target) is present on committed OTAs from fw that
+    // records it; older entries only have the from-version. peter-mcc #13:
+    // "shows beta.14, not the rc.4 it got me to".
+    var label=(e.to&&e.to!==ver)?(ver+' &#x2192; '+e.to):ver;
+    h+='<div style="margin:3px 0">'+dot+' '+label+sz+rsn+'</div>';
   }
 });rows.innerHTML=h;c.style.display='block'}).catch(function(){})}
 function loadBootReason(){return fetch('/api/boot/history').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('boot-reason');if(!el)return;var cur=d.current||'unknown';var curFw=d.current_fw||'';var isBad=function(r){r=r||'';return r.indexOf('panic')>=0||r.indexOf('watchdog')>=0||r.indexOf('brownout')>=0};var bad=isBad(cur);var col=bad?'#ef4444':'var(--text3)';var prefix=bad?'&#x26A0; ':'';el.innerHTML='<span style=\"color:'+col+'\">'+prefix+'Last boot: '+cur+'</span>';if(d.history&&d.history.length>1){var thisFw=d.history.filter(function(e){return isBad(e.reason)&&e.fw===curFw});var olderFw=d.history.filter(function(e){return isBad(e.reason)&&e.fw!==curFw});if(thisFw.length){el.innerHTML+=' <span style=\"color:var(--danger);font-size:.92em\">('+thisFw.length+' bad boot'+(thisFw.length>1?'s':'')+' on this firmware)</span>'}else if(olderFw.length){el.innerHTML+=' <span style=\"color:var(--text3);font-size:.85em;opacity:.7\">('+olderFw.length+' from older firmware)</span>'}}}).catch(function(){})}
@@ -3272,7 +3341,7 @@ function renderGW(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi S
 if(window.wbws){window.wbws.subscribe('ble',function(d){if(!window._lastStatus)return;window._lastStatus.ble=d.state;window._lastStatus.rssi=d.rssi;renderGW(window._lastStatus)});}
 var OCPP_LABELS={chid:'Charger ID',e:'Enabled',pw:'Password',u:'Server URL',ws:'WebSocket',id:'Identity',status:'Status',connected:'Connected',protocol:'Protocol',interval:'Heartbeat (s)',auth:'Auth Type'};
 var NET_LABELS={channel:'WiFi Channel',dns1:'DNS Primary',dns2:'DNS Secondary',gateway:'Gateway',ip:'IP Address',netmask:'Subnet Mask',mac:'MAC Address',ssid:'Network Name',rssi:'Signal (dBm)',signal:'Signal',status:'Status',type:'Connection Type'};
-function Q(m,l){var r=document.getElementById('qr');r.style.display='block';r.innerHTML="<span class='spinner'></span>"+l+"...";fetch('/api/command?action=bapi&met='+m+'&par=null&wait=12000',{signal:AbortSignal.timeout(13000)}).then(function(x){return x.json()}).then(function(d){if(d.error){r.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}var v=d.r||d;var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var ws={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi Status',typeof v==='number'?(ws[v]||'Code '+v):''+v)}else if(m==='r_not'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');else v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('#'+(i+1),n.message||n.msg||JSON.stringify(n));h+="</div>"})}else{h+=row('Notifications',typeof v==='number'?(v===0?'None':''+v):''+v)}}else if(m==='g_ocpp'){var lb=OCPP_LABELS;if(typeof v==='object'){for(var k in v){var lbl=lb[k]||k;var val=v[k];if(val===null||val===undefined||val==='')val='<span style="color:var(--text3)">Not set</span>';else if(typeof val==='number'&&(k==='e'||k==='connected'))val=val?'Yes':'No';h+=row(lbl,val)}}else{h+=row('OCPP',v===1?'Connected':v===0?'Not configured':'Code '+v)}}else if(m==='gnsta'){if(Array.isArray(v)&&v.length>0){var n=v[0];var lb=NET_LABELS;for(var k in n){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=n[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else if(typeof v==='object'&&!Array.isArray(v)){var lb=NET_LABELS;for(var k in v){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';h+=row(lbl,val)}}else{h+=row('Network',''+v)}}else if(m==='gupdc'){if(typeof v==='object'){if(v.update)h+=row('Update Available','<span style="color:var(--success)">Yes</span>');else h+=row('Update Available','No');if(v.version||v.current)h+=row('Current Version',v.version||v.current||'Unknown');if(v.latest||v.new_version)h+=row('Latest Version',v.latest||v.new_version||'Unknown')}else{h+=row('Firmware',typeof v==='number'?(v===0?'Up to date':'Update available ('+v+')'):''+v)}}else if(m==='r_not'){if(typeof v==='object'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('Notification '+(i+1),n.message||n.msg||n.text||JSON.stringify(n));if(n.timestamp||n.ts)h+=row('Time',new Date((n.timestamp||n.ts)*1000).toLocaleString());h+="</div>"})}else{for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});h+=row(lbl,typeof v[k]==='object'?JSON.stringify(v[k]):v[k])}}}else{h+=row('Notifications',v===0?'None':''+v)}}else if(typeof v==='object'){for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(typeof val==='boolean')val=val?'Yes':'No';else if(typeof val==='object')val=JSON.stringify(val);h+=row(lbl,val)}}else{h+=row(l,v)}r.innerHTML=h}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'})}
+function Q(m,l){var r=document.getElementById('qr');r.style.display='block';r.innerHTML="<span class='spinner'></span>"+l+"...";fetch('/api/command?action=bapi&met='+m+'&par=null&wait=12000',{signal:AbortSignal.timeout(13000)}).then(function(x){return x.json()}).then(function(d){if(d.error){r.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}var v=d.r||d;var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var ws={0:'Disconnected',1:'Connected',2:'Connecting'};if(v&&typeof v==='object'){var lb=NET_LABELS;for(var k in v){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(val===''||val===null||val===undefined)val='<span style="color:var(--text3)">-</span>';else if(typeof val==='boolean')val=val?'Yes':'No';else if(typeof val==='object')val=JSON.stringify(val);h+=row(lbl,val)}}else{h+=row('WiFi Status',typeof v==='number'?(ws[v]||'Code '+v):''+v)}}else if(m==='r_not'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');else v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('#'+(i+1),n.message||n.msg||JSON.stringify(n));h+="</div>"})}else{h+=row('Notifications',typeof v==='number'?(v===0?'None':''+v):''+v)}}else if(m==='g_ocpp'){var lb=OCPP_LABELS;if(typeof v==='object'){for(var k in v){var lbl=lb[k]||k;var val=v[k];if(val===null||val===undefined||val==='')val='<span style="color:var(--text3)">Not set</span>';else if(typeof val==='number'&&(k==='e'||k==='connected'))val=val?'Yes':'No';h+=row(lbl,val)}}else{h+=row('OCPP',v===1?'Connected':v===0?'Not configured':'Code '+v)}}else if(m==='gnsta'){var lb=NET_LABELS;var renderIf=function(n){for(var k in n){var lbl=lb[k]||k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=n[k];if(val===''||val===null)val='<span style="color:var(--text3)">-</span>';else if(typeof val==='object')val=JSON.stringify(val);h+=row(lbl,val)}};if(Array.isArray(v)){if(!v.length)h+=row('Network','None');else v.forEach(function(n,ii){if(v.length>1)h+="<div style='font-weight:600;color:var(--accent);margin:8px 0 2px'>"+(n.type||n.iface||n.interface||n.name||('Interface '+(ii+1)))+"</div>";renderIf(n)})}else if(typeof v==='object'){renderIf(v)}else{h+=row('Network',''+v)}}else if(m==='gupdc'){if(typeof v==='object'){if(v.update)h+=row('Update Available','<span style="color:var(--success)">Yes</span>');else h+=row('Update Available','No');if(v.version||v.current)h+=row('Current Version',v.version||v.current||'Unknown');if(v.latest||v.new_version)h+=row('Latest Version',v.latest||v.new_version||'Unknown')}else{h+=row('Firmware',typeof v==='number'?(v===0?'Up to date':'Update available ('+v+')'):''+v)}}else if(m==='r_not'){if(typeof v==='object'){if(Array.isArray(v)){if(v.length===0)h+=row('Notifications','None');v.forEach(function(n,i){h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'>";h+=row('Notification '+(i+1),n.message||n.msg||n.text||JSON.stringify(n));if(n.timestamp||n.ts)h+=row('Time',new Date((n.timestamp||n.ts)*1000).toLocaleString());h+="</div>"})}else{for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});h+=row(lbl,typeof v[k]==='object'?JSON.stringify(v[k]):v[k])}}}else{h+=row('Notifications',v===0?'None':''+v)}}else if(typeof v==='object'){for(var k in v){var lbl=k.replace(/_/g,' ').replace(/\b\w/g,function(c){return c.toUpperCase()});var val=v[k];if(typeof val==='boolean')val=val?'Yes':'No';else if(typeof val==='object')val=JSON.stringify(val);h+=row(lbl,val)}}else{h+=row(l,v)}r.innerHTML=h}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+e.message+'</span>'})}
 function B(){var m=document.getElementById('bm').value,r=document.getElementById('br');r.style.display='block';r.textContent='Sending '+m+'...';fetch('/api/command?action=bapi&met='+encodeURIComponent(m)+'&par=null&wait=12000',{signal:AbortSignal.timeout(13000)}).then(function(x){return x.json()}).then(function(d){r.textContent=JSON.stringify(d,null,2)}).catch(function(e){r.textContent='Error: '+e.message})}
 // Self-serve Compatibility Report: probes a READ-ONLY set of BAPI methods
 // (never writes — no clr_sch/s_sch/w_cha) + captures the charger's BLE
@@ -4368,7 +4437,16 @@ static void handleOtaUpload() {
             size_t diff = (totalSize < expectedOtaSize)
                             ? expectedOtaSize - totalSize
                             : totalSize - expectedOtaSize;
-            if (diff > 256) {
+            // expectedOtaSize is the request Content-Length, which for a
+            // multipart/form-data upload (how HA's integration + the OTA page
+            // both post) includes the boundary + Content-Disposition header +
+            // trailing boundary — a few hundred bytes that are NOT written to
+            // flash. The old 256-byte tolerance false-tripped on longer
+            // boundaries (got=firmware, expected=firmware+framing), aborting
+            // perfectly valid uploads and forcing USB re-flashes (gambys,
+            // ManuMaxGit). Allow a generous margin for framing; a real
+            // truncation is still caught by Update.end(true)'s image checksum.
+            if (diff > 4096) {
                 Log.printf("[OTA] TRUNCATED: expected ~%u bytes, got %u — aborting\n",
                     (unsigned)expectedOtaSize, (unsigned)totalSize);
                 otaError = true;
@@ -4396,6 +4474,7 @@ static void handleOtaUpload() {
             }
         } else if (Update.end(true)) {
             Log.printf("[OTA] Success! %u bytes written to partition\n", totalSize);
+            // TO version is backfilled by recordBoot() on next boot — #13.
             wb_ota_history::recordOta(millis() / 1000, WB_VERSION, totalSize, true, "ok");
             // Mark this device as OTA-proven so future flashes use the
             // relaxed 15s admission window instead of the conservative
@@ -4475,6 +4554,16 @@ static void registerRoutes() {
         http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
         webServer.requestReboot();
     });
+    // Auth-only gateway reboot (no CSRF) so the stateless HA integration / Add-on
+    // can reboot the gateway, matching /api/control_owner. POST (not GET) so a
+    // stray browser request can't trigger it. The CSRF-gated /api/reboot above
+    // stays for the browser web UI.
+    http.on("/api/reboot_gateway", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        http.send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+        Log.println("[Web] gateway reboot requested via /api/reboot_gateway");
+        webServer.requestReboot();
+    });
     // /api/pin?pin=<digits>&csrf=... — local-only update of the
     // Bluetooth Passcode used to pair to the charger. Does NOT call
     // any s_* setter on the charger; the user creates the passcode in
@@ -4511,6 +4600,26 @@ static void registerRoutes() {
     http.on("/api/ble/pause", handleBlePause);
     http.on("/api/charger", handleApiCharger);
     http.on("/api/command", handleApiCommand);
+    // Set the charge-control owner (who may autonomously drive charging).
+    // Auth-only (no CSRF) so the stateless HA integration / Add-on can set it,
+    // matching /api/command. Persists to NVS immediately (no reboot) — so the
+    // selection survives a power cycle. Owner is validated against the known set.
+    http.on("/api/control_owner", HTTP_POST, []() {
+        if (!checkAuth()) return;
+        String owner = http.arg("owner");
+        owner.trim();
+        if (owner != "wallbox_schedule" && owner != "integration"
+            && owner != "addon" && owner != "none") {
+            http.send(400, "application/json",
+                "{\"error\":\"owner must be wallbox_schedule|integration|addon|none\"}");
+            return;
+        }
+        configMgr.mut().controlOwner = owner;
+        configMgr.save();
+        Log.printf("[Web] control_owner set to '%s' via API\n", owner.c_str());
+        http.send(200, "application/json",
+            String("{\"ok\":true,\"control_owner\":\"") + owner + "\"}");
+    });
     // 2.7.0 step 7 — poll endpoint for the async ?wait=0 path. Returns:
     //   200 + body  → response landed, returned in the body
     //   202 + status:pending → request still in flight, or evicted

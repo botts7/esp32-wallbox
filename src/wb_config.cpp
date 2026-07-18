@@ -35,7 +35,14 @@ void ConfigManager::load() {
     _cfg.mainsVoltage = _prefs.getULong("mains_v", 230);
     _cfg.controlOwner = _prefs.getString("ctrl_owner", "wallbox_schedule");
     _cfg.haDiscoveryPrefix = _prefs.getString("ha_prefix", "homeassistant");
-    _cfg.haDeviceId   = _prefs.getString("ha_devid", "wallbox_pulsar_max");
+    // Per-board default (MAC-derived) so two out-of-box gateways don't collide
+    // on MQTT topics / HA unique_ids. Any configured install has already saved
+    // ha_devid, so existing users keep their value — only a fresh/wiped flash
+    // picks up the unique default.
+    char devIdDefault[28];
+    snprintf(devIdDefault, sizeof(devIdDefault), "wallbox_pulsar_%06x",
+             (uint32_t)(ESP.getEfuseMac() & 0xFFFFFF));
+    _cfg.haDeviceId   = _prefs.getString("ha_devid", devIdDefault);
     _cfg.haDiscoveryEnabled = _prefs.getBool("ha_disc", true);
     _cfg.lastSeenFw   = _prefs.getString("last_fw", "");
 
