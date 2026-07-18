@@ -6,6 +6,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **`/logs` page could hang when using Download.** The Download button linked
+  straight to `/api/logs`, firing a second ~16 KB request that raced the page's
+  3-second auto-refresh poll for the async server's connection slots — under the
+  resulting heap pressure some responses came back empty and the page stalled.
+  Download now builds the file client-side (a Blob from the log the page already
+  shows), so it makes no server request, can't contend, and is instant. The
+  `/api/logs` endpoint is unchanged for external monitors.
+
 ## [3.2.0] - 2026-07-18
 
 Promotes **3.2.0-rc.4** to stable, plus the post-rc.4 diagnostics and robustness
