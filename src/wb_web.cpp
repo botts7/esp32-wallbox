@@ -3083,6 +3083,11 @@ static const char* INFO_BODY_SOURCE = R"HTML(
 <div class='card'>
   <div class='card-header'><span class='card-icon'>&#x1F4E6;</span><h2>Firmware</h2></div>
   <a href='/ota' class='btn btn-outline' style='text-decoration:none;display:block;margin-bottom:8px'>&#x1F4E6; Upload firmware (OTA)</a>
+  <!-- Direct link to the releases page so users can grab the latest build /
+       read the changelog without hunting for the repo. peter-mcc #13 suggestion.
+       rel=noopener: a target=_blank link must not give the opened page access
+       to window.opener. -->
+  <a href='https://github.com/botts7/esp32-wallbox/releases' target='_blank' rel='noopener noreferrer' style='font-size:.82em;color:var(--accent);text-decoration:none;display:block;margin-bottom:8px'>&#x2197; Latest releases &amp; changelog on GitHub</a>
   <div id='boot-reason' style='font-size:.82em;color:var(--text3);margin-top:6px;margin-bottom:6px'></div>
   <div id='ota-history' style='display:none;margin-top:8px'>
     <div style='font-size:.82em;color:var(--text2);margin-bottom:6px'>Recent OTA attempts:</div>
@@ -3228,7 +3233,12 @@ function loadOtaHistory(){return fetch('/api/ota/history').then(function(r){retu
   }else{
     var sz=e.bytes?(' '+Math.round(e.bytes/1024)+'KB'):'';
     var rsn=e.ok?'':(' — '+(e.reason||'failed'));
-    h+='<div style="margin:3px 0">'+dot+' '+ver+sz+rsn+'</div>';
+    // Show what the upload INSTALLED, not just what was running when it
+    // started. e.to (target) is present on committed OTAs from fw that
+    // records it; older entries only have the from-version. peter-mcc #13:
+    // "shows beta.14, not the rc.4 it got me to".
+    var label=(e.to&&e.to!==ver)?(ver+' &#x2192; '+e.to):ver;
+    h+='<div style="margin:3px 0">'+dot+' '+label+sz+rsn+'</div>';
   }
 });rows.innerHTML=h;c.style.display='block'}).catch(function(){})}
 function loadBootReason(){return fetch('/api/boot/history').then(function(r){return r.json()}).then(function(d){var el=document.getElementById('boot-reason');if(!el)return;var cur=d.current||'unknown';var curFw=d.current_fw||'';var isBad=function(r){r=r||'';return r.indexOf('panic')>=0||r.indexOf('watchdog')>=0||r.indexOf('brownout')>=0};var bad=isBad(cur);var col=bad?'#ef4444':'var(--text3)';var prefix=bad?'&#x26A0; ':'';el.innerHTML='<span style=\"color:'+col+'\">'+prefix+'Last boot: '+cur+'</span>';if(d.history&&d.history.length>1){var thisFw=d.history.filter(function(e){return isBad(e.reason)&&e.fw===curFw});var olderFw=d.history.filter(function(e){return isBad(e.reason)&&e.fw!==curFw});if(thisFw.length){el.innerHTML+=' <span style=\"color:var(--danger);font-size:.92em\">('+thisFw.length+' bad boot'+(thisFw.length>1?'s':'')+' on this firmware)</span>'}else if(olderFw.length){el.innerHTML+=' <span style=\"color:var(--text3);font-size:.85em;opacity:.7\">('+olderFw.length+' from older firmware)</span>'}}}).catch(function(){})}
@@ -4464,6 +4474,7 @@ static void handleOtaUpload() {
             }
         } else if (Update.end(true)) {
             Log.printf("[OTA] Success! %u bytes written to partition\n", totalSize);
+            // TO version is backfilled by recordBoot() on next boot — #13.
             wb_ota_history::recordOta(millis() / 1000, WB_VERSION, totalSize, true, "ok");
             // Mark this device as OTA-proven so future flashes use the
             // relaxed 15s admission window instead of the conservative

@@ -1456,6 +1456,9 @@ static void _registerOtaRoute() {
                 } else if (Update.end(true)) {
                     Log.printf("[OTA-async] Success! %u bytes written\n",
                         (unsigned)_asyncOtaTotalSize);
+                    // The installed (TO) version is backfilled by recordBoot()
+                    // when the new firmware boots — #13 follow-up. See
+                    // wb_ota_history.cpp for why we can't read it here.
                     wb_ota_history::recordOta(millis() / 1000,
                         WB_VERSION, _asyncOtaTotalSize, true, "ok");
                     wb_health::markOtaSuccess();
