@@ -6,6 +6,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-07-18
+
+Promotes **3.2.0-rc.4** to stable, plus the post-rc.4 diagnostics and robustness
+fixes below. See the `3.2.0-rc.*` and `3.2.0-beta.*` sections for the full
+pre-release history.
+
+### Added
+- **Crash diagnostics (coredump).** A dedicated coredump partition captures a
+  full ELF core on any panic / task-watchdog reset. `/api/coredump/summary`
+  reports the crashing task, program counter and backtrace over HTTP — no serial
+  cable and no ELF needed; `/api/coredump` downloads the raw core (auth-gated,
+  since it is a raw RAM image). *Requires a one-time USB re-flash to add the
+  partition; existing OTA installs are unaffected and simply do not capture
+  cores until re-flashed.*
+- Direct link to the GitHub releases / changelog from the /info Firmware
+  section. *(peter-mcc, #13)*
+
 ### Fixed
 - **Gateway MQTT/status payload could become invalid JSON**, which HA logged as
   `Invalid state message '' from wallbox/…/response/gateway` (the gateway sensors
@@ -16,6 +33,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ESP32 temp sensor — produced malformed JSON. Device strings are now JSON-escaped
   (`wb_jsonEsc`) in both builders, and `chip_temp` emits `null` on a NaN/inf read.
   (Latent robustness bug, not an rc.4 regression.)
+- **OTA history showed the version you upgraded _from_, not the one it
+  installed** — an rc.4 upload displayed as "beta.14". The installed version is
+  now backfilled when the new firmware boots, so the row reads `beta.14 → rc.4`.
+  *(peter-mcc, #13)*
+- **OTA history had silently stopped recording** on some gateways: a full /
+  fragmented NVS made the write fail with no error, leaving a stale list. The
+  store now frees the key before rewriting so the write lands, and logs a
+  failure instead of losing it quietly (same silent-fail class as the earlier
+  charge-log fix).
+- **Task-watchdog could be left unable to reboot the device** after an OTA: the
+  watchdog timeout is extended during the flash-erase, but `restore()` put back
+  the timeout without its panic flag — so for the rest of that uptime a later
+  wedge would hang instead of recovering. `restore()` now restores the panic
+  flag too.
 
 ## [3.2.0-rc.4]
 
