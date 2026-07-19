@@ -964,6 +964,11 @@ String wb_buildDiagRuntimeJson() {
     body += ",\"async_stack_hwm\":";
     TaskHandle_t asyncTcp = xTaskGetHandle("async_tcp");
     body += asyncTcp ? String(uxTaskGetStackHighWaterMark(asyncTcp)) : String("null");
+    // #168: worst-case BLE-op timings. Normal write < 50 ms, round-trip ~200.
+    // A large ble_write_max_ms is the tell for the marginal-link stall
+    // suspected of starving the core-0 idle task.
+    body += ",\"ble_write_max_ms\":" + String(wallboxBLE.bleMaxWriteMs());
+    body += ",\"ble_rt_max_ms\":" + String(wallboxBLE.bleMaxRoundTripMs());
     body += ",\"uptime_s\":" + String(millis() / 1000);
     body += "}";
     return body;

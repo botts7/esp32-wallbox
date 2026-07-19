@@ -1320,6 +1320,13 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
     size_t maxChunk = (curMtu > 3) ? (size_t)(curMtu - 3) : 20;
     bool writeOk = true;
 
+    // #168: time the ATT write, and mark the crash breadcrumb "w:<met>" so a
+    // watchdog reset mid-writeValue is identifiable after reboot — the coredump
+    // backtrace of the running BLE task is often unwind-corrupt, and the in-RAM
+    // log ring is wiped on reboot, but the RTC-NOINIT breadcrumb survives.
+    uint32_t wStart = millis();
+    { char ph[16]; snprintf(ph, sizeof(ph), "w:%s", met); wb_health::setBreadcrumbBapi(ph); }
+
     if (wlen <= maxChunk) {
         // Fits in one ATT write — original behaviour (no-response, then with).
         if (!_chr->writeValue(wp, wlen, false))
@@ -1339,6 +1346,16 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
                        met, (unsigned)wlen, (unsigned)maxChunk, curMtu);
     }
 
+    // #168: record the write duration. A slow write (normal is < 50 ms) is the
+    // prime suspect for the core-0 watchdog — the BT controller can stall on a
+    // marginal link while our task holds a BLE-stack resource.
+    uint32_t writeMs = millis() - wStart;
+    _lastWriteMs = writeMs;
+    if (writeMs > _maxWriteMs) _maxWriteMs = writeMs;
+    if (writeMs > 300)
+        Log.printf("[BLE] SLOW TX %s: write %ums (link/controller stall?)\n",
+                   met, (unsigned)writeMs);
+
     if (!writeOk) {
         Log.printf("[BLE] Write failed for %s — mtu=%d framelen=%u connected=%d char=%s\n",
                    met, _client ? (int)_client->getMTU() : -1,
@@ -1353,6 +1370,7 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
     _txCount++;
 
     // Wait for response — yield to other tasks (web server, OTA) while waiting
+    { char ph[16]; snprintf(ph, sizeof(ph), "q:%s", met); wb_health::setBreadcrumbBapi(ph); }  // #168 phase = waiting
     uint32_t start = millis();
     while (!_responseReady && (millis() - start) < timeoutMs) {
         delay(1);
@@ -1380,6 +1398,11 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
     resp = std::move(_lastResponse);
     if (_parserMutex) xSemaphoreGive(_parserMutex);
     Log.printf("[BLE] RX %s (%d bytes)\n", met, resp.length());
+    // #168: total write+response round-trip; track the worst case for /diag.
+    uint32_t rtMs = millis() - wStart;
+    if (rtMs > _maxRoundTripMs) _maxRoundTripMs = rtMs;
+    if (rtMs > 2000)
+        Log.printf("[BLE] SLOW round-trip %s: %ums\n", met, (unsigned)rtMs);
     if (_cmdMutex) xSemaphoreGive(_cmdMutex);
     return resp;  // RVO + move = zero additional copies on the return
 }

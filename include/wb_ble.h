@@ -222,6 +222,12 @@ public:
     // Stats
     uint32_t txCount() const { return _txCount; }
     uint32_t rxCount() const { return _rxCount; }
+    // #168 instrumentation — worst-case BLE-op timings. A writeValue that
+    // stalls under a marginal link is the suspected core-0-starvation trigger;
+    // surfaced on /api/diag/runtime so the worst case is visible even after the
+    // in-RAM log ring has wrapped (and it survives, since it's a live read).
+    uint32_t bleMaxWriteMs() const { return _maxWriteMs; }
+    uint32_t bleMaxRoundTripMs() const { return _maxRoundTripMs; }
     int rssi() const;
     int scanRSSI() const { return _scanRSSI; }
     uint32_t lastActivityAge() const { return millis() - _lastActivityTime; }
@@ -411,6 +417,10 @@ private:
     String   _gattTopology;   // captured at connect for the compat report
     uint32_t _seqStatus = 0,   _seqRealtime = 0, _seqMeter = 0;
     uint32_t _seqSettings = 0, _seqNotifications = 0, _seqLse = 0;
+    // #168 BLE-op timing (written on BLE task, read on AsyncTCP for /diag).
+    volatile uint32_t _lastWriteMs = 0;      // last ATT-write duration
+    volatile uint32_t _maxWriteMs = 0;       // worst ATT-write duration
+    volatile uint32_t _maxRoundTripMs = 0;   // worst write+response round-trip
     // Poll timers (BLE-task local)
     uint32_t _lastStatusPoll = 0, _lastRealtimePoll = 0, _lastNotifPoll = 0;
     uint32_t _statusPollMs = 10000, _realtimePollMs = 30000;
