@@ -473,6 +473,11 @@ void WallboxMQTT::loop() {
             _wasConnected = false;
             wb_diag::reportDisconnect(wb_diag::Kind::MQTT);
         }
+        // #168: never call PubSubClient::connect() while WiFi is down. Its
+        // connect() -> readPacket() -> WiFiClient::read() path dereferences a
+        // NULL/torn-down socket handle -> LoadProhibited crash in loopTask
+        // (confirmed by coredump: read @0x14 in WiFiClient::read). Wait for WiFi.
+        if (WiFi.status() != WL_CONNECTED) return;
         if (millis() - _lastConnectAttempt >= _reconnectGateMs) {
             _connect();
         }
@@ -494,6 +499,14 @@ bool WallboxMQTT::isConnected() const {
 void WallboxMQTT::_connect() {
     _lastConnectAttempt = millis();
     Log.println("[MQTT] Connecting...");
+
+    // #168: force a clean socket before PubSubClient::connect(). PubSubClient
+    // skips its own TCP connect when wifiClient.connected() returns true; after
+    // a WiFi blip that can be STALE (reports connected while the socket handle
+    // is NULL), so connect() jumps straight to reading the CONNACK and
+    // WiFiClient::read() dereferences the NULL handle -> crash. stop() clears
+    // the half-open state so connect() always establishes a fresh socket.
+    wifiClient.stop();
 
     const WBConfig& cfg = configMgr.get();
     const char* user = cfg.mqttUser.length() > 0 ? cfg.mqttUser.c_str() : nullptr;
