@@ -400,27 +400,22 @@ void setup() {
         const WBConfig& cfg = configMgr.get();
         wallboxBLE.begin(cfg.bleAddr.c_str());
 
-        // Yield callback — runs while BLE is waiting on a BAPI response so
-        // the rest of the gateway stays responsive. Includes wallboxMQTT.loop()
-        // so PubSubClient's keepalive logic still gets cycles during long
-        // settings polls — without this, several back-to-back BLE waits could
-        // starve MQTT for 15+ seconds and PubSubClient would close the socket
-        // (the "connection closed by client every 85s" pattern observed in the
-        // rc12 broker log).
+        // No BLE yield callback — deliberately. It used to pump
+        // ArduinoOTA.handle() + wallboxMQTT.loop() during BLE response-waits,
+        // from a time when sendCommand() ran on the web/main task. It now runs
+        // on the dedicated wb_ble task (xTaskCreatePinnedToCore), so driving
+        // MQTT/OTA from here fired them CONCURRENTLY with the main loop's own
+        // ArduinoOTA.handle() (below) and wallboxMQTT.loop() (below). PubSubClient
+        // / WiFiClient / lwip are NOT thread-safe: the concurrent MQTT read
+        // corrupted an lwip pbuf and asserted in pbuf_free — a #168 crash in the
+        // wb_ble task, confirmed by coredump (bt: WallboxMQTT::loop → PubSubClient
+        // → WiFiClient::read → lwip_recv_tcp → pbuf_free assert).
         //
-        // CRITICAL: do NOT call webServer.loop() here. This callback fires from
-        // inside sendCommand(), which is itself reached from a web request
-        // handler (handleApiCommand) running inside http.handleClient().
-        // Arduino WebServer is NOT re-entrant — it holds the in-flight request
-        // as member state (_currentClient, parser position, _responseHeaders).
-        // Pumping handleClient() re-entrantly accepts a second connection,
-        // clobbers _currentClient, and the outer handler's http.send() then
-        // writes to a freed socket → panic (LoadProhibited) under overlapping
-        // requests. MQTT + OTA are re-entrancy-safe here; the web server is not.
-        wallboxBLE.onYield([]() {
-            ArduinoOTA.handle();
-            wallboxMQTT.loop();
-        });
+        // The original keepalive-starvation reason is moot now: BLE waits run on
+        // their own task and no longer block the main loop, so the main loop
+        // services MQTT (60 s keepalive) and OTA continuously on its own. Hence
+        // no yield callback at all — the BLE wait just delay(1)-yields to the
+        // scheduler, which is enough.
         if (cfg.bleService.length() > 0 && cfg.bleChar.length() > 0) {
             // Dual-char mode if bleTxChar is set (e.g. Pulsar Plus); otherwise single-char (MAX default)
             wallboxBLE.setUUIDs(cfg.bleService.c_str(), cfg.bleChar.c_str(),
