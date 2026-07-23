@@ -1625,7 +1625,13 @@ void WallboxBLE::_pollSettings() {
     String r2 = _sendCommandDirect("g_ecos", "null", SETTINGS_TIMEOUT_MS);
     if (!r2.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r2) == DeserializationError::Ok) {
-            merged["eco_mode"] = d["r"]["esm"] | 0;
+            // Report "Off" whenever Eco-Smart is disabled (ese=0), regardless
+            // of the mode field. When the feature is turned off the charger
+            // firmware leaves `esm` pegged at its last value (e.g. 2), so
+            // publishing raw `esm` makes Home Assistant show a phantom
+            // "Solar + Grid"/"Full Green" that bounces back on every attempt to
+            // select Off. Gate the reported mode on the master enable flag.
+            merged["eco_mode"] = (d["r"]["ese"] | 0) ? (d["r"]["esm"] | 0) : 0;
             merged["eco_power"] = d["r"]["esp"] | 100;
         }
     }
