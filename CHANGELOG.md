@@ -6,7 +6,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [3.2.1] - 2026-07-23
+
+Stability release. Fixes the recurring MQTT-related crash/reboot, the `/logs`
+Download hang, and adds crash-diagnostics tooling that made the crash fixes
+possible.
+
 ### Fixed
+- **Gateway could crash and reboot around MQTT (re)connect** — the dominant
+  cause of the intermittent reboots some users saw. Two independent faults,
+  both now fixed:
+  - The BLE task was driving `MQTT.loop()` (via a yield callback) *concurrently*
+    with the main loop's `MQTT.loop()`. PubSubClient / WiFiClient / lwip aren't
+    thread-safe, so two tasks reading the socket corrupted an lwip buffer and
+    asserted. The yield callback is removed — since BLE runs on its own task,
+    the main loop already services MQTT continuously.
+  - MQTT reconnect could dereference a NULL/torn-down socket after a WiFi blip
+    (`PubSubClient::connect` trusting a stale `connected()`). Reconnect now waits
+    for `WiFi.status()==WL_CONNECTED` and forces a fresh socket first.
 - **`/logs` page could hang when using Download.** The Download button linked
   straight to `/api/logs`, firing a second ~16 KB request that raced the page's
   3-second auto-refresh poll for the async server's connection slots — under the
@@ -14,6 +31,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Download now builds the file client-side (a Blob from the log the page already
   shows), so it makes no server request, can't contend, and is instant. The
   `/api/logs` endpoint is unchanged for external monitors.
+
+### Added
+- **Crash-diagnostics tooling.** Releases now attach `firmware.elf` so a
+  coredump can be symbolised against the exact build. BLE operation timings
+  (`ble_write_max_ms` / `ble_rt_max_ms`) are exposed on `/api/diag/runtime`, and
+  the crash breadcrumb records the in-flight BLE phase — together these turned an
+  un-diagnosable reboot into a named root cause.
+
+### Known issues
+- A **rare** interrupt-watchdog reboot (roughly once every few days) remains
+  under investigation. It does not leave a usable coredump. The frequent
+  MQTT-related crashes fixed above were the dominant cause of reboots.
 
 ## [3.2.0] - 2026-07-18
 
