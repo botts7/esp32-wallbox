@@ -964,6 +964,11 @@ String wb_buildDiagRuntimeJson() {
     body += ",\"async_stack_hwm\":";
     TaskHandle_t asyncTcp = xTaskGetHandle("async_tcp");
     body += asyncTcp ? String(uxTaskGetStackHighWaterMark(asyncTcp)) : String("null");
+    // #168: worst-case BLE-op timings. Normal write < 50 ms, round-trip ~200.
+    // A large ble_write_max_ms is the tell for the marginal-link stall
+    // suspected of starving the core-0 idle task.
+    body += ",\"ble_write_max_ms\":" + String(wallboxBLE.bleMaxWriteMs());
+    body += ",\"ble_rt_max_ms\":" + String(wallboxBLE.bleMaxRoundTripMs());
     body += ",\"uptime_s\":" + String(millis() / 1000);
     body += "}";
     return body;
@@ -4225,7 +4230,7 @@ String wb_buildLogsPage() {
     page += "<p style='color:var(--text3);font-size:.82em'>Last 16 KB of serial/telnet output. Auto-refreshes every 3s; scroll-locks to bottom unless you scroll up. Persists across page reloads, wiped on reboot.</p>";
     page += "<div style='margin-bottom:8px'>";
     page += "<button class='btn btn-outline' style='padding:6px 12px;font-size:.85em' onclick='copyLog()'>&#x1F4CB; Copy</button> ";
-    page += "<a href='/api/logs' download='wallbox-log.txt' class='btn btn-outline' style='padding:6px 12px;font-size:.85em;text-decoration:none'>&#x2B07; Download</a> ";
+    page += "<button class='btn btn-outline' style='padding:6px 12px;font-size:.85em' onclick='dlLog()'>&#x2B07; Download</button> ";
     page += "<button class='btn btn-outline' style='padding:6px 12px;font-size:.85em' onclick='confirm2(\"Reboot the gateway? Config is preserved \\u2014 you can watch the boot trace appear here.\",function(){fetch(\"/api/reboot?csrf=" + csrfToken + "\",{method:\"POST\"}).then(function(){}).catch(function(){})})'>&#x21BB; Reboot &amp; capture boot trace</button>";
     page += "</div>";
     page += "<pre id='log' style='background:var(--bg);border-radius:8px;padding:10px;font-size:.78em;max-height:70vh;overflow:auto;white-space:pre-wrap;line-height:1.35'></pre>";
@@ -4240,6 +4245,19 @@ String wb_buildLogsPage() {
               "stick=(el.scrollHeight-el.scrollTop-el.clientHeight)<8;"
             "});"
             "window.copyLog=function(){var t=el.textContent||'';if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){toast&&toast('Copied','success')}).catch(function(){})}};"
+            // Download the log the page ALREADY holds, client-side. The old
+            // <a href='/api/logs' download> fired a second 16 KB request that
+            // raced the 3s poll for the async server's connection slots and
+            // could stall both (empty responses under heap pressure) — the
+            // "stuck on export" report. A Blob from el.textContent needs no
+            // server round-trip, so it can't contend and is instant.
+            "window.dlLog=function(){var t=el.textContent||'';"
+              "var b=new Blob([t],{type:'text/plain'});"
+              "var u=URL.createObjectURL(b);var a=document.createElement('a');"
+              "a.href=u;a.download='wallbox-log.txt';document.body.appendChild(a);"
+              "a.click();document.body.removeChild(a);"
+              "setTimeout(function(){URL.revokeObjectURL(u)},1000);"
+              "if(window.toast)toast('Log downloaded','success');};"
             "function load(){fetch('/api/logs',{cache:'no-store'})"
               ".then(function(r){return r.text()})"
               ".then(function(t){online();el.textContent=t;if(stick)el.scrollTop=el.scrollHeight})"

@@ -58,6 +58,7 @@ jobs:
           name: firmware-esp32s3
           path: |
             .pio/build/esp32s3/firmware.bin
+            .pio/build/esp32s3/firmware.elf
             .pio/build/esp32s3/bootloader.bin
             .pio/build/esp32s3/partitions.bin
             .pio/build/esp32s3/SHA256SUMS.txt
@@ -98,6 +99,14 @@ jobs:
           # ESP-Web-Tools parts (firmware/bootloader/partitions + install.json).
           cp .pio/build/esp32s3/firmware.bin \
              ".pio/build/esp32s3/wallbox-gateway-${GITHUB_REF_NAME}-esp32s3.bin"
+          # Board+tag-named ELF alongside the .bin. A coredump is just
+          # addresses; turning /api/coredump/summary's backtrace into function
+          # names + lines needs the EXACT ELF that built the running image.
+          # Attaching it per release means any user's crash (or ours, #168) can
+          # be symbolised from the release page — no rebuild, no guessing which
+          # commit. Debug artifact only; never flashed.
+          cp .pio/build/esp32s3/firmware.elf \
+             ".pio/build/esp32s3/wallbox-gateway-${GITHUB_REF_NAME}-esp32s3.elf"
 
       - name: Attach to release
         if: github.event_name == 'release'
@@ -105,6 +114,7 @@ jobs:
         with:
           files: |
             .pio/build/esp32s3/wallbox-gateway-*-esp32s3.bin
+            .pio/build/esp32s3/wallbox-gateway-*-esp32s3.elf
             .pio/build/esp32s3/firmware.bin
             .pio/build/esp32s3/bootloader.bin
             .pio/build/esp32s3/partitions.bin
