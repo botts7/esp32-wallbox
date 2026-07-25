@@ -4,6 +4,7 @@
 #include "wb_health.h"
 #include "wb_zentri_normalize.h"
 #include "wb_copper_normalize.h"
+#include "wb_ble_err.h"   // bleErrName() — decode NimBLE codes to names (#161)
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
@@ -27,26 +28,8 @@ static const char* PLUS_SVC_UUID = "331a36f5-2459-45ea-9d95-6142f0c4b307";
 static const char* PLUS_CHR_UUID = "a9da6040-0823-4995-94ec-9ce41ca28833";
 static const char* PLUS_TXC_UUID = "a73e9a10-628f-4494-a099-12efaf72258f";
 
-// Decode the common NimBLE host (ble_hs) return codes to a short name, so a
-// user's pasted log reads "err 0x07 ENOTCONN (link dropped)" instead of a bare
-// hex we have to look up by hand. Covers the codes that actually turn up on the
-// connect/pair/encrypt paths; unknown values fall through to just the hex.
-static const char* bleErrName(int e) {
-    switch (e) {
-        case 0x03: return "EINVAL (bad argument)";
-        case 0x06: return "ENOMEM (out of memory)";
-        case 0x07: return "ENOTCONN (link dropped mid-op)";
-        case 0x08: return "ENOTSUP (unsupported)";
-        case 0x0d: return "ETIMEOUT (timed out)";
-        case 0x0f: return "EBUSY (stack busy)";
-        case 0x10: return "EREJECT (peer rejected)";
-        case 0x17: return "EAUTHEN (auth/pairing failed)";
-        case 0x18: return "EAUTHOR (not authorised)";
-        case 0x19: return "EENCRYPT (encryption failed)";
-        case 0x1a: return "EENCRYPT_KEY_SZ (key size)";
-        default:   return "";
-    }
-}
+// bleErrName() moved to wb_ble_err.h (#161) — now also decodes HCI disconnect
+// reasons and GATT reply codes, not just host errors.
 
 class WBClientCallbacks : public NimBLEClientCallbacks {
     uint32_t onPassKeyRequest() override {
@@ -437,7 +420,9 @@ void WallboxBLE::_connect() {
     }
 
     if (!connected) {
-        Log.printf("[BLE] Connection failed (RSSI %d)\n", _scanRSSI);
+        int ce = _client->getLastError();
+        Log.printf("[BLE] Connection failed (RSSI %d, err %d %s)\n",
+                   _scanRSSI, ce, bleErrName(ce));
         _state = State::ERROR;
         _connectBackoff = min(_connectBackoff * 2, (uint32_t)30000);
         esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
@@ -1357,8 +1342,10 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
                    met, (unsigned)writeMs);
 
     if (!writeOk) {
-        Log.printf("[BLE] Write failed for %s — mtu=%d framelen=%u connected=%d char=%s\n",
-                   met, _client ? (int)_client->getMTU() : -1,
+        int we = _client ? _client->getLastError() : 0;
+        Log.printf("[BLE] Write failed for %s — err=%d %s mtu=%d framelen=%u connected=%d char=%s\n",
+                   met, we, bleErrName(we),
+                   _client ? (int)_client->getMTU() : -1,
                    (unsigned)framed.length(),
                    (_client && _client->isConnected()) ? 1 : 0,
                    _chr ? _chr->getUUID().toString().c_str() : "?");
