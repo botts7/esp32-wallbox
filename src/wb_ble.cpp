@@ -1337,6 +1337,10 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
     uint32_t writeMs = millis() - wStart;
     _lastWriteMs = writeMs;
     if (writeMs > _maxWriteMs) _maxWriteMs = writeMs;
+    // #168: mirror the worst write into the RTC-NOINIT breadcrumb so it
+    // survives an INT_WDT reset (the coredump doesn't). A max near/over the
+    // 300 ms interrupt-watchdog window is the prime suspect for the reboot.
+    wb_health::setBreadcrumbWriteMs(_maxWriteMs);
     if (writeMs > 300)
         Log.printf("[BLE] SLOW TX %s: write %ums (link/controller stall?)\n",
                    met, (unsigned)writeMs);
