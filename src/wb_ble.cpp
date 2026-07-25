@@ -1582,9 +1582,9 @@ void WallboxBLE::_pollRealtime() {
 }
 
 void WallboxBLE::_pollSettings() {
-    // Five sequential BAPI reads, merged into one JSON. Each one uses a
+    // Six sequential BAPI reads, merged into one JSON. Each one uses a
     // 2-second timeout (vs the default 5s) so the mutex doesn't get held
-    // for ~15s in the worst case — user-initiated BAPI commands (web,
+    // for ~12s in the worst case — user-initiated BAPI commands (web,
     // MQTT) need to be able to slip in between these settings reads
     // without the user perceiving a hang. Settings reads on a healthy
     // link complete in well under 1s.
@@ -1658,7 +1658,35 @@ void WallboxBLE::_pollSettings() {
             merged["timezone"] = tz;
         }
     }
-    merged["halo"] = 2;  // placeholder — no verified getter yet
+    if (_state != State::CONNECTED) return;
+
+    // #158: Halo LED — real state via g_halocfg (the getter mate of the
+    // s_halocfg we already send on writes; the web UI reads the same
+    // command). Payload is {"r":{"bright":0-100,"mode":0|1,"time_s":N}}
+    // where `bright` is the ring brightness percentage. The HA "Halo LED"
+    // select only exposes four coarse levels (Off/Low/Medium/High, mapped
+    // from an int 0-3 in wb_mqtt.cpp), so we bucket the reported brightness
+    // into those four buckets so the published state matches the command
+    // options. mode/time_s aren't surfaced by the select — the web UI
+    // covers the full standby-dim config. Falls back to Medium (2) only if
+    // the getter is unsupported/unreadable, preserving the old default.
+    bool haloRead = false;
+    String r6 = _sendCommandDirect(bapi::MET_GET_HALO, "null", SETTINGS_TIMEOUT_MS);
+    if (!r6.isEmpty()) {
+        JsonDocument d; if (deserializeJson(d, r6) == DeserializationError::Ok) {
+            int bright = d["r"]["bright"] | -1;
+            if (bright >= 0) {
+                int level;
+                if (bright == 0)       level = 0;  // Off
+                else if (bright <= 33) level = 1;  // Low
+                else if (bright <= 66) level = 2;  // Medium
+                else                   level = 3;  // High
+                merged["halo"] = level;
+                haloRead = true;
+            }
+        }
+    }
+    if (!haloRead) merged["halo"] = 2;  // unreadable getter -> keep prior default
 
     String out;
     serializeJson(merged, out);

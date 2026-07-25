@@ -84,6 +84,7 @@ constexpr const char* MET_GET_DISCHARGE  = "r_dis";   // discharge session (per 
 constexpr const char* MET_GET_SERIAL     = "r_sn_";   // serial number (universal)
 constexpr const char* MET_GET_MAC        = "g_mac";   // MAC addresses (universal)
 constexpr const char* MET_GET_ECO_SMART  = "g_ecos";  // eco smart (inferred)
+constexpr const char* MET_GET_HALO       = "g_halocfg"; // LED halo config — getter mate of s_halocfg (used by web UI)
 
 // Write methods
 constexpr const char* MET_START_STOP     = "w_cha";   // start/stop/pause/resume charging
