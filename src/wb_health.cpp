@@ -44,13 +44,24 @@ static esp_reset_reason_t _thisBootReason = ESP_RST_UNKNOWN;
 // warm-boot; lost on cold power-on (acceptable: a cold start has no
 // previous crash to attribute to). Magic verifies the struct wasn't
 // trampled by an unrelated RTC NOINIT consumer.
-static const uint32_t WB_BC_MAGIC = 0xB12EAD0FUL;  // "B12EAD0F" — breadcrumb tag
+// Magic bumped to 0xB12EAD10 with the #168 timing fields below: the struct
+// layout grew, so an OLD-firmware breadcrumb (written just before the OTA to
+// this build) must NOT be re-read against the new layout. The mismatched
+// magic makes recordBootReason() silently skip it rather than surface garbage
+// timings for that single cross-version boot.
+static const uint32_t WB_BC_MAGIC = 0xB12EAD10UL;  // breadcrumb tag (v2: +timing)
 
 typedef struct {
     uint32_t magic;
-    char     path[32];     // last HTTP request path (truncated)
-    char     bapi[16];     // last BAPI met submitted to BLE worker
-    uint32_t loop_count;   // main-loop tick counter
+    char     path[32];       // last HTTP request path (truncated)
+    char     bapi[16];       // last BAPI met/phase submitted to BLE worker
+    uint32_t loop_count;     // main-loop tick counter
+    // #168 timing fields — all single-word writes (atomic on Xtensa), each
+    // updated from exactly one task, so no lock is needed even though the
+    // BLE task and the main task both write into this struct.
+    uint32_t bapi_phase_ms;  // millis() the current BAPI phase was entered (BLE task)
+    uint32_t last_loop_ms;   // millis() of the last main-loop tick (main task)
+    uint32_t max_write_ms;   // worst ATT-write duration observed this boot (BLE task)
     uint8_t  reserved[4];
 } __attribute__((packed)) WBBreadcrumbs;
 
@@ -71,9 +82,17 @@ void setBreadcrumbBapi(const char* met) {
     size_t n = strnlen(met, sizeof(_bc.bapi) - 1);
     memcpy(_bc.bapi, met, n);
     _bc.bapi[n] = '\0';
+    // Stamp when this phase started. After an INT_WDT, comparing this against
+    // last_loop_ms shows whether the main loop kept ticking past the BLE op.
+    _bc.bapi_phase_ms = millis();
 }
 
-void bumpBreadcrumbLoop() { _bc.loop_count++; }
+void bumpBreadcrumbLoop() {
+    _bc.loop_count++;
+    _bc.last_loop_ms = millis();
+}
+
+void setBreadcrumbWriteMs(uint32_t maxMs) { _bc.max_write_ms = maxMs; }
 
 const char* currentBootReasonStr() {
     switch (_thisBootReason) {
@@ -138,6 +157,14 @@ void recordBootReason() {
         bc["path"]       = _bcSnapshot.path;
         bc["bapi"]       = _bcSnapshot.bapi;
         bc["loop_count"] = _bcSnapshot.loop_count;
+        // #168 timing. `bapi_phase_ms` = when the last BLE phase began,
+        // `last_loop_ms` = when the main loop last ticked; if these are close
+        // and loop_count didn't advance, the main task stalled at that BLE op.
+        // `max_write_ms` near/over 300 ms points straight at a BLE-write stall
+        // as the INT_WDT trigger.
+        bc["bapi_phase_ms"] = _bcSnapshot.bapi_phase_ms;
+        bc["last_loop_ms"]  = _bcSnapshot.last_loop_ms;
+        bc["max_write_ms"]  = _bcSnapshot.max_write_ms;
     }
     // `at` is wall-clock epoch when first observed by SNTP. NTP hasn't
     // synced yet at recordBootReason() time (very early setup), so seed

@@ -35,6 +35,19 @@ void setBreadcrumbPath(const char* path);
 void setBreadcrumbBapi(const char* met);
 void bumpBreadcrumbLoop();
 
+// #168 INT_WDT capture. The interrupt watchdog leaves NO usable coredump
+// (the ELF writer itself faults on this IDF's 1 KB coredump stack), so the
+// only crash evidence that survives is the RTC-NOINIT breadcrumb. These
+// extensions record cheap *timing* alongside the last path/BAPI so that,
+// after an INT_WDT, /api/boot/history can answer "was a BLE write stalling
+// the CPU when it fired?":
+//   - setBreadcrumbBapi() also stamps the millis() the phase was entered.
+//   - bumpBreadcrumbLoop() also stamps the millis() of the last main-loop
+//     tick — if it froze at the BLE phase time, the main task stalled there.
+//   - setBreadcrumbWriteMs() records the worst ATT-write duration this boot;
+//     a value near/over the 300 ms INT_WDT window is the prime suspect.
+void setBreadcrumbWriteMs(uint32_t maxMs);
+
 // Get current boot's reset reason as a short string ("power-on",
 // "panic", "task-wdt", "brownout", "external", "software", ...).
 const char* currentBootReasonStr();
