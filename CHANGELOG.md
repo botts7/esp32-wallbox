@@ -6,6 +6,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [3.2.2] - 2026-07-27
+
+Reliability + integration polish on top of 3.2.1.
+
+### Fixed
+- **WiFi recovery after a brief outage.** The escalating WiFi watchdog did its
+  full-stack restart only *once* per outage and rebooted only after 30 min — so
+  a short AP blip that wedged the WiFi stack could leave the gateway offline for
+  the full 30 minutes. The stack restart now **repeats every 3 minutes** while
+  down (a second/third off-on clears wedges the first doesn't), and the
+  last-resort reboot moved to **10 minutes**. Worst case ~10 min offline, not 30.
+- **Halo LED could not be set from Home Assistant.** The MQTT halo command
+  forwarded the raw select value to the charger instead of the JSON object it
+  expects, so it was silently ignored. It now builds the correct
+  `{bright,mode,time_s}` payload (preserving the charger's current mode/standby),
+  and the halo *state* is read from the charger's real config rather than a
+  placeholder.
+
+### Added
+- **`eco_smart` capability** in `/api/status` — the Home Assistant Add-on uses it
+  to precisely grey out the resume-eco / solar-charging pickers on chargers that
+  don't support Eco-Smart (previously inferred from an unrelated proxy).
+- **NimBLE error decoding** in the BLE log — disconnect/GATT/pairing error codes
+  now print human-readable names (e.g. "remote-terminated") instead of bare
+  numbers, across the HCI / ATT / SMP / host-error ranges.
+- **INT-watchdog crash breadcrumb** — the reboot-surviving crash breadcrumb now
+  records `max_write_ms` / `last_loop_ms` / BLE phase, so a rare
+  interrupt-watchdog reboot (which leaves no coredump on this IDF) can be
+  attributed to a BLE-write stall after the fact.
+
 ## [3.2.1] - 2026-07-23
 
 Stability release. Fixes the recurring MQTT-related crash/reboot, the `/logs`
