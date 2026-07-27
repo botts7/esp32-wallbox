@@ -764,6 +764,10 @@ String wb_buildStatusJson() {
     // #129: meter capability — surfaces hide grid/solar when false (charger
     // has no Power Boost / Power Meter; e.g. the original Pulsar).
     json += ",\"meter\":" + String(wallboxBLE.meterPresent() ? "true" : "false");
+    // #175: Eco-Smart capability — the Add-on greys out the resume-eco /
+    // solar-native pickers off this explicit flag instead of proxying off
+    // the power-meter's presence. True once g_ecos returns a valid object.
+    json += ",\"eco_smart\":" + String(wallboxBLE.ecoSmartPresent() ? "true" : "false");
     // Whether a vehicle is plugged in (r_dat.st-based, see carConnected()).
     // Surfaces a real cable signal — NB sta_connected above is WiFi, not the car.
     json += ",\"car_connected\":" + String(wallboxBLE.carConnected() ? "true" : "false");

@@ -1616,8 +1616,18 @@ void WallboxBLE::_pollSettings() {
     String r2 = _sendCommandDirect("g_ecos", "null", SETTINGS_TIMEOUT_MS);
     if (!r2.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r2) == DeserializationError::Ok) {
-            merged["eco_mode"] = d["r"]["esm"] | 0;
-            merged["eco_power"] = d["r"]["esp"] | 100;
+            // Eco-Smart capability latch (#175), same shape as the meter
+            // latch above: a valid `r` object means the charger supports
+            // Eco-Smart; an error object (e.g. code 4 "not supported") or a
+            // non-object `r` means it doesn't. A transient empty read (outer
+            // guard) leaves the latched value untouched.
+            if (d["r"].is<JsonObject>()) {
+                _ecoSmartPresent = true;
+                merged["eco_mode"] = d["r"]["esm"] | 0;
+                merged["eco_power"] = d["r"]["esp"] | 100;
+            } else if (d["error"].is<JsonObject>()) {
+                _ecoSmartPresent = false;
+            }
         }
     }
     if (_state != State::CONNECTED) return;
