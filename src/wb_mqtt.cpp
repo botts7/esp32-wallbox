@@ -670,7 +670,29 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         wallboxBLE.enqueueRequest(bapi::MET_SET_POWER_BOOST, payload);
 
     } else if (sub == "halo") {
-        wallboxBLE.enqueueRequest(bapi::MET_SET_HALO, payload);
+        // The HA "Halo LED" select sends a coarse level string
+        // (Off/Low/Medium/High), but the charger's s_halocfg wants the full
+        // JSON object {"bright":0-100,"mode":0|1,"time_s":N} — exactly what the
+        // web UI's saveHalo() builds. Forwarding the raw select string did
+        // nothing (charger silently ignored it): that was the #174 bug.
+        //
+        // Map the level back to a representative brightness in each band. This
+        // reverses the #158 READ bucketing (0=Off, 1-33=Low, 34-66=Med,
+        // 67-100=High); we pick a mid-band value so a read-back re-buckets to
+        // the same level. mode/time_s aren't exposed by the select, so we
+        // preserve the last-polled standby config (RAM cache from #158) and
+        // change only brightness — matching how autolock_enable replays its
+        // remembered timeout.
+        String s = payload;
+        int bright;
+        if      (s == "Off")  bright = 0;
+        else if (s == "Low")  bright = 20;   // ~mid of 1-33
+        else if (s == "High") bright = 100;  // top of 67-100
+        else                  bright = 50;   // "Medium" / any unknown -> mid of 34-66
+        String p = "{\"bright\":" + String(bright) +
+                   ",\"mode\":" + String(wallboxBLE.lastHaloMode()) +
+                   ",\"time_s\":" + String(wallboxBLE.lastHaloTimeS()) + "}";
+        wallboxBLE.enqueueRequest(bapi::MET_SET_HALO, p.c_str());
 
     // ---- Native HA entity handlers (Batch 1) ----
     } else if (sub == "autolock_enable") {

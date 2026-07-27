@@ -571,6 +571,17 @@ public:
     int     _lastAutolockMin = 1;
     int     lastAutolockMin() const { return _lastAutolockMin; }
 
+    // Last observed Halo LED standby config (g_halocfg, #158). The HA "Halo
+    // LED" select only carries brightness (four coarse levels), but s_halocfg
+    // wants the whole {bright,mode,time_s} object — so we stash mode/time_s
+    // from each settings poll and replay them unchanged on a select write,
+    // altering only brightness. Defaults mirror the web UI (standby on, 10 s)
+    // for the first write before any poll has landed. RAM-only, like autolock.
+    int     _lastHaloMode  = 1;
+    int     _lastHaloTimeS = 10;
+    int     lastHaloMode()  const { return _lastHaloMode; }
+    int     lastHaloTimeS() const { return _lastHaloTimeS; }
+
 private:
     String _chargerModel = "max";
     uint32_t _mainsVoltage = 230;   // phase-current power derivation fallback (#12)

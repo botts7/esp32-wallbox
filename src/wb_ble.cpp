@@ -1674,6 +1674,11 @@ void WallboxBLE::_pollSettings() {
                 else                   level = 3;  // High
                 merged["halo"] = level;
                 haloRead = true;
+                // Stash mode/time_s so the MQTT select-write (#174) can replay
+                // them; the select only carries brightness. Defaults match the
+                // web UI when the charger omits a field.
+                _lastHaloMode  = d["r"]["mode"]   | 1;
+                _lastHaloTimeS = d["r"]["time_s"] | 10;
             }
         }
     }
