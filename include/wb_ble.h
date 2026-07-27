@@ -142,6 +142,15 @@ public:
     // first r_dca "not supported" response.
     bool meterPresent() const { return _meterPresent; }
 
+    // Eco-Smart capability (#175). True once the charger returns a valid
+    // g_ecos (Eco-Smart settings) object — i.e. it supports the solar/green
+    // charging modes. False on a model that errors/omits g_ecos (Zentri /
+    // original Pulsar, or a model without solar). The Add-on reads this to
+    // grey out the resume-eco / solar-native pickers precisely, instead of
+    // proxying off meterPresent(). Defaults false; latched after the first
+    // definitive g_ecos read.
+    bool ecoSmartPresent() const { return _ecoSmartPresent; }
+
     // ---- Charge-reminder engine (#127) ----
     // Computed from the charger's own schedules (fetched on a slow
     // cadence by _pollSchedules on the BLE task) plus NTP UTC time.
@@ -344,6 +353,13 @@ private:
     bool _pinRequired = false;
     bool _isZentri = false;  // set in _connect() when TruConnect module detected (#12)
     bool _meterPresent = true;  // #129: false once r_dca reports error code 4 (no meter)
+    // #175: Eco-Smart (solar/green) capability. Default false — treat as
+    // unsupported until g_ecos returns a valid object, so the Add-on greys
+    // out the resume-eco / solar-native pickers precisely rather than
+    // proxying off the power-meter's presence. Latched in _pollSettings():
+    // flips true on a valid g_ecos `r` object, false on an error/omit;
+    // a transient (empty/timeout) read leaves it untouched.
+    bool _ecoSmartPresent = false;
 
     // Response handling
     bapi::ResponseParser _parser;
