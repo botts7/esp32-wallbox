@@ -439,6 +439,7 @@ private:
     volatile uint32_t _maxRoundTripMs = 0;   // worst write+response round-trip
     // Poll timers (BLE-task local)
     uint32_t _lastStatusPoll = 0, _lastRealtimePoll = 0, _lastNotifPoll = 0;
+    uint32_t _lastLsePoll = 0;   // #168 experiment: throttle the large r_lse read
     uint32_t _statusPollMs = 10000, _realtimePollMs = 30000;
     static const uint32_t NOTIF_POLL_MS = 60000;
     void _pollStatus();

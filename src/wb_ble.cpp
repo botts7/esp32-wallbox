@@ -1537,6 +1537,17 @@ void WallboxBLE::_pollStatus() {
     }
     // Live-session energy feed (solar/grid split, surplus, control mode).
     if (_state != State::CONNECTED) return;
+    // #168 experiment: r_lse is the LARGEST periodic BLE payload, and it is the
+    // last-in-flight op on every interrupt-watchdog reboot we've captured
+    // (breadcrumb q:r_lse, with max_write_ms normal — so it's the multi-fragment
+    // RECEIVE, not our write, that correlates). Throttle this read to ~30s (it
+    // rode the ~10s status poll). r_lse is only the solar/grid split + control
+    // mode — it doesn't need per-status-poll freshness. If the INT_WDT rate
+    // drops after this, r_lse receive was the trigger; if not, r_lse is ruled out.
+    static const uint32_t LSE_POLL_MS = 30000;
+    uint32_t nowMs = millis();
+    if (nowMs - _lastLsePoll < LSE_POLL_MS) return;
+    _lastLsePoll = nowMs;
     String lse = _sendCommandDirect(bapi::MET_GET_LSE);
     if (!lse.isEmpty()) {
         // r_lse carries the Wallbox account user_id — strip it before
