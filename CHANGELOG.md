@@ -6,11 +6,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [3.2.2] - 2026-07-27
+## [3.2.2] - 2026-07-31
 
 Reliability + integration polish on top of 3.2.1.
 
 ### Fixed
+- **Rare interrupt-watchdog reboot eliminated.** A very infrequent reboot
+  (interrupt-watchdog, no coredump) always traced to the `r_lse` BLE read, whose
+  round-trip can spike to ~1s on marginal links. The gateway polled `r_lse` every
+  cycle; it now polls it at most once every 30s, which keeps the sensor fresh
+  while removing the exposure window that tripped the watchdog. Confirmed on
+  hardware — the build ran ~69h crash-free where prior builds failed within
+  ~3–24h (all crashes on this exact `r_lse` path).
 - **WiFi recovery after a brief outage.** The escalating WiFi watchdog did its
   full-stack restart only *once* per outage and rebooted only after 30 min — so
   a short AP blip that wedged the WiFi stack could leave the gateway offline for
