@@ -60,12 +60,19 @@ static uint32_t _nextAttemptAtMs     = 0;
 static const uint32_t kDriverGiveUpMs = 60000;
 
 // Escalating WiFi watchdog (#13, peter-mcc): a soft WiFi.reconnect() can't
-// recover a wedged WiFi stack after long uptime. After 5 min continuously
-// down we restart the whole WiFi stack; after 30 min we reboot (exactly what
-// a manual power-cycle does). Reset on GOT_IP so a healthy link stays untouched.
-static const uint32_t kWifiFullRestartMs = 300000;    // 5 min
-static const uint32_t kWifiRebootMs      = 1800000;   // 30 min
-static bool _didFullWifiRestart          = false;
+// recover a wedged WiFi stack. After 3 min continuously down we restart the
+// whole WiFi stack, and REPEAT that every 3 min; after 10 min still down we
+// reboot (what a manual power-cycle does). Reset on GOT_IP so a healthy link
+// stays untouched.
+//
+// v3.2.2: was a ONE-SHOT stack restart + a 30 min reboot. A short AP blip
+// (observed: ~1 min breaker test) could wedge the stack such that the single
+// off/on didn't clear it, leaving the gateway dark for the full 30 min. Now the
+// strong recovery repeats (a 2nd/3rd off/on often clears what the 1st didn't)
+// and the reboot backstop is 10 min — worst case ~10 min offline, not 30.
+static const uint32_t kWifiFullRestartMs = 180000;    // 3 min (also the repeat interval)
+static const uint32_t kWifiRebootMs      = 600000;    // 10 min
+static uint32_t _lastFullRestartMs       = 0;         // 0 = no stack-restart this outage yet
 
 // Walk the backoff ladder: 1s → 2s → 5s → 15s → 60s → stays at 60s.
 static uint32_t _nextBackoff(uint32_t cur) {
@@ -217,7 +224,7 @@ void tick() {
         // next disconnect starts fresh from 1 s.
         _backoffMs            = 0;
         _nextAttemptAtMs      = 0;
-        _didFullWifiRestart   = false;   // re-arm the escalating watchdog
+        _lastFullRestartMs    = 0;   // re-arm the escalating watchdog for the next outage
     }
     if (_pendingMdnsRefresh) {
         _pendingMdnsRefresh = false;
@@ -245,13 +252,21 @@ void tick() {
     // that has locked up after long uptime. Escalate by downtime.
     uint32_t downMs = (uint32_t)(now - _lastConnectedAt);
     if (downMs >= kWifiRebootMs) {
-        Log.println("[WiFi] down >30 min and still no link — rebooting to recover");
+        Log.println("[WiFi] down >10 min and still no link — rebooting to recover");
         delay(50);
         ESP.restart();
     }
-    if (downMs >= kWifiFullRestartMs && !_didFullWifiRestart) {
-        _didFullWifiRestart = true;
-        Log.println("[WiFi] down >5 min — restarting the WiFi stack (off/on + begin)");
+    // Full WiFi-stack restart — the strong recovery for a wedged stack that a
+    // plain WiFi.reconnect() can't clear. REPEATS every kWifiFullRestartMs while
+    // down (not one-shot): one off/on frequently fails to clear a wedge a second
+    // clears, and one-shot used to leave the gateway dark until the reboot even
+    // after a brief AP blip. Bounded by the reboot backstop above.
+    if (downMs >= kWifiFullRestartMs &&
+        (_lastFullRestartMs == 0 ||
+         (uint32_t)(now - _lastFullRestartMs) >= kWifiFullRestartMs)) {
+        _lastFullRestartMs = now;
+        Log.printf("[WiFi] down %us — restarting the WiFi stack (off/on + begin)\n",
+                   (unsigned)(downMs / 1000));
         const WBConfig& cfg = configMgr.get();
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_OFF);

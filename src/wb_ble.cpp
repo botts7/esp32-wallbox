@@ -4,6 +4,7 @@
 #include "wb_health.h"
 #include "wb_zentri_normalize.h"
 #include "wb_copper_normalize.h"
+#include "wb_ble_err.h"   // bleErrName() — decode NimBLE codes to names (#161)
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
@@ -27,26 +28,8 @@ static const char* PLUS_SVC_UUID = "331a36f5-2459-45ea-9d95-6142f0c4b307";
 static const char* PLUS_CHR_UUID = "a9da6040-0823-4995-94ec-9ce41ca28833";
 static const char* PLUS_TXC_UUID = "a73e9a10-628f-4494-a099-12efaf72258f";
 
-// Decode the common NimBLE host (ble_hs) return codes to a short name, so a
-// user's pasted log reads "err 0x07 ENOTCONN (link dropped)" instead of a bare
-// hex we have to look up by hand. Covers the codes that actually turn up on the
-// connect/pair/encrypt paths; unknown values fall through to just the hex.
-static const char* bleErrName(int e) {
-    switch (e) {
-        case 0x03: return "EINVAL (bad argument)";
-        case 0x06: return "ENOMEM (out of memory)";
-        case 0x07: return "ENOTCONN (link dropped mid-op)";
-        case 0x08: return "ENOTSUP (unsupported)";
-        case 0x0d: return "ETIMEOUT (timed out)";
-        case 0x0f: return "EBUSY (stack busy)";
-        case 0x10: return "EREJECT (peer rejected)";
-        case 0x17: return "EAUTHEN (auth/pairing failed)";
-        case 0x18: return "EAUTHOR (not authorised)";
-        case 0x19: return "EENCRYPT (encryption failed)";
-        case 0x1a: return "EENCRYPT_KEY_SZ (key size)";
-        default:   return "";
-    }
-}
+// bleErrName() moved to wb_ble_err.h (#161) — now also decodes HCI disconnect
+// reasons and GATT reply codes, not just host errors.
 
 class WBClientCallbacks : public NimBLEClientCallbacks {
     uint32_t onPassKeyRequest() override {
@@ -437,7 +420,9 @@ void WallboxBLE::_connect() {
     }
 
     if (!connected) {
-        Log.printf("[BLE] Connection failed (RSSI %d)\n", _scanRSSI);
+        int ce = _client->getLastError();
+        Log.printf("[BLE] Connection failed (RSSI %d, err %d %s)\n",
+                   _scanRSSI, ce, bleErrName(ce));
         _state = State::ERROR;
         _connectBackoff = min(_connectBackoff * 2, (uint32_t)30000);
         esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
@@ -1352,13 +1337,19 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
     uint32_t writeMs = millis() - wStart;
     _lastWriteMs = writeMs;
     if (writeMs > _maxWriteMs) _maxWriteMs = writeMs;
+    // #168: mirror the worst write into the RTC-NOINIT breadcrumb so it
+    // survives an INT_WDT reset (the coredump doesn't). A max near/over the
+    // 300 ms interrupt-watchdog window is the prime suspect for the reboot.
+    wb_health::setBreadcrumbWriteMs(_maxWriteMs);
     if (writeMs > 300)
         Log.printf("[BLE] SLOW TX %s: write %ums (link/controller stall?)\n",
                    met, (unsigned)writeMs);
 
     if (!writeOk) {
-        Log.printf("[BLE] Write failed for %s — mtu=%d framelen=%u connected=%d char=%s\n",
-                   met, _client ? (int)_client->getMTU() : -1,
+        int we = _client ? _client->getLastError() : 0;
+        Log.printf("[BLE] Write failed for %s — err=%d %s mtu=%d framelen=%u connected=%d char=%s\n",
+                   met, we, bleErrName(we),
+                   _client ? (int)_client->getMTU() : -1,
                    (unsigned)framed.length(),
                    (_client && _client->isConnected()) ? 1 : 0,
                    _chr ? _chr->getUUID().toString().c_str() : "?");
@@ -1546,6 +1537,17 @@ void WallboxBLE::_pollStatus() {
     }
     // Live-session energy feed (solar/grid split, surplus, control mode).
     if (_state != State::CONNECTED) return;
+    // #168 experiment: r_lse is the LARGEST periodic BLE payload, and it is the
+    // last-in-flight op on every interrupt-watchdog reboot we've captured
+    // (breadcrumb q:r_lse, with max_write_ms normal — so it's the multi-fragment
+    // RECEIVE, not our write, that correlates). Throttle this read to ~30s (it
+    // rode the ~10s status poll). r_lse is only the solar/grid split + control
+    // mode — it doesn't need per-status-poll freshness. If the INT_WDT rate
+    // drops after this, r_lse receive was the trigger; if not, r_lse is ruled out.
+    static const uint32_t LSE_POLL_MS = 30000;
+    uint32_t nowMs = millis();
+    if (nowMs - _lastLsePoll < LSE_POLL_MS) return;
+    _lastLsePoll = nowMs;
     String lse = _sendCommandDirect(bapi::MET_GET_LSE);
     if (!lse.isEmpty()) {
         // r_lse carries the Wallbox account user_id — strip it before
@@ -1582,9 +1584,9 @@ void WallboxBLE::_pollRealtime() {
 }
 
 void WallboxBLE::_pollSettings() {
-    // Five sequential BAPI reads, merged into one JSON. Each one uses a
+    // Six sequential BAPI reads, merged into one JSON. Each one uses a
     // 2-second timeout (vs the default 5s) so the mutex doesn't get held
-    // for ~15s in the worst case — user-initiated BAPI commands (web,
+    // for ~12s in the worst case — user-initiated BAPI commands (web,
     // MQTT) need to be able to slip in between these settings reads
     // without the user perceiving a hang. Settings reads on a healthy
     // link complete in well under 1s.
@@ -1625,8 +1627,18 @@ void WallboxBLE::_pollSettings() {
     String r2 = _sendCommandDirect("g_ecos", "null", SETTINGS_TIMEOUT_MS);
     if (!r2.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r2) == DeserializationError::Ok) {
-            merged["eco_mode"] = d["r"]["esm"] | 0;
-            merged["eco_power"] = d["r"]["esp"] | 100;
+            // Eco-Smart capability latch (#175), same shape as the meter
+            // latch above: a valid `r` object means the charger supports
+            // Eco-Smart; an error object (e.g. code 4 "not supported") or a
+            // non-object `r` means it doesn't. A transient empty read (outer
+            // guard) leaves the latched value untouched.
+            if (d["r"].is<JsonObject>()) {
+                _ecoSmartPresent = true;
+                merged["eco_mode"] = d["r"]["esm"] | 0;
+                merged["eco_power"] = d["r"]["esp"] | 100;
+            } else if (d["error"].is<JsonObject>()) {
+                _ecoSmartPresent = false;
+            }
         }
     }
     if (_state != State::CONNECTED) return;
@@ -1658,7 +1670,40 @@ void WallboxBLE::_pollSettings() {
             merged["timezone"] = tz;
         }
     }
-    merged["halo"] = 2;  // placeholder — no verified getter yet
+    if (_state != State::CONNECTED) return;
+
+    // #158: Halo LED — real state via g_halocfg (the getter mate of the
+    // s_halocfg we already send on writes; the web UI reads the same
+    // command). Payload is {"r":{"bright":0-100,"mode":0|1,"time_s":N}}
+    // where `bright` is the ring brightness percentage. The HA "Halo LED"
+    // select only exposes four coarse levels (Off/Low/Medium/High, mapped
+    // from an int 0-3 in wb_mqtt.cpp), so we bucket the reported brightness
+    // into those four buckets so the published state matches the command
+    // options. mode/time_s aren't surfaced by the select — the web UI
+    // covers the full standby-dim config. Falls back to Medium (2) only if
+    // the getter is unsupported/unreadable, preserving the old default.
+    bool haloRead = false;
+    String r6 = _sendCommandDirect(bapi::MET_GET_HALO, "null", SETTINGS_TIMEOUT_MS);
+    if (!r6.isEmpty()) {
+        JsonDocument d; if (deserializeJson(d, r6) == DeserializationError::Ok) {
+            int bright = d["r"]["bright"] | -1;
+            if (bright >= 0) {
+                int level;
+                if (bright == 0)       level = 0;  // Off
+                else if (bright <= 33) level = 1;  // Low
+                else if (bright <= 66) level = 2;  // Medium
+                else                   level = 3;  // High
+                merged["halo"] = level;
+                haloRead = true;
+                // Stash mode/time_s so the MQTT select-write (#174) can replay
+                // them; the select only carries brightness. Defaults match the
+                // web UI when the charger omits a field.
+                _lastHaloMode  = d["r"]["mode"]   | 1;
+                _lastHaloTimeS = d["r"]["time_s"] | 10;
+            }
+        }
+    }
+    if (!haloRead) merged["halo"] = 2;  // unreadable getter -> keep prior default
 
     String out;
     serializeJson(merged, out);

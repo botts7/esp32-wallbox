@@ -142,6 +142,15 @@ public:
     // first r_dca "not supported" response.
     bool meterPresent() const { return _meterPresent; }
 
+    // Eco-Smart capability (#175). True once the charger returns a valid
+    // g_ecos (Eco-Smart settings) object — i.e. it supports the solar/green
+    // charging modes. False on a model that errors/omits g_ecos (Zentri /
+    // original Pulsar, or a model without solar). The Add-on reads this to
+    // grey out the resume-eco / solar-native pickers precisely, instead of
+    // proxying off meterPresent(). Defaults false; latched after the first
+    // definitive g_ecos read.
+    bool ecoSmartPresent() const { return _ecoSmartPresent; }
+
     // ---- Charge-reminder engine (#127) ----
     // Computed from the charger's own schedules (fetched on a slow
     // cadence by _pollSchedules on the BLE task) plus NTP UTC time.
@@ -344,6 +353,13 @@ private:
     bool _pinRequired = false;
     bool _isZentri = false;  // set in _connect() when TruConnect module detected (#12)
     bool _meterPresent = true;  // #129: false once r_dca reports error code 4 (no meter)
+    // #175: Eco-Smart (solar/green) capability. Default false — treat as
+    // unsupported until g_ecos returns a valid object, so the Add-on greys
+    // out the resume-eco / solar-native pickers precisely rather than
+    // proxying off the power-meter's presence. Latched in _pollSettings():
+    // flips true on a valid g_ecos `r` object, false on an error/omit;
+    // a transient (empty/timeout) read leaves it untouched.
+    bool _ecoSmartPresent = false;
 
     // Response handling
     bapi::ResponseParser _parser;
@@ -423,6 +439,7 @@ private:
     volatile uint32_t _maxRoundTripMs = 0;   // worst write+response round-trip
     // Poll timers (BLE-task local)
     uint32_t _lastStatusPoll = 0, _lastRealtimePoll = 0, _lastNotifPoll = 0;
+    uint32_t _lastLsePoll = 0;   // #168 experiment: throttle the large r_lse read
     uint32_t _statusPollMs = 10000, _realtimePollMs = 30000;
     static const uint32_t NOTIF_POLL_MS = 60000;
     void _pollStatus();
@@ -570,6 +587,17 @@ public:
     // peter-mcc + benvanmierloo PR #9 follow-up.
     int     _lastAutolockMin = 1;
     int     lastAutolockMin() const { return _lastAutolockMin; }
+
+    // Last observed Halo LED standby config (g_halocfg, #158). The HA "Halo
+    // LED" select only carries brightness (four coarse levels), but s_halocfg
+    // wants the whole {bright,mode,time_s} object — so we stash mode/time_s
+    // from each settings poll and replay them unchanged on a select write,
+    // altering only brightness. Defaults mirror the web UI (standby on, 10 s)
+    // for the first write before any poll has landed. RAM-only, like autolock.
+    int     _lastHaloMode  = 1;
+    int     _lastHaloTimeS = 10;
+    int     lastHaloMode()  const { return _lastHaloMode; }
+    int     lastHaloTimeS() const { return _lastHaloTimeS; }
 
 private:
     String _chargerModel = "max";
