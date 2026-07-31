@@ -1901,9 +1901,19 @@ function saveEco(){
   var mode=parseInt(document.getElementById('eco-mode').value);
   var espEl=document.getElementById('eco-esp');
   var esp=espEl?parseInt(espEl.value)||0:50;
-  var p=JSON.stringify({ese:(mode>0?1:0),esm:mode,esp:esp});
   toast('Saving eco smart...','info');
-  fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})
+  function sEco(p){return fetch('/api/command?action=bapi&met=s_ecos&par='+encodeURIComponent(JSON.stringify(p)),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()})}
+  var done=function(d){toast(d.error||'Eco Smart saved!',d.error?'error':'success')};
+  var err=function(e){toast('Error: '+e.message,'error')};
+  if(mode===0){
+    /* Disabling: the charger ignores an esm change sent together with ese=0,
+       so esm stays pegged (phantom mode that bounces back). Two-step it —
+       clear the mode with the flag still ON, then drop the flag (matches the
+       MQTT path / issue #29). */
+    sEco({ese:1,esm:0,esp:esp}).then(function(){return sEco({ese:0,esm:0,esp:esp})}).then(done).catch(err);
+  }else{
+    sEco({ese:1,esm:mode,esp:esp}).then(done).catch(err);
+  }
 }
 function saveOcpp(){var p=JSON.stringify({u:document.getElementById('ocpp-url').value,chid:document.getElementById('ocpp-id').value,pw:document.getElementById('ocpp-pw').value,e:parseInt(document.getElementById('ocpp-en').value)});toast('Saving OCPP...','info');fetch('/api/command?action=bapi&met=s_ocpp&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'OCPP config saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}
 function savePhaseSw(){var en=parseInt(document.getElementById('phsw-en').value);var p=JSON.stringify({enabled:en});toast('Saving phase switch...','info');fetch('/api/command?action=bapi&met=s_phsw&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){toast(d.error||'Phase switch saved!',d.error?'error':'success')}).catch(function(e){toast('Error: '+e.message,'error')})}

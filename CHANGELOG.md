@@ -6,6 +6,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [3.2.3] - 2026-08-01
+
+### Fixed
+- **Eco-Smart "Off" is now reachable from Home Assistant and the web UI (#29).**
+  Selecting "Off" used to bounce back to the previous mode. Two causes: the
+  gateway published the raw `esm` mode, but the charger leaves `esm` pegged at
+  its last value when disabled (only `ese` clears) — so a disabled feature read
+  back as a phantom "Solar + Grid"; and the disabling write sent `esm:0`+`ese:0`
+  in one shot, which the charger ignores. Now the reported mode is gated on the
+  master-enable flag (`ese ? esm : 0`), and disabling does a two-step write
+  (clear the mode with the flag on, then drop the flag). Applied to both the
+  MQTT/HA path and the gateway's own Eco-Smart web form. Thanks to @xtux77 for
+  the diagnosis and fix (PR #30).
+
 ## [3.2.2] - 2026-07-31
 
 Reliability + integration polish on top of 3.2.1.

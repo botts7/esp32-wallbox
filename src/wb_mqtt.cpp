@@ -724,8 +724,19 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         int mode = 0;
         if (s.startsWith("Full Green")) mode = 1;
         else if (s == "Solar + Grid") mode = 2;
-        String p = "{\"esm\":" + String(mode) + ",\"ese\":" + String(mode > 0 ? 1 : 0) + ",\"esp\":100}";
-        wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, p.c_str());
+        if (mode == 0) {
+            // Disabling: the charger ignores an `esm` change that arrives
+            // together with ese=0, leaving `esm` stuck at its previous value
+            // (which then reads back as a phantom mode). Send the mode change
+            // first with the master flag still ON so it is accepted, then drop
+            // the flag — this clears `esm` and leaves the charger at
+            // {ese:0, esm:0}.
+            wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, "{\"esm\":0,\"ese\":1,\"esp\":100}");
+            wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, "{\"esm\":0,\"ese\":0,\"esp\":100}");
+        } else {
+            String p = "{\"esm\":" + String(mode) + ",\"ese\":1,\"esp\":100}";
+            wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, p.c_str());
+        }
 
     } else if (sub == "eco_power") {
         int pct = atoi(payload);

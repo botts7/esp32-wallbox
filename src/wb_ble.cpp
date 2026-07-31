@@ -1634,7 +1634,12 @@ void WallboxBLE::_pollSettings() {
             // guard) leaves the latched value untouched.
             if (d["r"].is<JsonObject>()) {
                 _ecoSmartPresent = true;
-                merged["eco_mode"] = d["r"]["esm"] | 0;
+                // Report "Off" whenever Eco-Smart is disabled (ese=0),
+                // regardless of the mode field. When turned off the charger
+                // leaves `esm` pegged at its last value (e.g. 2), so publishing
+                // raw `esm` makes HA show a phantom "Solar + Grid" that bounces
+                // back on every attempt to select Off. Gate on `ese` (#29).
+                merged["eco_mode"] = (d["r"]["ese"] | 0) ? (d["r"]["esm"] | 0) : 0;
                 merged["eco_power"] = d["r"]["esp"] | 100;
             } else if (d["error"].is<JsonObject>()) {
                 _ecoSmartPresent = false;
