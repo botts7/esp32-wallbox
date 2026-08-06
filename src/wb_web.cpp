@@ -1123,7 +1123,10 @@ static void handleApiCommand() {
     // w_cha stop par: 2 for Pulsar MAX (hard stop), 0 for Pulsar Plus
     // family (pause semantics — Plus ACKs par=2 but ignores it).
     // Mirrors jagheterfredrik/wallbox-ble's Plus convention. See #4.
-    else if (action == "stop")    { met = bapi::MET_START_STOP;  par = configMgr.isPlusFamily() ? "0" : "2"; }
+    // Keys on the charger's OWN model (chg_project), not the BLE transport the
+    // auto-switch adopted — a Plus on the MAX single-char transport is labelled
+    // "max" in config but still needs par=0 (forum: Kenneth's Pulsar Plus).
+    else if (action == "stop")    { met = bapi::MET_START_STOP;  par = wallboxBLE.isPlusCommandFamily() ? "0" : "2"; }
     // Resume — clears schedule/eco override flag (r_dat.gen -> 0).
     // s_cmode mode=0 is rejected (subcode 6) ONLY while actively charging,
     // so we queue a defensive Stop first in that case alone. Sending the
@@ -1131,7 +1134,7 @@ static void handleApiCommand() {
     // harmless no-op — it can fault the charger (error 114), so we skip it.
     else if (action == "resume")  {
         if (wallboxBLE.isCharging()) {
-            const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
+            const char* stopPar = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
             wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
         }
         met = "s_cmode";             par = "{\"mode\":0}";

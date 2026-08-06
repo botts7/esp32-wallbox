@@ -1896,6 +1896,17 @@ bool WallboxBLE::isCharging() {
     return false;
 }
 
+bool WallboxBLE::isPlusCommandFamily() const {
+    // Prefer the charger's own project self-report over the (possibly
+    // transport-clobbered) configured model. A Pulsar Plus on the MAX
+    // single-char BLE transport auto-switches cfg.chargerModel to "max", but
+    // its w_cha stop still needs the Plus parameter (par=0). See wb_web stop.
+    const String m = inferredModel();   // from _chgProject (fw_v_.p), "" if unknown
+    if (m.length())
+        return m == "plus" || m == "copper" || m == "quasar" || m == "quasar2";
+    return configMgr.isPlusFamily();    // project not read yet → configured model
+}
+
 bool WallboxBLE::startStopRedundant(bool wantStart) {
     // A "start" while already charging, or a "stop" while already stopped, is a
     // redundant w_cha write. Harmless on most chargers, but some (e.g. Pulsar
