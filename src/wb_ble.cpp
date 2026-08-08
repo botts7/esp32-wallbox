@@ -1909,6 +1909,16 @@ bool WallboxBLE::isCharging() {
     return false;
 }
 
+bool WallboxBLE::isPlusCommandFamily() const {
+    // Product identity from the charger's own chg_project self-report — the
+    // same source the HA device card uses. A Pulsar Plus reports par=0 stop
+    // semantics regardless of whether it rides the Max single-char transport.
+    const String m = inferredModel();   // "plus"/"max"/... from _chgProject, "" if unread
+    if (m.length())
+        return m == "plus" || m == "copper" || m == "quasar" || m == "quasar2";
+    return configMgr.isPlusFamily();    // project not read yet → configured model
+}
+
 bool WallboxBLE::startStopRedundant(bool wantStart) {
     // A "start" while already charging, or a "stop" while already stopped, is a
     // redundant w_cha write. Harmless on most chargers, but some (e.g. Pulsar
