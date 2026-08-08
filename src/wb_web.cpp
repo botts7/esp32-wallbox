@@ -1108,6 +1108,8 @@ static void handleApiCommand() {
     // TOGGLE and flip the wrong way. Report success (already in target state).
     if ((action == "start" || action == "stop") &&
         wallboxBLE.startStopRedundant(action == "start")) {
+        Log.printf("[CMD] %s SKIPPED as redundant (isCharging=%d)\n",
+                   action.c_str(), (int)wallboxBLE.isCharging());
         http.send(200, "application/json",
             "{\"status\":\"ok\",\"skipped\":\"already-in-target-state\"}");
         return;
@@ -1126,7 +1128,13 @@ static void handleApiCommand() {
     // single-char stack is still a Plus (par=0) — confirmed on Kenneth's
     // prj08-pulsar-plus-pm3. isPlusCommandFamily() reads chg_project, falling
     // back to the configured model until fw_v_ is read.
-    else if (action == "stop")    { met = bapi::MET_START_STOP;  par = wallboxBLE.isPlusCommandFamily() ? "0" : "2"; }
+    else if (action == "stop")    {
+        met = bapi::MET_START_STOP;
+        par = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
+        Log.printf("[CMD] stop: chg_project='%s' inferred='%s' isPlusCmd=%d -> w_cha par=%s\n",
+                   wallboxBLE.chargerProject().c_str(), wallboxBLE.inferredModel().c_str(),
+                   (int)wallboxBLE.isPlusCommandFamily(), par.c_str());
+    }
     // Resume — clears schedule/eco override flag (r_dat.gen -> 0).
     // s_cmode mode=0 is rejected (subcode 6) ONLY while actively charging,
     // so we queue a defensive Stop first in that case alone. Sending the
