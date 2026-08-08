@@ -316,15 +316,6 @@ public:
         return "";
     }
 
-    // Command-semantics model family (e.g. the w_cha stop parameter). Sourced
-    // from the charger's OWN project self-report (inferredModel), NOT the BLE
-    // transport family the auto-switch may have adopted: a Pulsar Plus that
-    // speaks the MAX single-char transport must still get Plus command
-    // semantics (stop par=0, which a Plus honours; par=2 it only ACKs and
-    // ignores). Falls back to the configured model until the project is read.
-    // Implemented in wb_ble.cpp (needs configMgr).
-    bool isPlusCommandFamily() const;
-
     // Firmware-change tracking — set when the GATT-reported FW differs
     // from the value persisted from the previous boot. Catches Wallbox
     // silent auto-OTAs that change behaviour overnight.
