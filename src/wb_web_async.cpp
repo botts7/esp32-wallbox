@@ -1011,11 +1011,19 @@ static void _registerBleRoutes() {
         const char* met = nullptr;
         String par;
         if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
-        // w_cha stop par: 2 for Pulsar MAX, 0 for Pulsar Plus family.
-        // Plus ACKs par=2 but ignores it (charger keeps charging);
-        // par=0 is the pause/stop value per jagheterfredrik/wallbox-ble.
-        // Reported by peter-mcc on issue #4.
-        else if (action == "stop")    { met = bapi::MET_START_STOP;  par = configMgr.isPlusFamily() ? "0" : "2"; }
+        // w_cha stop par follows the charger's PRODUCT (chg_project), not the
+        // BLE transport the auto-switch adopts: Pulsar Plus family -> par=0
+        // (a Plus ACKs par=2 but ignores it, #4/#99), Pulsar MAX -> par=2. A
+        // Plus on the Max single-char stack is still a Plus (par=0) — confirmed
+        // on Kenneth's prj08-pulsar-plus-pm3. isPlusCommandFamily() reads
+        // chg_project, falling back to the configured model until fw_v_ is read.
+        else if (action == "stop")    {
+            met = bapi::MET_START_STOP;
+            par = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
+            Log.printf("[CMD] stop: chg_project='%s' inferred='%s' isPlusCmd=%d -> w_cha par=%s\n",
+                       wallboxBLE.chargerProject().c_str(), wallboxBLE.inferredModel().c_str(),
+                       (int)wallboxBLE.isPlusCommandFamily(), par.c_str());
+        }
         // Resume clears the schedule/eco manual-override flag
         // (r_dat.gen != 0 -> 0). The charger rejects s_cmode mode=0
         // (subcode 6) ONLY when actively charging (st=1), so we queue a
@@ -1026,7 +1034,7 @@ static void _registerBleRoutes() {
         // s_cmode mode=0 alone lands gen=0 from the paused/idle state.
         else if (action == "resume")  {
             if (wallboxBLE.isCharging()) {
-                const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
+                const char* stopPar = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
                 wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
             }
             met = "s_cmode";             par = "{\"mode\":0}";
