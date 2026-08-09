@@ -6,7 +6,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [3.2.3] - 2026-08-01
+## [3.2.4] - 2026-08-09
+
+Fixes for a Pulsar Plus that speaks the Max-family (single-char) BLE stack —
+e.g. units on the u-blox NINA-B22 (reported on the HA forum for
+`prj08-pulsar-plus-pm3`).
+
+### Fixed
+- **Stop charging works on a Pulsar Plus that rides the Max BLE stack.** The
+  `w_cha` stop parameter now follows the charger's own product (`chg_project` →
+  Plus `par=0` / Max `par=2`), not the BLE transport family the auto-switch
+  adopts. A Pulsar Plus is a Plus (`par=0`) even when it presents the Max
+  single-char service. Applied to both `/api/command` handlers (the async one
+  the gateway serves had been missed).
+- **Lock state tracks live.** The discrete lock state is refreshed from the
+  periodic `r_sta` poll instead of being read once at connect, so the HA "Lock
+  state" entity no longer freezes after a lock/unlock, and the gateway web
+  dashboard updates it over the WebSocket too (r_sta is now broadcast).
+- **HA device card shows the true product** from `chg_project` (e.g. "Pulsar
+  Plus"), not the BLE transport family.
+
+### Changed
+- The Stop action logs its decision (`chg_project` / model / `w_cha par`) to
+  aid future charger-specific debugging.
 
 ### Fixed
 - **Eco-Smart "Off" is now reachable from Home Assistant and the web UI (#29).**
