@@ -205,7 +205,14 @@ static void populateDeviceBlock(JsonObject dev) {
     const WBConfig& cfg = configMgr.get();
     dev["identifiers"][0] = cfg.haDeviceId;
     const char* _fullName = nullptr; const char* _shortName = nullptr;
-    configMgr.productName(_fullName, _shortName);
+    // The HA device card shows the true PRODUCT (from the charger's own
+    // chg_project self-report), not the BLE transport family the auto-switch
+    // adopted — a Pulsar Plus on the Max single-char stack is a Plus, even
+    // though its transport (and stop parameter) are handled as "max". Falls back
+    // to the configured transport model until fw_v_ is read. (forum report)
+    String prodModel = wallboxBLE.inferredModel();
+    if (prodModel.isEmpty()) prodModel = cfg.chargerModel;
+    configMgr.productNameFor(prodModel, _fullName, _shortName);
     dev["name"]         = _fullName;
     dev["manufacturer"] = "Wallbox";
     dev["model"]        = _shortName;

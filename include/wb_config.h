@@ -98,15 +98,21 @@ public:
         return m == "plus" || m == "copper" || m == "quasar" || m == "quasar2";
     }
 
-    // Friendly product name for the configured model — shown in HA device card
-    // and elsewhere in the UI. Returns ("Wallbox <name>", "<name>") pair.
-    void productName(const char*& fullName, const char*& shortName) const {
-        const String& m = _cfg.chargerModel;
+    // Friendly product name for a model string. Pure mapping (string literals
+    // have static storage, so the const char* outputs stay valid).
+    static void productNameFor(const String& m, const char*& fullName, const char*& shortName) {
         if      (m == "plus")    { fullName = "Wallbox Pulsar Plus"; shortName = "Pulsar Plus"; }
         else if (m == "copper")  { fullName = "Wallbox Copper SB";   shortName = "Copper SB"; }
         else if (m == "quasar")  { fullName = "Wallbox Quasar";      shortName = "Quasar"; }
         else if (m == "quasar2") { fullName = "Wallbox Quasar 2";    shortName = "Quasar 2"; }
         else                     { fullName = "Wallbox Pulsar MAX";  shortName = "Pulsar MAX"; }
+    }
+
+    // Friendly product name for the configured (transport) model. Callers that
+    // want the true PRODUCT identity should map the charger's own chg_project
+    // via productNameFor() instead — see wb_mqtt populateDeviceBlock().
+    void productName(const char*& fullName, const char*& shortName) const {
+        productNameFor(_cfg.chargerModel, fullName, shortName);
     }
 
     // Reset all config to defaults

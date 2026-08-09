@@ -1108,6 +1108,8 @@ static void handleApiCommand() {
     // TOGGLE and flip the wrong way. Report success (already in target state).
     if ((action == "start" || action == "stop") &&
         wallboxBLE.startStopRedundant(action == "start")) {
+        Log.printf("[CMD] %s SKIPPED as redundant (isCharging=%d)\n",
+                   action.c_str(), (int)wallboxBLE.isCharging());
         http.send(200, "application/json",
             "{\"status\":\"ok\",\"skipped\":\"already-in-target-state\"}");
         return;
@@ -1120,10 +1122,19 @@ static void handleApiCommand() {
     const char* met = nullptr;
     String par;
     if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
-    // w_cha stop par: 2 for Pulsar MAX (hard stop), 0 for Pulsar Plus
-    // family (pause semantics — Plus ACKs par=2 but ignores it).
-    // Mirrors jagheterfredrik/wallbox-ble's Plus convention. See #4.
-    else if (action == "stop")    { met = bapi::MET_START_STOP;  par = configMgr.isPlusFamily() ? "0" : "2"; }
+    // w_cha stop par follows the charger's PRODUCT (chg_project), not the BLE
+    // transport: Pulsar Plus family -> par=0 (pause; a Plus ACKs par=2 but
+    // ignores it, see #99), Pulsar MAX -> par=2 (hard stop). A Plus on the Max
+    // single-char stack is still a Plus (par=0) — confirmed on a forum report's
+    // prj08-pulsar-plus-pm3. isPlusCommandFamily() reads chg_project, falling
+    // back to the configured model until fw_v_ is read.
+    else if (action == "stop")    {
+        met = bapi::MET_START_STOP;
+        par = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
+        Log.printf("[CMD] stop: chg_project='%s' inferred='%s' isPlusCmd=%d -> w_cha par=%s\n",
+                   wallboxBLE.chargerProject().c_str(), wallboxBLE.inferredModel().c_str(),
+                   (int)wallboxBLE.isPlusCommandFamily(), par.c_str());
+    }
     // Resume — clears schedule/eco override flag (r_dat.gen -> 0).
     // s_cmode mode=0 is rejected (subcode 6) ONLY while actively charging,
     // so we queue a defensive Stop first in that case alone. Sending the
@@ -1131,7 +1142,7 @@ static void handleApiCommand() {
     // harmless no-op — it can fault the charger (error 114), so we skip it.
     else if (action == "resume")  {
         if (wallboxBLE.isCharging()) {
-            const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
+            const char* stopPar = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
             wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
         }
         met = "s_cmode";             par = "{\"mode\":0}";
@@ -1457,11 +1468,14 @@ function _clearLive(){
   var cr=document.getElementById('charge-reminder');if(cr)cr.style.display='none';
   try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
 }
-function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=(window._zentri&&ZN[s.st]!==undefined)?ZN[s.st]:SN[s.st];if(s.st===4&&!window._zentri&&!(typeof s.gen==='number'&&s.gen!==0))n='Connected — not charging';_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object'){if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}window._lastUpdate=Date.now()}
+function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=(window._zentri&&ZN[s.st]!==undefined)?ZN[s.st]:SN[s.st];if(s.st===4&&!window._zentri&&!(typeof s.gen==='number'&&s.gen!==0))n='Connected — not charging';_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var sl=document.getElementById('sl');if(sl)sl.value=s.cur;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object')applyRT(rt);window._lastUpdate=Date.now()}
+// Realtime (r_sta) fields — lock + OCPP. Shared by the polled path (rt arg) and
+// the 'realtime' WS push, so lock state updates live even when WS-driven.
+function applyRT(rt){if(!rt||typeof rt!=='object')return;if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}
 function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=d.p1+' W'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
 function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null'){/* BLE not delivering charger status — reset power flow + session cache so the animation can't outlive a BLE drop on stale localStorage values */_pfState.cp=null;_pfState.en=null;_pfRender();return}var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(!d||!d.r){_pfState.house=null;_pfRender();return}applyMeterData(d.r)}).catch(function(){_pfState.house=null;_pfRender()})}
 // Hook WS push handlers
-if(window.wbws){window.wbws.subscribe('status',function(d){var s=d&&d.r?d.r:d;applyStatusData(s,null);if(window.wbCheckStatus)window.wbCheckStatus(s)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});window.wbws.subscribe('ble',function(d){if(d&&d.state&&d.state!=='connected')_clearLive()});}
+if(window.wbws){window.wbws.subscribe('status',function(d){var s=d&&d.r?d.r:d;applyStatusData(s,null);if(window.wbCheckStatus)window.wbCheckStatus(s)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});window.wbws.subscribe('realtime',function(d){applyRT(d&&d.r?d.r:d)});window.wbws.subscribe('ble',function(d){if(d&&d.state&&d.state!=='connected')_clearLive()});}
 // Render cached values immediately (no spinners)
 try{var c=JSON.parse(localStorage.getItem('wb-last-status')||'null');if(c)applyStatusData(c.s,c.rt)}catch(e){}
 try{var cm=JSON.parse(localStorage.getItem('wb-last-meter')||'null');if(cm)applyMeterData(cm.d)}catch(e){}

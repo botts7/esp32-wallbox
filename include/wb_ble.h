@@ -316,6 +316,14 @@ public:
         return "";
     }
 
+    // Command-semantics family for the w_cha stop parameter. Follows the
+    // charger's OWN product (chg_project via inferredModel), NOT the BLE
+    // transport the auto-switch adopted: a Pulsar Plus on the Max single-char
+    // stack is still a Plus and needs par=0 (a Plus ACKs par=2 but ignores it —
+    // confirmed on a prj08-pulsar-plus-pm3). Falls back to the
+    // configured transport model until fw_v_ is read. Impl in wb_ble.cpp.
+    bool isPlusCommandFamily() const;
+
     // Firmware-change tracking — set when the GATT-reported FW differs
     // from the value persisted from the previous boot. Catches Wallbox
     // silent auto-OTAs that change behaviour overnight.
