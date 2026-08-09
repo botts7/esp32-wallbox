@@ -71,7 +71,7 @@ static void publishCachedRealtimeIfNew() {
         // Live-push r_sta so the dashboard's lock / OCPP fields update over the
         // WebSocket too — when the WS is open the dashboard skips the /api/charger
         // poll, so without this lock_status only refreshed on a full reload
-        // (forum: Kenneth — web UI lock state not updating).
+        // (forum report: web UI lock state not updating).
         wbws::broadcast("realtime", resp);
         if (wallboxMQTT.isConnected()) {
             wallboxMQTT.publishRealtime(resp);

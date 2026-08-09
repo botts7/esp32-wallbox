@@ -1125,7 +1125,7 @@ static void handleApiCommand() {
     // w_cha stop par follows the charger's PRODUCT (chg_project), not the BLE
     // transport: Pulsar Plus family -> par=0 (pause; a Plus ACKs par=2 but
     // ignores it, see #99), Pulsar MAX -> par=2 (hard stop). A Plus on the Max
-    // single-char stack is still a Plus (par=0) — confirmed on Kenneth's
+    // single-char stack is still a Plus (par=0) — confirmed on a forum report's
     // prj08-pulsar-plus-pm3. isPlusCommandFamily() reads chg_project, falling
     // back to the configured model until fw_v_ is read.
     else if (action == "stop")    {

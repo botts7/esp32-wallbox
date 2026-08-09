@@ -209,7 +209,7 @@ static void populateDeviceBlock(JsonObject dev) {
     // chg_project self-report), not the BLE transport family the auto-switch
     // adopted — a Pulsar Plus on the Max single-char stack is a Plus, even
     // though its transport (and stop parameter) are handled as "max". Falls back
-    // to the configured transport model until fw_v_ is read. (forum: Kenneth)
+    // to the configured transport model until fw_v_ is read. (forum report)
     String prodModel = wallboxBLE.inferredModel();
     if (prodModel.isEmpty()) prodModel = cfg.chargerModel;
     configMgr.productNameFor(prodModel, _fullName, _shortName);

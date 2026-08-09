@@ -1585,7 +1585,7 @@ void WallboxBLE::_pollRealtime() {
         // Keep the discrete lock state fresh. r_lck is only read once (in
         // _connect), so the HA "Lock state" entity would freeze at its
         // connect-time value if the user locks/unlocks later — it read 0 at
-        // connect and never moved (forum: Kenneth, lock_status stuck at 0
+        // connect and never moved (forum report: lock_status stuck at 0
         // after locking). r_sta.lock_status carries the same 0=unlocked /
         // 1=locked fact and updates every poll, so mirror it here.
         JsonDocument d;

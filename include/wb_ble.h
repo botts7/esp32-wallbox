@@ -320,7 +320,7 @@ public:
     // charger's OWN product (chg_project via inferredModel), NOT the BLE
     // transport the auto-switch adopted: a Pulsar Plus on the Max single-char
     // stack is still a Plus and needs par=0 (a Plus ACKs par=2 but ignores it —
-    // confirmed on Kenneth's prj08-pulsar-plus-pm3). Falls back to the
+    // confirmed on a prj08-pulsar-plus-pm3). Falls back to the
     // configured transport model until fw_v_ is read. Impl in wb_ble.cpp.
     bool isPlusCommandFamily() const;
 

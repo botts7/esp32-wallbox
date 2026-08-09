@@ -1015,7 +1015,7 @@ static void _registerBleRoutes() {
         // BLE transport the auto-switch adopts: Pulsar Plus family -> par=0
         // (a Plus ACKs par=2 but ignores it, #4/#99), Pulsar MAX -> par=2. A
         // Plus on the Max single-char stack is still a Plus (par=0) — confirmed
-        // on Kenneth's prj08-pulsar-plus-pm3. isPlusCommandFamily() reads
+        // on a prj08-pulsar-plus-pm3. isPlusCommandFamily() reads
         // chg_project, falling back to the configured model until fw_v_ is read.
         else if (action == "stop")    {
             met = bapi::MET_START_STOP;
