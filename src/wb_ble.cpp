@@ -1654,6 +1654,13 @@ void WallboxBLE::_pollSettings() {
                 // back on every attempt to select Off. Gate on `ese` (#29).
                 merged["eco_mode"] = (d["r"]["ese"] | 0) ? (d["r"]["esm"] | 0) : 0;
                 merged["eco_power"] = d["r"]["esp"] | 100;
+                // Stash the raw pair so an MQTT write can rebuild the whole
+                // s_ecos object (see lastEcoMode/lastEcoPct in wb_ble.h). Note
+                // `esm` is kept raw here, ungated by `ese`: it is the mode to
+                // restore when the percentage changes while Eco-Smart is on.
+                _lastEcoMode    = d["r"]["esm"] | 0;
+                _lastEcoPct     = d["r"]["esp"] | 100;
+                _lastEcoEnabled = d["r"]["ese"] | 0;
             } else if (d["error"].is<JsonObject>()) {
                 _ecoSmartPresent = false;
             }
