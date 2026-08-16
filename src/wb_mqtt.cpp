@@ -868,6 +868,11 @@ void WallboxMQTT::publishAvailability(bool online) {
 
 void WallboxMQTT::publishResponse(const char* method, const String& json) {
     if (!isConnected()) return;
+    // Never publish an empty payload — HA renders it as state '' and a numeric
+    // sensor bound to the topic (e.g. ble_rssi on response/gateway) logs
+    // "Invalid state message ''" (#31). Callers mostly guard already; this is
+    // the belt-and-suspenders backstop so no path can emit an empty state.
+    if (json.isEmpty()) return;
     String topic = baseTopic() + "/response/" + method;
     _client->beginPublish(topic.c_str(), json.length(), false);
     _client->print(json);
@@ -1113,7 +1118,10 @@ const DiscoveryEntry kEntries[] = {
     // ----- Group 3: meter + BLE rssi (cases 18-22) -----
 
     /* 18 */ { EntityKind::SENSOR, "ble_rssi", "BLE Signal", "mdi:bluetooth-connect",
-               TopicSlot::GATEWAY, "{{ value_json.rssi }}",
+               // default(0): the ONLY numeric GATEWAY sensor that lacked a guard
+               // — a missing/unparseable rssi rendered '' and HA logged an
+               // "Invalid state message ''" for this signal_strength sensor (#31).
+               TopicSlot::GATEWAY, "{{ value_json.rssi | default(0) }}",
                "dBm", "signal_strength", "measurement", "diagnostic",
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
