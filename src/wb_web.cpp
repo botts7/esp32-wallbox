@@ -1,6 +1,7 @@
 #include "wb_web.h"
 #include "wb_config.h"
 #include "wb_control.h"
+#include "wb_cmd.h"
 #include "wb_ble.h"
 #include "wb_log.h"
 #include "wb_version.h"
@@ -1101,76 +1102,20 @@ static void handleApiCommand() {
     }
 
     // Resolve action → met + par (shared by both paths).
+    // Resolve action -> met + par via the shared planner (#179 — the single
+    // copy of the action mapping / clamps / model logic that both the sync and
+    // async handlers use, so they can't drift). `plan` lives to the end of the
+    // handler; enqueueRequest copies met/par, so plan.met.c_str() is safe below.
     String action = http.arg("action");
-    String value  = http.arg("value");
-    // Idempotent start/stop (#23): skip a start that's already charging, or a
-    // stop that's already stopped — some chargers treat a redundant w_cha as a
-    // TOGGLE and flip the wrong way. Report success (already in target state).
-    if ((action == "start" || action == "stop") &&
-        wallboxBLE.startStopRedundant(action == "start")) {
-        Log.printf("[CMD] %s SKIPPED as redundant (isCharging=%d)\n",
-                   action.c_str(), (int)wallboxBLE.isCharging());
-        http.send(200, "application/json",
-            "{\"status\":\"ok\",\"skipped\":\"already-in-target-state\"}");
+    wb_cmd::Plan plan = wb_cmd::buildCommand(
+        action, http.arg("value"), http.arg("owner"),
+        http.arg("met"), http.arg("par"));
+    if (plan.outcome == wb_cmd::Plan::RESPOND) {
+        http.send(plan.statusCode, "application/json", plan.responseJson);
         return;
     }
-    // Tag the commander for arbitration (advisory; see docs/control-owner.md).
-    // Charge-affecting actions record who issued them (optional &owner=, "" ->
-    // "manual") so controllers can detect a recent manual/other override.
-    if (action == "start" || action == "stop" || action == "resume" || action == "current")
-        wb_control::recordCommand(http.arg("owner"));
-    const char* met = nullptr;
-    String par;
-    if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
-    // w_cha stop par follows the charger's PRODUCT (chg_project), not the BLE
-    // transport: Pulsar Plus family -> par=0 (pause; a Plus ACKs par=2 but
-    // ignores it, see #99), Pulsar MAX -> par=2 (hard stop). A Plus on the Max
-    // single-char stack is still a Plus (par=0) — confirmed on a forum report's
-    // prj08-pulsar-plus-pm3. isPlusCommandFamily() reads chg_project, falling
-    // back to the configured model until fw_v_ is read.
-    else if (action == "stop")    {
-        met = bapi::MET_START_STOP;
-        par = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
-        Log.printf("[CMD] stop: chg_project='%s' inferred='%s' isPlusCmd=%d -> w_cha par=%s\n",
-                   wallboxBLE.chargerProject().c_str(), wallboxBLE.inferredModel().c_str(),
-                   (int)wallboxBLE.isPlusCommandFamily(), par.c_str());
-    }
-    // Resume — clears schedule/eco override flag (r_dat.gen -> 0).
-    // s_cmode mode=0 is rejected (subcode 6) ONLY while actively charging,
-    // so we queue a defensive Stop first in that case alone. Sending the
-    // hard Stop (par=2 on the MAX) when merely paused/waiting is NOT a
-    // harmless no-op — it can fault the charger (error 114), so we skip it.
-    else if (action == "resume")  {
-        if (wallboxBLE.isCharging()) {
-            const char* stopPar = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
-            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
-        }
-        met = "s_cmode";             par = "{\"mode\":0}";
-    }
-    else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
-    else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
-    else if (action == "current") {
-        // Clamp to the charger's own envelope (6 A .. charger-reported ceiling,
-        // #39). Hard-coding 32 A capped 40 A USA Pulsar Plus units; the ceiling
-        // falls back to 32 A when the charger doesn't report one.
-        met = bapi::MET_SET_CURRENT;
-        int amps = value.toInt();
-        int hi = wallboxBLE.maxCurrentCeiling();
-        if (amps < 6)  amps = 6;
-        if (amps > hi) amps = hi;
-        par = String(amps);
-    }
-    else if (action == "reboot")  { met = bapi::MET_REBOOT;      par = "null"; }
-    else if (action == "bapi") {
-        static String s_met;  // outlives this scope via c_str() below
-        s_met = http.arg("met");
-        met = s_met.c_str();
-        par = http.arg("par");
-        if (par.isEmpty()) par = "null";
-    } else {
-        http.send(400, "application/json", "{\"error\":\"unknown action\"}");
-        return;
-    }
+    const char* met = plan.met.c_str();
+    String par = plan.par;
 
     // Sync escape hatch: preserves the pre-2.7.0 byte-for-byte
     // response shape AND the inflight cap for callers that rely on

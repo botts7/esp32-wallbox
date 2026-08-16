@@ -11,6 +11,7 @@
 #include "wb_web.h"  // for webServer.requestReboot()
 #include "bapi.h"     // for MET_* constants used in /api/command
 #include "wb_control.h"  // last-command-by tracking for arbitration
+#include "wb_cmd.h"      // shared /api/command action resolver (#179)
 
 #if WB_ASYNC_WEB
 
@@ -995,92 +996,22 @@ static void _registerBleRoutes() {
         // treat w_cha as a TOGGLE, so a redundant write flips the state the wrong
         // way; skipping also avoids a needless BLE round-trip. Report success —
         // we're already in the requested state.
-        if ((action == "start" || action == "stop") &&
-            wallboxBLE.startStopRedundant(action == "start")) {
-            req->send(200, "application/json",
-                "{\"status\":\"ok\",\"skipped\":\"already-in-target-state\"}");
+        // Resolve action -> met + par via the shared planner (#179 — the single
+        // copy both handlers use so the mapping / clamps / model logic can't
+        // drift). `plan` lives to the end of the lambda; enqueueRequest copies
+        // met/par, so plan.met.c_str() is safe below and no per-request String
+        // storage / onDisconnect cleanup is needed anymore.
+        wb_cmd::Plan plan = wb_cmd::buildCommand(
+            action, value,
+            req->hasParam("owner") ? req->getParam("owner")->value() : String(""),
+            req->hasParam("met")   ? req->getParam("met")->value()   : String(""),
+            req->hasParam("par")   ? req->getParam("par")->value()   : String(""));
+        if (plan.outcome == wb_cmd::Plan::RESPOND) {
+            req->send(plan.statusCode, "application/json", plan.responseJson);
             return;
         }
-        // Tag the commander for arbitration (advisory; see docs/control-owner.md).
-        // Charge-affecting actions record who issued them (optional &owner=, ""
-        // -> "manual") so controllers can detect a recent manual/other override.
-        if (action == "start" || action == "stop" || action == "resume" || action == "current") {
-            wb_control::recordCommand(
-                req->hasParam("owner") ? req->getParam("owner")->value() : String(""));
-        }
-        const char* met = nullptr;
-        String par;
-        if      (action == "start")   { met = bapi::MET_START_STOP;  par = "1"; }
-        // w_cha stop par follows the charger's PRODUCT (chg_project), not the
-        // BLE transport the auto-switch adopts: Pulsar Plus family -> par=0
-        // (a Plus ACKs par=2 but ignores it, #4/#99), Pulsar MAX -> par=2. A
-        // Plus on the Max single-char stack is still a Plus (par=0) — confirmed
-        // on a prj08-pulsar-plus-pm3. isPlusCommandFamily() reads
-        // chg_project, falling back to the configured model until fw_v_ is read.
-        else if (action == "stop")    {
-            met = bapi::MET_START_STOP;
-            par = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
-            Log.printf("[CMD] stop: chg_project='%s' inferred='%s' isPlusCmd=%d -> w_cha par=%s\n",
-                       wallboxBLE.chargerProject().c_str(), wallboxBLE.inferredModel().c_str(),
-                       (int)wallboxBLE.isPlusCommandFamily(), par.c_str());
-        }
-        // Resume clears the schedule/eco manual-override flag
-        // (r_dat.gen != 0 -> 0). The charger rejects s_cmode mode=0
-        // (subcode 6) ONLY when actively charging (st=1), so we queue a
-        // defensive Stop first in that case alone. The earlier assumption
-        // that Stop is a harmless no-op when not charging proved WRONG: a
-        // hard Stop (par=2 on the MAX) while merely paused/waiting can fault
-        // the charger (error 114), so we skip it unless actually charging.
-        // s_cmode mode=0 alone lands gen=0 from the paused/idle state.
-        else if (action == "resume")  {
-            if (wallboxBLE.isCharging()) {
-                const char* stopPar = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
-                wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
-            }
-            met = "s_cmode";             par = "{\"mode\":0}";
-        }
-        else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
-        else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
-        else if (action == "current") {
-            // Clamp to the charger's own current envelope (it can misbehave on
-            // an out-of-range setpoint). The upper bound is the charger-reported
-            // ceiling (maxCurrentCeiling(), #39) — hard-coding 32 A capped 40 A
-            // USA Pulsar Plus units. Falls back to 32 A when unreported. MQTT +
-            // integration also clamp; the web paths forwarded `value` raw.
-            // toInt()==0 on garbage -> safe 6 A floor.
-            met = bapi::MET_SET_CURRENT;
-            int amps = value.toInt();
-            int hi = wallboxBLE.maxCurrentCeiling();
-            if (amps < 6)  amps = 6;
-            if (amps > hi) amps = hi;
-            par = String(amps);
-        }
-        else if (action == "reboot")  { met = bapi::MET_REBOOT;      par = "null"; }
-        else if (action == "bapi") {
-            // Use a per-request String for the met arg so its c_str()
-            // outlives the lookup below. The static trick from sync
-            // handler isn't safe across AsyncTCP requests.
-            String userMet = req->hasParam("met")
-                ? req->getParam("met")->value() : String("");
-            if (userMet.length() == 0) {
-                req->send(400, "application/json",
-                    "{\"error\":\"missing met\"}");
-                return;
-            }
-            // Stash on the request's tempObject for the lifetime of
-            // the handler. We dispose at the bottom.
-            String* metStorage = new String(userMet);
-            met = metStorage->c_str();
-            par = req->hasParam("par")
-                ? req->getParam("par")->value() : String("null");
-            if (par.isEmpty()) par = "null";
-            // We'll delete this at end of handler — see below.
-            req->onDisconnect([metStorage]() { delete metStorage; });
-        } else {
-            req->send(400, "application/json",
-                "{\"error\":\"unknown action\"}");
-            return;
-        }
+        const char* met = plan.met.c_str();
+        String par = plan.par;
 
         // Async path. Enqueue with WAKE_AND_MQTT so a missed wake
         // still publishes to wallbox/response/<met> for polling.
