@@ -6,6 +6,22 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [3.2.6] - 2026-08-16
+
+### Fixed
+- **Recover from a transient boot-time WiFi failure instead of stranding in AP
+  mode (#182).** If a configured WiFi failed to associate at boot (router slow
+  to come up after a power blip, AP congestion), the gateway dropped into AP
+  setup mode and stayed there until a manual power cycle. It now arms a bounded
+  retry-reboot (3 attempts, 5 min apart) so a transient failure self-heals, and
+  — because AP fallback leaves the STA interface up — reboots for a clean start
+  the moment the link comes back on its own. After the retry budget it parks in
+  AP for reconfiguration rather than reboot-looping. A client on the AP defers
+  the reboot so reconfiguration is never interrupted. Runtime WiFi drops are
+  untouched (still handled by the existing reconnect watchdog). Validated on
+  hardware with a forced boot-fail: AP fallback → asynchronous heal → clean
+  reboot, recovered in ~20 s.
+
 ## [3.2.5] - 2026-08-16
 
 ### Fixed
