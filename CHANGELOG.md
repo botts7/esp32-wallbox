@@ -6,6 +6,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Classic ESP32-WROOM build target (`esp32dev`, #154).** The gateway now
+  builds for the common/cheaper classic ESP32-WROOM-32 module, not just the
+  ESP32-S3. `platformio.ini` is refactored to a shared `[common]` base with
+  per-board envs (`esp32s3` keeps the USB-CDC-on-boot flag; `esp32dev` omits it
+  — classic ESP32 serial is UART0). The 4 MB flash fits `partitions_ota.csv`
+  exactly (~20% app headroom); `chip_temp` has no usable die sensor on classic
+  ESP32 and was already gated off, so the Gateway Temperature entity just reads
+  unavailable there. Build with `pio run -e esp32dev`.
+
 ## [3.2.6] - 2026-08-16
 
 ### Fixed
