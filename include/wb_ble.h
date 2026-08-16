@@ -283,6 +283,13 @@ public:
     // for cleaner HA lock-entity wiring.
     int32_t chargerLockState() const { return _chgLockState; }
 
+    // Charger-reported hardware/installation current ceiling (#39), from
+    // r_dat.max_available_current. Raw value is -1 until first observed;
+    // maxCurrentCeiling() returns the effective upper clamp for setpoints,
+    // falling back to the legacy 32 A when the charger doesn't report one.
+    int32_t maxAvailableCurrent() const { return _maxAvailCurrent; }
+    int     maxCurrentCeiling()   const { return _maxAvailCurrent >= 6 ? _maxAvailCurrent : 32; }
+
     // Charger-side network status (gnsta) — IP/gateway/DNS/SSID/RSSI
     // as the charger sees them. Distinct from the gateway's own WiFi
     // (the ESP32 connects to user's WiFi; the charger connects to its
@@ -452,6 +459,7 @@ private:
     static const uint32_t NOTIF_POLL_MS = 60000;
     void _pollStatus();
     void _pollRealtime();
+    void _captureMaxAvail(JsonVariantConst r);  // #39 — cache charger current ceiling
     void _pollSettings();
     void _pollNotifications();
     void _storeCache(String& dst, uint32_t& seq, const String& value);
@@ -579,6 +587,7 @@ private:
     int32_t _chgSessionCount = -1;  // r_ses.size — lifetime session counter
     int32_t _chgPowerBoost   = -1;  // r_hsh — household-meter current cap
     int32_t _chgLockState    = -1;  // r_lck — 0=unlocked, 1=locked
+    int32_t _maxAvailCurrent = -1;  // r_dat.max_available_current — HW ceiling (#39)
     String  _chgNetSsid;
     String  _chgNetIp;
     int     _chgNetSignal = 0;  // 0-100 quality % (gnsta.signal)

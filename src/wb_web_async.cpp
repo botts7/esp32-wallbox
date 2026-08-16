@@ -1042,13 +1042,17 @@ static void _registerBleRoutes() {
         else if (action == "lock")    { met = bapi::MET_LOCK;        par = "1"; }
         else if (action == "unlock")  { met = bapi::MET_LOCK;        par = "0"; }
         else if (action == "current") {
-            // Clamp to the 6–32 A envelope (the charger can misbehave on an
-            // out-of-range setpoint). MQTT + integration already clamp; the web
-            // paths forwarded `value` raw. toInt()==0 on garbage -> safe 6 A floor.
+            // Clamp to the charger's own current envelope (it can misbehave on
+            // an out-of-range setpoint). The upper bound is the charger-reported
+            // ceiling (maxCurrentCeiling(), #39) — hard-coding 32 A capped 40 A
+            // USA Pulsar Plus units. Falls back to 32 A when unreported. MQTT +
+            // integration also clamp; the web paths forwarded `value` raw.
+            // toInt()==0 on garbage -> safe 6 A floor.
             met = bapi::MET_SET_CURRENT;
             int amps = value.toInt();
+            int hi = wallboxBLE.maxCurrentCeiling();
             if (amps < 6)  amps = 6;
-            if (amps > 32) amps = 32;
+            if (amps > hi) amps = hi;
             par = String(amps);
         }
         else if (action == "reboot")  { met = bapi::MET_REBOOT;      par = "null"; }

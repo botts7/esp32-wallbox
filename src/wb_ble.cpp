@@ -1516,6 +1516,12 @@ void WallboxBLE::_pollStatus() {
         // Self-detecting no-op until the Copper mapping is implemented.
         wb_copper::normaliseStatus(resp, (float)_mainsVoltage, _cachedMeterJson);
         _storeCache(_cachedStatusJson, _seqStatus, resp);
+        // r_dat may be where this charger reports its current ceiling (#39);
+        // capture it here too so the dashboard (which reads the status object)
+        // and the setpoint clamps agree regardless of which response carries it.
+        JsonDocument sd;
+        if (deserializeJson(sd, resp) == DeserializationError::Ok)
+            _captureMaxAvail(sd["r"]);
     }
     // Energy meter on same cycle — lightweight & useful
     if (_state != State::CONNECTED) return;
@@ -1589,10 +1595,32 @@ void WallboxBLE::_pollRealtime() {
         // after locking). r_sta.lock_status carries the same 0=unlocked /
         // 1=locked fact and updates every poll, so mirror it here.
         JsonDocument d;
-        if (deserializeJson(d, resp) == DeserializationError::Ok &&
-            d["r"]["lock_status"].is<int>()) {
-            _chgLockState = d["r"]["lock_status"].as<int32_t>();
+        if (deserializeJson(d, resp) == DeserializationError::Ok) {
+            if (d["r"]["lock_status"].is<int>()) {
+                _chgLockState = d["r"]["lock_status"].as<int32_t>();
+            }
+            _captureMaxAvail(d["r"]);
         }
+    }
+}
+
+// Cache the charger's reported current ceiling (#39) from whichever poll
+// response carries it. `max_available_current` (the charger's read-only
+// hardware/installation limit) has been seen in both r_dat (status) and r_sta
+// (realtime) depending on firmware, so both _pollStatus and _pollRealtime feed
+// this. A fixed 32 A envelope capped 40 A USA Pulsar Plus units. Accept the
+// cloud-API camelCase spelling as a fallback; -1 stays until first observed, so
+// callers (maxCurrentCeiling) fall back to the legacy 32 A.
+void WallboxBLE::_captureMaxAvail(JsonVariantConst r) {
+    JsonVariantConst mac = r["max_available_current"];
+    if (mac.isNull()) mac = r["maxAvailableCurrent"];
+    if (!mac.is<int>()) return;
+    int v = mac.as<int>();
+    if (v >= 6 && v <= 80 && v != _maxAvailCurrent) {
+        _maxAvailCurrent = v;
+        // Re-arm HA discovery so the Max Charging Current number republishes
+        // with the real ceiling as its max. Same one-shot as the fw_v_ refresh.
+        _discoveryStale = true;
     }
 }
 
@@ -1647,20 +1675,25 @@ void WallboxBLE::_pollSettings() {
             // guard) leaves the latched value untouched.
             if (d["r"].is<JsonObject>()) {
                 _ecoSmartPresent = true;
-                // Report "Off" whenever Eco-Smart is disabled (ese=0),
-                // regardless of the mode field. When turned off the charger
-                // leaves `esm` pegged at its last value (e.g. 2), so publishing
-                // raw `esm` makes HA show a phantom "Solar + Grid" that bounces
-                // back on every attempt to select Off. Gate on `ese` (#29).
-                merged["eco_mode"] = (d["r"]["ese"] | 0) ? (d["r"]["esm"] | 0) : 0;
+                // Map the charger's {ese, esm} to the HA select numbering
+                // (0=Off, 1=Full Green, 2=Solar+Grid). The documented Wallbox
+                // enum is esm 0 = Eco (grid+solar), 1 = Full Green (#38), so:
+                //   ese=0            -> 0 (Off)   — master off, ignore esm
+                //   ese=1 & esm==1   -> 1 (Full Green / solar only)
+                //   ese=1 & esm==0   -> 2 (Solar + Grid / Eco)
+                // Gating on `ese` also fixes the phantom-mode bounce: when off,
+                // the charger leaves `esm` pegged at its last value (#29).
+                int esE = d["r"]["ese"] | 0;
+                int esM = d["r"]["esm"] | 0;
+                merged["eco_mode"] = (esE == 0) ? 0 : (esM == 1 ? 1 : 2);
                 merged["eco_power"] = d["r"]["esp"] | 100;
                 // Stash the raw pair so an MQTT write can rebuild the whole
                 // s_ecos object (see lastEcoMode/lastEcoPct in wb_ble.h). Note
                 // `esm` is kept raw here, ungated by `ese`: it is the mode to
                 // restore when the percentage changes while Eco-Smart is on.
-                _lastEcoMode    = d["r"]["esm"] | 0;
+                _lastEcoMode    = esM;
                 _lastEcoPct     = d["r"]["esp"] | 100;
-                _lastEcoEnabled = d["r"]["ese"] | 0;
+                _lastEcoEnabled = esE;
             } else if (d["error"].is<JsonObject>()) {
                 _ecoSmartPresent = false;
             }
