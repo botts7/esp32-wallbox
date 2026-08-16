@@ -607,6 +607,20 @@ public:
     int     lastHaloMode()  const { return _lastHaloMode; }
     int     lastHaloTimeS() const { return _lastHaloTimeS; }
 
+    // Last observed Eco-Smart mode/percentage (g_ecos). s_ecos is rejected in
+    // silence on charger fw 6.11.x unless all three fields (ese/esm/esp) are
+    // present — the web UI already learned this the hard way (saveEco() in
+    // wb_web.cpp). The MQTT handlers only carry one field each (the select
+    // sends the mode, the number sends the percentage), so we stash the other
+    // one from each settings poll and replay it, exactly like halo/autolock.
+    // Defaults match the charger's own (Eco-Smart off, 100 % solar target).
+    int     _lastEcoMode    = 0;
+    int     _lastEcoPct     = 100;
+    int     _lastEcoEnabled = 0;
+    int     lastEcoMode()    const { return _lastEcoMode; }
+    int     lastEcoPct()     const { return _lastEcoPct; }
+    int     lastEcoEnabled() const { return _lastEcoEnabled; }
+
 private:
     String _chargerModel = "max";
     uint32_t _mainsVoltage = 230;   // phase-current power derivation fallback (#12)

@@ -731,6 +731,12 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         int mode = 0;
         if (s.startsWith("Full Green")) mode = 1;
         else if (s == "Solar + Grid") mode = 2;
+        // Preserve the user's solar target instead of forcing it to 100 %:
+        // hard-coding `esp` here silently wiped whatever percentage the user
+        // had configured (and, with the eco_power write broken below, left no
+        // way to set it back from HA). The web UI already replays the current
+        // value in saveEco(); do the same from the last settings poll.
+        String esp = String(wallboxBLE.lastEcoPct());
         if (mode == 0) {
             // Disabling: the charger ignores an `esm` change that arrives
             // together with ese=0, leaving `esm` stuck at its previous value
@@ -738,17 +744,26 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
             // first with the master flag still ON so it is accepted, then drop
             // the flag — this clears `esm` and leaves the charger at
             // {ese:0, esm:0}.
-            wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, "{\"esm\":0,\"ese\":1,\"esp\":100}");
-            wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, "{\"esm\":0,\"ese\":0,\"esp\":100}");
+            String on  = "{\"esm\":0,\"ese\":1,\"esp\":" + esp + "}";
+            String off = "{\"esm\":0,\"ese\":0,\"esp\":" + esp + "}";
+            wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, on.c_str());
+            wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, off.c_str());
         } else {
-            String p = "{\"esm\":" + String(mode) + ",\"ese\":1,\"esp\":100}";
+            String p = "{\"esm\":" + String(mode) + ",\"ese\":1,\"esp\":" + esp + "}";
             wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, p.c_str());
         }
 
     } else if (sub == "eco_power") {
         int pct = atoi(payload);
         if (pct < 0) pct = 0; if (pct > 100) pct = 100;
-        String p = "{\"esp\":" + String(pct) + "}";
+        // s_ecos needs all three fields — a lone {"esp":N} is silently
+        // rejected on charger fw 6.11.x, exactly like the {mode,esp} payload
+        // the web UI used to send (see the comment in saveEco(), wb_web.cpp).
+        // Replay the last polled mode *and* master flag: writing the solar
+        // target must not switch Eco-Smart on behind the user's back.
+        String p = "{\"esm\":" + String(wallboxBLE.lastEcoMode()) +
+                   ",\"ese\":" + String(wallboxBLE.lastEcoEnabled()) +
+                   ",\"esp\":" + String(pct) + "}";
         wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, p.c_str());
 
     } else if (sub == "power_sharing") {
