@@ -86,6 +86,27 @@ static void publishCachedRealtimeIfNew() {
 // inside `if (mqtt.isConnected())`).
 static uint32_t _lastChargeLogSeq = 0;
 static uint32_t _lastChargeLogLseSeq = 0;
+
+// Boot-time WiFi association can fail transiently (router slow to come up after
+// a power blip, AP congestion) and strand the gateway in AP mode until a manual
+// power cycle (#182). When a *configured* WiFi fails at boot we fall back to AP
+// but also arm a bounded retry-reboot so a transient failure self-heals. The
+// attempt counter lives in RTC NOINIT so it survives the reboot; it resets to 0
+// once WiFi connects, and after kApFailMaxRetries we stop rebooting and stay in
+// AP so a genuinely-broken config doesn't reboot-loop.
+static RTC_NOINIT_ATTR uint32_t _apFailRetries;
+static RTC_NOINIT_ATTR uint32_t _apFailMagic;
+static const uint32_t kApFailMagicVal   = 0xA9F1B007UL;
+static const uint32_t kApFailMaxRetries = 3;
+static const uint32_t kApFailRetryMs    = 5UL * 60UL * 1000UL;  // retry STA after 5 min in AP
+static uint32_t g_apFailRebootAtMs = 0;                         // 0 = retry-reboot not armed
+// True while we're in the AP fallback that a *configured* WiFi failure at boot
+// produced (distinct from first-boot no-config AP). beginAP() leaves the STA
+// iface up (WIFI_AP_STA), so the driver's background auto-reconnect can heal the
+// link AFTER setup()'s success path already returned — in that case the loop
+// must stay in the AP branch (STA services were never started) until we reboot
+// cleanly. Cleared only by that reboot (RAM flag, false again on next boot).
+static bool g_bootWifiFailedAP = false;
 static void feedChargeLog() {
     // Feed authoritative per-session GREEN energy (r_lse) BEFORE the status
     // sample, so a burst opening on this tick baselines against fresh green.
@@ -277,6 +298,13 @@ void setup() {
     Log.printf("  Wallbox BLE Gateway %s\n", WB_VERSION);
     Log.println("============================\n");
 
+    // Initialise the WiFi boot-fail retry counter on a cold boot (RTC NOINIT is
+    // garbage until tagged); a warm reboot from the retry path preserves it (#182).
+    if (_apFailMagic != kApFailMagicVal) {
+        _apFailMagic   = kApFailMagicVal;
+        _apFailRetries = 0;
+    }
+
     // Log OTA partition info
     const esp_partition_t* running = esp_ota_get_running_partition();
     if (running) {
@@ -334,13 +362,35 @@ void setup() {
     // does the initial blocking connect (~20 s timeout, same as
     // pre-2.7.0) AND registers the event-driven reconnect machinery.
     if (!wb_net::begin()) {
-        // WiFi failed — start AP mode so user can fix settings
+        // WiFi failed — start AP mode so user can fix settings. Also arm a
+        // bounded retry-reboot (#182): a *transient* boot-time association
+        // failure (router slow after a power blip, AP congestion) should
+        // self-heal instead of stranding the box in AP until a manual power
+        // cycle. Give up after kApFailMaxRetries so a genuinely-broken config
+        // parks in AP for reconfiguration rather than reboot-looping.
+        // NOTE: this reboots before esp_ota_mark_app_valid_cancel_rollback()
+        // (only the success path validates). Harmless today — this stock build
+        // has CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE off — but if OTA rollback is
+        // ever enabled, a transient WiFi outage on the first post-OTA boot could
+        // roll the good image back; gate this retry on a non-PENDING_VERIFY boot.
         Log.println("[Main] WiFi failed — starting AP mode for reconfiguration");
         webServer.beginAP();
+        g_bootWifiFailedAP = true;   // configured WiFi failed at boot (#182)
+        if (_apFailRetries < kApFailMaxRetries) {
+            _apFailRetries++;
+            g_apFailRebootAtMs = millis() + kApFailRetryMs;
+            Log.printf("[Main] Armed WiFi retry-reboot in %u s (attempt %u/%u)\n",
+                       (unsigned)(kApFailRetryMs / 1000), (unsigned)_apFailRetries,
+                       (unsigned)kApFailMaxRetries);
+        } else {
+            Log.println("[Main] WiFi retry budget exhausted — staying in AP for reconfiguration");
+        }
         return;
     }
 
-    // WiFi connected — mark OTA partition as valid (smart rollback)
+    // WiFi connected — clear the boot-fail retry budget (#182) and mark the
+    // OTA partition valid (smart rollback).
+    _apFailRetries = 0;
     esp_ota_mark_app_valid_cancel_rollback();
     Log.println("[OTA] Firmware validated (WiFi OK)");
 
@@ -497,7 +547,36 @@ void loop() {
     // If in AP-only mode (no WiFi configured), just serve the portal.
     // Use wb_net's cached state here — cheaper than WiFi.status() and
     // tracks the GOT_IP/STA_DISCONNECTED events from the driver.
-    if (!configMgr.hasWiFi() || !wb_net::isConnected()) {
+    // Stay in the AP-serving branch while a boot-time WiFi failure has us in AP
+    // fallback (g_bootWifiFailedAP), even if the STA link heals — services below
+    // (MQTT/WS/STA server) were never started in that boot, so we must not fall
+    // through to them. A runtime STA drop (services WERE started) is handled by
+    // wb_net's own watchdog and never sets g_bootWifiFailedAP, so it's excluded.
+    if (!configMgr.hasWiFi() || !wb_net::isConnected() || g_bootWifiFailedAP) {
+        // Boot-fail AP fallback (#182). Two exits, both bounded by the retry
+        // budget so nothing loops forever:
+        if (g_bootWifiFailedAP && _apFailRetries < kApFailMaxRetries) {
+            if (wb_net::isConnected()) {
+                // WiFi healed asynchronously (driver auto-reconnect on the
+                // still-up STA iface). Reboot so setup() runs the full STA init
+                // path cleanly instead of limping in half-initialised AP state.
+                Log.println("[Main] WiFi healed in AP fallback — rebooting for clean STA init (#182)");
+                delay(50);
+                ESP.restart();
+            }
+            if (g_apFailRebootAtMs != 0) {
+                // Still down: reboot after the grace to retry a fresh STA
+                // connect, but defer while a client is on the AP (reconfiguring).
+                if (WiFi.softAPgetStationNum() > 0) {
+                    g_apFailRebootAtMs = millis() + kApFailRetryMs;
+                } else if ((int32_t)(millis() - g_apFailRebootAtMs) >= 0) {
+                    Log.println("[Main] AP fallback grace elapsed with no client — rebooting to retry WiFi (#182)");
+                    delay(50);
+                    ESP.restart();
+                }
+            }
+        }
+        // Budget exhausted (or first-boot no-config AP): just serve the portal.
         delay(10);
         return;
     }
