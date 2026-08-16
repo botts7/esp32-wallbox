@@ -643,10 +643,13 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         wallboxBLE.enqueueRequest("s_cmode", "{\"mode\":0}");
 
     } else if (sub == "current") {
-        // payload: integer 6-32
+        // payload: integer 6 .. charger-reported ceiling (#39). A fixed 32 A
+        // upper bound silently dropped 33-40 A writes on a 40 A charger even
+        // after the HA number's max was raised — the number would snap back.
+        int hi = wallboxBLE.maxCurrentCeiling();
         int amps = atoi(payload);
-        if (amps < 6 || amps > 32) {
-            Log.printf("[CMD] Invalid current: %d (must be 6-32)\n", amps);
+        if (amps < 6 || amps > hi) {
+            Log.printf("[CMD] Invalid current: %d (must be 6-%d)\n", amps, hi);
             return;
         }
         par = String(amps);
@@ -725,31 +728,35 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         wallboxBLE.enqueueRequest(bapi::MET_SET_AUTOLOCK, String(mins * 60).c_str());
 
     } else if (sub == "eco_mode") {
-        // HA sends: "Off", "Full Green (Solar Only)", "Solar + Grid"
-        // BAPI: esm=0 disabled, esm=1 Full Green, esm=2 Solar+Grid
+        // HA sends: "Off", "Full Green (Solar Only)", "Solar + Grid".
+        // Documented Wallbox eco_smart enum (cloud API + community libs, and
+        // measured on-charger in #38): esm 0 = Eco (blends grid + solar),
+        // 1 = Full Green (solar surplus only). There is NO esm 2 — the old
+        // code sent 2 for "Solar + Grid" and the charger silently ignored it
+        // (behaved like Full Green, never blending grid). So "Solar + Grid" is
+        // Eco => esm 0. The ese master flag is what turns Eco-Smart on/off.
         String s = payload;
-        int mode = 0;
-        if (s.startsWith("Full Green")) mode = 1;
-        else if (s == "Solar + Grid") mode = 2;
         // Preserve the user's solar target instead of forcing it to 100 %:
         // hard-coding `esp` here silently wiped whatever percentage the user
         // had configured (and, with the eco_power write broken below, left no
         // way to set it back from HA). The web UI already replays the current
         // value in saveEco(); do the same from the last settings poll.
         String esp = String(wallboxBLE.lastEcoPct());
-        if (mode == 0) {
+        if (s == "Off") {
             // Disabling: the charger ignores an `esm` change that arrives
             // together with ese=0, leaving `esm` stuck at its previous value
-            // (which then reads back as a phantom mode). Send the mode change
-            // first with the master flag still ON so it is accepted, then drop
-            // the flag — this clears `esm` and leaves the charger at
-            // {ese:0, esm:0}.
+            // (which then reads back as a phantom mode). Send with the master
+            // flag still ON first so the write is accepted, then drop the flag
+            // — this leaves the charger at {ese:0} = Eco-Smart off (#29).
             String on  = "{\"esm\":0,\"ese\":1,\"esp\":" + esp + "}";
             String off = "{\"esm\":0,\"ese\":0,\"esp\":" + esp + "}";
             wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, on.c_str());
             wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, off.c_str());
         } else {
-            String p = "{\"esm\":" + String(mode) + ",\"ese\":1,\"esp\":" + esp + "}";
+            int esm = s.startsWith("Full Green") ? 1 : 0;   // "Solar + Grid" => Eco => 0
+            String p = "{\"esm\":" + String(esm) + ",\"ese\":1,\"esp\":" + esp + "}";
+            Log.printf("[CMD] eco_mode '%s' -> s_ecos esm=%d ese=1 esp=%s\n",
+                       s.c_str(), esm, esp.c_str());
             wallboxBLE.enqueueRequest(bapi::MET_SET_ECO_SMART, p.c_str());
         }
 
@@ -1571,12 +1578,21 @@ void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
                 e.icon, st, e.valueTemplate,
                 e.unit, e.deviceClass, cmd, e.stateClass, e.category);
             break;
-        case wb_disc::EntityKind::NUMBER:
+        case wb_disc::EntityKind::NUMBER: {
+            // The max-charging-current setpoint's upper bound follows the
+            // charger's own reported hardware ceiling (#39) — a fixed 32 A
+            // capped 40 A USA Pulsar Plus units. maxCurrentCeiling() falls back
+            // to the table's 32 A default when the charger doesn't report one.
+            // Discovery re-arms (via _discoveryStale) when the ceiling changes.
+            float numMax = (float)e.numMax;
+            if (strcmp(e.objectId, "max_charging_current") == 0)
+                numMax = (float)wallboxBLE.maxCurrentCeiling();
             publishDiscoveryNumber(*_client, e.objectId, e.name, e.icon,
                 cmd, st, e.valueTemplate,
-                (float)e.numMin, (float)e.numMax, (float)e.numStep,
+                (float)e.numMin, numMax, (float)e.numStep,
                 e.unit, e.numMode);
             break;
+        }
         case wb_disc::EntityKind::SWITCH:
             publishDiscoverySwitch(*_client, e.objectId, e.name, e.icon,
                 cmd, st, e.valueTemplate,

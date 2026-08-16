@@ -6,6 +6,27 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [3.2.5] - 2026-08-16
+
+### Fixed
+- **Eco-Smart "Solar + Grid" now actually blends grid power (#38).** The mode
+  was sent to the charger as `esm=2`, which is not a value in Wallbox's own
+  eco_smart API — the charger silently ignored it and behaved like Full Green,
+  never importing grid. The documented enum is `esm 0 = Eco (solar + grid)`,
+  `esm 1 = Full Green (solar only)`; the master on/off is the separate `ese`
+  flag. All surfaces now map "Solar + Grid" → `esm 0`, "Full Green" → `esm 1`,
+  "Off" → `ese 0`, and read the state back through `ese`/`esm` so the selected
+  mode round-trips. Fixed in the MQTT `eco_mode` handler, the published state,
+  and the web UI (mode picker + diagnostics).
+- **Max charging current is no longer capped at 32 A (#39).** The setpoint was
+  hard-limited to 32 A, so a 40 A charger (e.g. a USA Pulsar Plus set to a 40 A
+  hardware limit) couldn't be driven above 32 A from the gateway, web UI, or
+  Home Assistant. The ceiling now follows the charger's own
+  `max_available_current`, falling back to 32 A when the charger doesn't report
+  one (no change for those). Applied to both `/api/command` handlers, the
+  dashboard slider, and the HA "Max Charging Current" number (its max updates
+  via a discovery re-arm when the charger's ceiling becomes known).
+
 ## [3.2.4] - 2026-08-09
 
 Fixes for a Pulsar Plus that speaks the Max-family (single-char) BLE stack —
