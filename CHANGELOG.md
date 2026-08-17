@@ -15,6 +15,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   exactly (~20% app headroom); `chip_temp` has no usable die sensor on classic
   ESP32 and was already gated off, so the Gateway Temperature entity just reads
   unavailable there. Build with `pio run -e esp32dev`.
+- **Bigger OTA app slots on the ESP32-S3 (8 MB partition table).** The S3 (8 MB
+  flash) now uses `partitions_8mb.csv` with **3 MB** OTA app slots (was 1.875 MB
+  — the app went from 74% → 46% of its slot) plus a 256 KB coredump, so there's
+  room for the app to grow. The WROOM keeps the tight 4 MB table. A partition-
+  table change can't be applied over OTA, so existing S3 installs keep the old
+  slots until a USB re-flash; only new USB installs get the bigger ones.
+- **Longer on-board charge history on the S3** (`MAX_INTERVALS` 24 → 96), so the
+  month cost/savings sensors (#151) don't undercount a busy month by dropping
+  older charge bursts from the ring. The WROOM keeps 24 to conserve RAM.
+
+### Changed
+- **Charge-log moved to its own `nvs2` partition.** It previously shared the
+  20 KB default `nvs` with settings, and a growing ring could crowd that
+  partition until writes silently failed and the ring stranded at its last-
+  fitting size (the #166 symptom). `nvs2` (64 KB, allocated but until now
+  unused) is formatted on first boot and the existing history is migrated into
+  it once — so settings and the charge-log no longer compete for space.
 
 ## [3.2.6] - 2026-08-16
 

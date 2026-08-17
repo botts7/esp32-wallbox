@@ -8,12 +8,14 @@ on:
       - 'include/**'
       - 'platformio.ini'
       - 'partitions_ota.csv'
+      - 'partitions_8mb.csv'
   pull_request:
     paths:
       - 'src/**'
       - 'include/**'
       - 'platformio.ini'
       - 'partitions_ota.csv'
+      - 'partitions_8mb.csv'
   release:
     types: [created]
 
