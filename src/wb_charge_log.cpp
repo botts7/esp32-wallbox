@@ -2,12 +2,18 @@
 #include "wb_log.h"
 #include <Preferences.h>
 #include <ArduinoJson.h>
+#include <nvs_flash.h>
 #include <time.h>
 
 namespace wb_charge_log {
 
-static const char* NVS_NS  = "wbcharge";
-static const char* NVS_KEY = "ivals";
+static const char* NVS_NS   = "wbcharge";
+static const char* NVS_KEY  = "ivals";
+// The charge-log lives in its OWN nvs partition (nvs2, 64 KB) so a growing ring
+// can't crowd settings in the 20 KB default nvs — that crowding stranded the
+// ring at its last-fitting size (#166). nvs2 was allocated in the partition
+// table but previously unused; _initNvs2() formats it on first use.
+static const char* NVS_PART = "nvs2";
 
 // SNTP-synced guard: before this the clock is the 1970 boot default, so any
 // timestamp would be garbage. Matches the wb_ble / wb_health convention.
@@ -45,7 +51,7 @@ static volatile uint32_t _lastBurstWh = 0;
 
 static void load(JsonDocument& doc) {
     Preferences p;
-    if (!p.begin(NVS_NS, true)) { doc.to<JsonArray>(); return; }
+    if (!p.begin(NVS_NS, true, NVS_PART)) { doc.to<JsonArray>(); return; }
     String s = p.getString(NVS_KEY, "[]");
     p.end();
     if (deserializeJson(doc, s) != DeserializationError::Ok || !doc.is<JsonArray>()) {
@@ -56,7 +62,7 @@ static void load(JsonDocument& doc) {
 
 static void store(const JsonDocument& doc) {
     Preferences p;
-    if (!p.begin(NVS_NS, false)) {
+    if (!p.begin(NVS_NS, false, NVS_PART)) {
         Log.println("[chargelog] NVS begin(rw) failed — interval NOT persisted");
         return;
     }
@@ -104,7 +110,7 @@ static uint32_t _burstGreenWh(uint32_t wh) {
 
 static void saveOpenState() {
     Preferences p;
-    if (!p.begin(NVS_NS, false)) return;
+    if (!p.begin(NVS_NS, false, NVS_PART)) return;
     if (_open) {
         uint32_t wh = _burstWh();
         JsonDocument d;
@@ -138,9 +144,61 @@ static void appendInterval(uint32_t usid, uint32_t start, uint32_t stop,
     _count = (uint8_t)arr.size();
 }
 
+// Format/open the dedicated nvs2 partition on first use. It was allocated in
+// the partition table but never initialised, so a fresh one has no NVS pages —
+// erase + re-init once, the standard custom-partition pattern.
+static void _initNvs2() {
+    esp_err_t e = nvs_flash_init_partition(NVS_PART);
+    if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase_partition(NVS_PART);
+        e = nvs_flash_init_partition(NVS_PART);
+    }
+    if (e != ESP_OK)
+        Log.printf("[chargelog] nvs2 init failed (%d) — charge-log won't persist\n", (int)e);
+}
+
+// One-time move of the charge-log from the crowded 20 KB default nvs into the
+// dedicated nvs2 partition. Preserves the existing history (so #151 cost/savings
+// don't reset on upgrade) and clears the old copy to reclaim default-nvs space.
+// Guarded by a flag in nvs2 so it runs exactly once.
+static void _migrateFromDefaultNvs() {
+    Preferences meta;
+    if (!meta.begin("wbmeta", false, NVS_PART)) return;
+    if (!meta.getBool("migr", false)) {
+        String s;
+        Preferences old;
+        if (old.begin(NVS_NS, true)) {            // read from the DEFAULT nvs
+            s = old.getString(NVS_KEY, "");
+            old.end();
+        }
+        bool moved = (s.length() <= 2);           // "" / "[]" -> nothing to move
+        if (!moved) {
+            Preferences nw;
+            if (nw.begin(NVS_NS, false, NVS_PART)) {
+                moved = nw.putString(NVS_KEY, s) > 0;   // only "moved" if it stuck
+                nw.end();
+            }
+        }
+        // Reclaim the old copy + mark done ONLY once the history is safely in
+        // nvs2 — otherwise leave it in place and retry on the next boot (never
+        // clear a copy we failed to move, or #151 history would be lost).
+        if (moved) {
+            Preferences clr;
+            if (clr.begin(NVS_NS, false)) { clr.clear(); clr.end(); }
+            meta.putBool("migr", true);
+            Log.println("[chargelog] migrated charge-log to nvs2 partition");
+        } else {
+            Log.println("[chargelog] nvs2 migration deferred (write failed) — will retry");
+        }
+    }
+    meta.end();
+}
+
 // ---- public ----
 
 void begin() {
+    _initNvs2();
+    _migrateFromDefaultNvs();
     JsonDocument doc;
     load(doc);
     JsonArray arr = doc.as<JsonArray>();
@@ -155,7 +213,7 @@ void begin() {
     // persisted periodically (saveOpenState); append what we captured as a
     // completed interval so the charge isn't lost, then clear the pending state.
     Preferences po;
-    if (po.begin(NVS_NS, true)) {
+    if (po.begin(NVS_NS, true, NVS_PART)) {
         String s = po.getString(NVS_OPEN, "");
         po.end();
         if (s.length()) {
@@ -186,7 +244,7 @@ void begin() {
             }
             // Clear it (recovered or invalid) so it can't re-append next boot.
             Preferences pw;
-            if (pw.begin(NVS_NS, false)) { pw.remove(NVS_OPEN); pw.end(); }
+            if (pw.begin(NVS_NS, false, NVS_PART)) { pw.remove(NVS_OPEN); pw.end(); }
         }
     }
 }
@@ -322,7 +380,7 @@ uint32_t lastBurstWh()    { return _lastBurstWh; }
 
 void clear() {
     Preferences p;
-    if (p.begin(NVS_NS, false)) { p.remove(NVS_KEY); p.end(); }
+    if (p.begin(NVS_NS, false, NVS_PART)) { p.remove(NVS_KEY); p.end(); }
     _count = 0;
     _lastBurstWh = 0;
     // Leave any open burst running — clear() only wipes stored history.

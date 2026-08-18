@@ -32,8 +32,17 @@
 
 namespace wb_charge_log {
 
-// Ring size. Each interval is small; ~24 covers a few days of typical use.
+// Ring size. Each interval is a small (~60 B) JSON record, persisted in the
+// dedicated nvs2 partition (64 KB) so it no longer crowds settings in the 20 KB
+// default nvs (see the migration in .cpp — that crowding was the #166 silent-
+// fail). The classic ESP32-WROOM keeps a shorter ring to conserve RAM; the S3
+// holds a longer history so month cost/savings (#151) doesn't undercount a busy
+// month (a 24-burst ring can drop older bursts within a single month).
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+static const uint8_t MAX_INTERVALS = 96;
+#else
 static const uint8_t MAX_INTERVALS = 24;
+#endif
 
 // Charging is "on" when cp exceeds this (kW) — filters meter noise / standby.
 static constexpr float CP_ON_KW = 0.10f;
