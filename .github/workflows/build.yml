@@ -8,12 +8,14 @@ on:
       - 'include/**'
       - 'platformio.ini'
       - 'partitions_ota.csv'
+      - 'partitions_8mb.csv'
   pull_request:
     paths:
       - 'src/**'
       - 'include/**'
       - 'platformio.ini'
       - 'partitions_ota.csv'
+      - 'partitions_8mb.csv'
   release:
     types: [created]
 
@@ -45,6 +47,23 @@ jobs:
 
       - name: Build ESP32-S3 firmware
         run: pio run -e esp32s3
+
+      # Classic ESP32-WROOM (esp32dev, #154). Built on every push/PR/release so
+      # the second target can't silently regress. NOT attached to releases yet —
+      # it compiles + fits 4 MB, but is pending on-hardware validation, so it's
+      # only offered as a CI artifact for testers (below), not as a release asset.
+      - name: Build ESP32-WROOM (esp32dev) firmware
+        run: pio run -e esp32dev
+
+      - name: Upload ESP32-WROOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-esp32dev
+          path: |
+            .pio/build/esp32dev/firmware.bin
+            .pio/build/esp32dev/firmware.elf
+            .pio/build/esp32dev/bootloader.bin
+            .pio/build/esp32dev/partitions.bin
 
       - name: Compute SHA256
         run: |
