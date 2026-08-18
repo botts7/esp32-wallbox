@@ -1709,6 +1709,12 @@ void WallboxBLE::_pollSettings() {
             // returns 0 on a bool true since ArduinoJson treats them as
             // different types — cast through bool then int to be safe.
             merged["power_sharing"] = d["r"]["dyps"].as<bool>() ? 1 : 0;
+            // Stash the companion fields so an MQTT dyps toggle can rebuild the
+            // whole s_psh record instead of zeroing them (#181). Only overwrite
+            // when the key is present, so a sparse reply can't clobber the cache.
+            if (d["r"]["mcpp"].is<int>()) _lastPshMcpp = d["r"]["mcpp"].as<int>();
+            if (d["r"]["minI"].is<int>()) _lastPshMinI = d["r"]["minI"].as<int>();
+            if (d["r"]["nchg"].is<int>()) _lastPshNchg = d["r"]["nchg"].as<int>();
         }
     }
     if (_state != State::CONNECTED) return;

@@ -776,7 +776,13 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
     } else if (sub == "power_sharing") {
         String s = payload; s.toLowerCase();
         int en = (s == "1" || s == "on" || s == "true") ? 1 : 0;
-        String p = "{\"dyps\":" + String(en) + "}";
+        // s_psh is a whole-record replace: a bare {"dyps":en} zeroes the omitted
+        // mcpp/minI/nchg and, with nchg=0, the charger even rejects the dyps
+        // change (#181). Rebuild the full record from the last g_psh poll.
+        String p = "{\"dyps\":" + String(en) +
+                   ",\"mcpp\":" + String(wallboxBLE.lastPshMcpp()) +
+                   ",\"minI\":" + String(wallboxBLE.lastPshMinI()) +
+                   ",\"nchg\":" + String(wallboxBLE.lastPshNchg()) + "}";
         wallboxBLE.enqueueRequest(bapi::MET_SET_POWER_SHARE, p.c_str());
 
     } else if (sub == "phase_switch") {

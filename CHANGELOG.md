@@ -6,6 +6,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [3.2.8] - 2026-08-18
+
+### Fixed
+- **Dynamic Power Sharing toggle no longer corrupts the power-sharing config
+  (#181).** The `s_psh` BAPI command is a whole-record replace, but the MQTT
+  switch handler sent only `{"dyps":<0|1>}` — so every toggle silently zeroed
+  the omitted `mcpp`/`minI`/`nchg` fields (e.g. min current 6 A → 0, chargers-
+  in-group 1 → 0), and with `nchg` zeroed the charger even rejected the `dyps`
+  change itself. The gateway now caches the companion fields from each `g_psh`
+  poll and replays the full record on a toggle (the same read-modify-write it
+  already does for Eco-Smart). Verified live on a Pulsar MAX: the min-current
+  and group-count fields now survive a toggle. Note: enabling `dyps` still
+  requires a multi-charger group (`nchg` ≥ 2) — that gate is charger-side, so on
+  a single-charger install the switch is inert but no longer destructive.
+
 ## [3.2.7] - 2026-08-18
 
 ### Added
