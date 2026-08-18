@@ -6,6 +6,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **Bound the MQTT reconnect so a broker/network outage can't stall the main
+  loop (#4).** During an outage (e.g. an overnight router reboot) the sync MQTT
+  client's connect could block the loop ~15 s per attempt — surfacing as a
+  loop-max spike to tens of seconds (powerform-controls reported ~100 s around
+  4–5am). The gateway now pre-establishes the TCP socket itself with a **bounded
+  4 s connect timeout** and a **cached (10-min) broker-IP resolve** (so a
+  transient outage skips DNS on the hot path), and caps the CONNACK read at 5 s
+  (`setSocketTimeout`). A single reconnect attempt can no longer block the loop
+  more than a few seconds. Self-healing behaviour and reconnect backoff are
+  unchanged; it was already cosmetic (the gateway recovered), but the loop is
+  now protected against the stall.
+
 ## [3.2.7] - 2026-08-18
 
 ### Added

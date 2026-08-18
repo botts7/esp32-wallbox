@@ -41,6 +41,13 @@ public:
 
 private:
     void _connect();
+    // Bounded broker resolve (#4): returns an IP for a literal-IP or hostname
+    // broker without letting a dead DNS server block the main loop. Caches the
+    // last good hostname->IP so the reconnect path skips DNS on the hot path.
+    bool _resolveBroker(const String& host, IPAddress& out);
+    IPAddress _brokerIp;
+    bool      _brokerIpValid = false;
+    uint32_t  _brokerIpAt    = 0;
     void _subscribe();
     static void _mqttCallback(char* topic, byte* payload, unsigned int len);
 
