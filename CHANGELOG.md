@@ -6,6 +6,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [3.2.7] - 2026-08-18
+
 ### Added
 - **Classic ESP32-WROOM build target (`esp32dev`, #154).** The gateway now
   builds for the common/cheaper classic ESP32-WROOM-32 module, not just the
@@ -32,6 +34,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fitting size (the #166 symptom). `nvs2` (64 KB, allocated but until now
   unused) is formatted on first boot and the existing history is migrated into
   it once — so settings and the charge-log no longer compete for space.
+- **De-duplicated the `/api/command` request handlers (#179).** The command
+  mapping was copy-pasted across the sync (`wb_web.cpp`) and async
+  (`wb_web_async.cpp`) servers, so every fix had to be made twice or silently
+  no-op on one path. Both now call a single shared `wb_cmd::buildCommand()`.
+  Internal refactor — no behaviour change.
+
+### Fixed
+- **Quieter MQTT logging / no empty publishes (#31).** The gateway published
+  empty-payload MQTT responses (which logged as noise and could confuse
+  subscribers); those are now suppressed at the source, and the `ble_rssi`
+  sensor template defaults a missing value to 0 instead of erroring.
 
 ## [3.2.6] - 2026-08-16
 
