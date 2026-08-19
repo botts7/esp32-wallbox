@@ -27,6 +27,21 @@
 
 ### Recent releases
 
+- **3.2.8** — **Dynamic Power Sharing toggle no longer corrupts the config**
+  (#181): `s_psh` is a whole-record replace, so the toggle now replays the full
+  record (min current / group count survive) instead of zeroing the omitted
+  fields. Plus a **bounded MQTT reconnect** (#4) — a broker/DNS outage can no
+  longer stall the main loop (4 s connect + cached broker IP; loop-max capped
+  ~4 s instead of ~15 s per attempt).
+- **3.2.7** — **classic ESP32-WROOM (`esp32dev`) build target** (#154) alongside
+  the S3; sync/async `/api/command` handler dedup (#179); quieter MQTT logs
+  (#31); charge-log moved to its own NVS namespace.
+- **3.2.6** — **boot-time WiFi recovery** (#182): the gateway retries the
+  configured WiFi from AP mode instead of getting stuck on the portal after a
+  router reboot.
+- **3.2.5** — Eco-Smart mode remap (#38) + dynamic max-charging-current control
+  (#39).
+- **3.2.4** — Pulsar Plus (Max BLE stack): **Stop** + **Lock** fixes.
 - **3.2.0-beta.1** *(pre-release — testers)* — **charge-interval capture**:
   the gateway records each real charge burst (cp>0) with per-burst energy +
   solar split into an NVS ring, exposed via `GET /api/charge_log` + status
