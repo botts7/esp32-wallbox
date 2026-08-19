@@ -464,6 +464,10 @@ void WallboxMQTT::begin() {
     // Pair with the MQTT.loop() call in the BLE yield callback to
     // belt-and-braces the keepalive-starvation case.
     mqttClient.setKeepAlive(60);
+    // #4: bound how long a connect can wait for the CONNACK read. Default is
+    // 15 s; a broker that accepts the TCP socket but never replies (half-up
+    // during an overnight outage) would otherwise stall the loop that long.
+    mqttClient.setSocketTimeout(5);
     _client = &mqttClient;
 }
 
@@ -520,6 +524,25 @@ void WallboxMQTT::_connect() {
     const char* pass = cfg.mqttPass.length() > 0 ? cfg.mqttPass.c_str() : nullptr;
     String avail = availTopic();
 
+    // #4: pre-establish the TCP socket ourselves with BOUNDED DNS + connect
+    // timeouts, so a broker/DNS outage (e.g. an overnight router reboot) can't
+    // block the main loop ~15 s per attempt. PubSubClient reuses an already-
+    // connected socket (PubSubClient.cpp:186 — skips its own blocking connect),
+    // so we hand it a fresh one within our bound. On failure we back off exactly
+    // as a failed PubSubClient::connect() would, then return.
+    static const uint32_t kConnectTimeoutMs = 4000;
+    IPAddress bip;
+    if (!_resolveBroker(cfg.mqttHost, bip)) {
+        Log.println("[MQTT] broker DNS unresolved within bound — backing off");
+        _reconnectGateMs = _reconnectGateMs < 60000 ? _reconnectGateMs * 2 : 60000;
+        return;
+    }
+    if (!wifiClient.connect(bip, cfg.mqttPort, kConnectTimeoutMs)) {
+        Log.println("[MQTT] TCP connect timed out within bound — backing off");
+        _reconnectGateMs = _reconnectGateMs < 60000 ? _reconnectGateMs * 2 : 60000;
+        return;
+    }
+
     // LWT: set availability to offline on disconnect
     if (_client->connect(cfg.mqttClientId.c_str(), user, pass, avail.c_str(), 0, true, "offline")) {
         Log.println("[MQTT] Connected");
@@ -537,6 +560,30 @@ void WallboxMQTT::_connect() {
         // overflowing the pending-pub ring.
         _reconnectGateMs = _reconnectGateMs < 60000 ? _reconnectGateMs * 2 : 60000;
     }
+}
+
+// #4: bounded broker resolution. Literal IP -> immediate (no DNS); hostname ->
+// last-good cached IP, else a DNS lookup with an explicit timeout so a dead
+// resolver (overnight router/DNS outage) can't wedge the reconnect. A failed
+// lookup clears the cache so the next attempt re-resolves; the TTL is generous
+// because brokers rarely move.
+bool WallboxMQTT::_resolveBroker(const String& host, IPAddress& out) {
+    if (host.isEmpty()) return false;
+    if (out.fromString(host)) return true;                  // literal IPv4 — no DNS
+    const uint32_t now = millis();
+    static const uint32_t kTtlMs = 10UL * 60UL * 1000UL;    // 10 min
+    if (_brokerIpValid && (now - _brokerIpAt) < kTtlMs) { out = _brokerIp; return true; }
+    // 2-arg hostByName (this core has no timeout overload); lwIP bounds it
+    // internally. The 10-min cache above keeps DNS off the hot reconnect path,
+    // so a transient overnight outage skips it entirely and only pays the
+    // bounded 4 s TCP connect below.
+    IPAddress ip;
+    if (WiFi.hostByName(host.c_str(), ip) == 1 && ip != IPAddress()) {
+        _brokerIp = ip; _brokerIpValid = true; _brokerIpAt = now;
+        out = ip; return true;
+    }
+    _brokerIpValid = false;                                 // re-resolve next time
+    return false;
 }
 
 void WallboxMQTT::_subscribe() {
