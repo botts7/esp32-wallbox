@@ -630,6 +630,19 @@ public:
     int     lastEcoPct()     const { return _lastEcoPct; }
     int     lastEcoEnabled() const { return _lastEcoEnabled; }
 
+    // Power-sharing companion fields (#181). s_psh is a whole-record replace:
+    // a partial write like {"dyps":1} zeroes the omitted mcpp/minI/nchg (which,
+    // with nchg=0, also makes the charger reject the dyps change). So we stash
+    // the other three from each g_psh poll and replay them when an MQTT write
+    // toggles dyps — same read-modify-write pattern as Eco-Smart above.
+    // Defaults match the charger's own (unlimited power, 6 A min, 1 charger).
+    int     _lastPshMcpp = 0;
+    int     _lastPshMinI = 6;
+    int     _lastPshNchg = 1;
+    int     lastPshMcpp() const { return _lastPshMcpp; }
+    int     lastPshMinI() const { return _lastPshMinI; }
+    int     lastPshNchg() const { return _lastPshNchg; }
+
 private:
     String _chargerModel = "max";
     uint32_t _mainsVoltage = 230;   // phase-current power derivation fallback (#12)
