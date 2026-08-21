@@ -59,6 +59,10 @@ env.Append(CPPDEFINES=[("WB_VERSION", env.StringifyMacro(version))])  # type: ig
 # the suffix on the release binary asset (wallbox-gateway-<ver>-esp32s3.bin).
 # Surfaced in /api/status.board so the HA integration's Update entity can fetch
 # the matching asset for OTA. Single source of truth — no separate board string.
-board = env["PIOENV"]  # type: ignore
+# The `ota` env is only a convenience for `pio run -e ota -t upload` (espota);
+# it EXTENDS esp32s3, so report the real target it builds — otherwise a gateway
+# flashed that way reports board="ota" and the Update entity finds no asset.
+_ENV_BOARD_ALIAS = {"ota": "esp32s3"}
+board = _ENV_BOARD_ALIAS.get(env["PIOENV"], env["PIOENV"])  # type: ignore
 print(f"[version.py] WB_BOARD = {board}")
 env.Append(CPPDEFINES=[("WB_BOARD", env.StringifyMacro(board))])  # type: ignore
