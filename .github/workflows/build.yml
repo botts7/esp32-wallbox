@@ -126,6 +126,13 @@ jobs:
           # commit. Debug artifact only; never flashed.
           cp .pio/build/esp32s3/firmware.elf \
              ".pio/build/esp32s3/wallbox-gateway-${GITHUB_REF_NAME}-esp32s3.elf"
+          # Classic ESP32-WROOM (esp32dev, #154): a board-named .bin so WROOM
+          # gateways (board="esp32dev") can OTA from HA too — pick_asset needs a
+          # '-esp32dev.bin' or it fails with "no firmware asset for board".
+          cp .pio/build/esp32dev/firmware.bin \
+             ".pio/build/esp32dev/wallbox-gateway-${GITHUB_REF_NAME}-esp32dev.bin"
+          cp .pio/build/esp32dev/firmware.elf \
+             ".pio/build/esp32dev/wallbox-gateway-${GITHUB_REF_NAME}-esp32dev.elf"
 
       - name: Attach to release
         if: github.event_name == 'release'
@@ -139,3 +146,5 @@ jobs:
             .pio/build/esp32s3/partitions.bin
             .pio/build/esp32s3/SHA256SUMS.txt
             .pio/build/esp32s3/install.json
+            .pio/build/esp32dev/wallbox-gateway-*-esp32dev.bin
+            .pio/build/esp32dev/wallbox-gateway-*-esp32dev.elf

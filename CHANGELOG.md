@@ -4,7 +4,21 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [3.2.9] - 2026-08-21
+
+### Fixed
+- **`/api/status.board` now reports the real target when flashed via the `ota`
+  env.** `WB_BOARD` was set to the PlatformIO env name, so a gateway flashed with
+  `pio run -e ota -t upload` reported `board="ota"` — which the HA Update entity
+  couldn't match to a release asset (`-ota.bin` doesn't exist). The `ota` env is
+  only an espota upload convenience that extends `esp32s3`, so it now reports
+  `esp32s3`. (The integration also gained a fallback for already-flashed
+  gateways — see hass-wallbox-gateway v0.33.1.)
+- **Releases now attach a classic ESP32-WROOM (`esp32dev`) OTA binary.** The
+  build workflow already compiled `esp32dev` (#154) but only kept it as a CI
+  artifact, so WROOM gateways (`board="esp32dev"`) had no release asset to OTA
+  from Home Assistant. Releases now ship `wallbox-gateway-<tag>-esp32dev.bin`
+  alongside the esp32s3 one.
 
 ## [3.2.8] - 2026-08-19
 
