@@ -1453,6 +1453,32 @@ function fmtCharge(epoch){
   try{return new Date(epoch*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ,weekday:'short',hour:'2-digit',minute:'2-digit'})}
   catch(e){return new Date(epoch*1000).toLocaleString()}
 }
+// The firmware's next_scheduled_charge is computed in UTC, but a schedule's
+// `days` bits are the charger's LOCAL weekday while `start` is UTC — so a
+// local-midnight window (e.g. Sydney "Sunday 00:00" == 14:00 UTC) comes out a
+// day late. Recompute it here in the charger's timezone using Intl for the
+// DST-correct offset (nothing hardcoded), from the schedules read once below.
+var _ncScheds=null;
+function _ncOffMin(epoch){try{var d=new Date(epoch*1000);var p={};new Intl.DateTimeFormat('en-US',{timeZone:CHARGER_TZ,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).formatToParts(d).forEach(function(x){p[x.type]=x.value});var hr=+p.hour;if(hr===24||isNaN(hr))hr=0;var u=Date.UTC(+p.year,(+p.month||1)-1,+p.day,hr,+p.minute||0,+p.second||0);return Math.round((u-d.getTime())/60000)}catch(e){return 0}}
+function _ncParts(epoch){var d=new Date(epoch*1000);try{var p={},W={Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6};new Intl.DateTimeFormat('en-US',{timeZone:CHARGER_TZ,weekday:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).formatToParts(d).forEach(function(x){p[x.type]=x.value});var hr=+p.hour;if(hr===24||isNaN(hr))hr=0;return{day:W[p.weekday]||0,hour:hr,min:+p.minute||0,sec:+p.second||0}}catch(e){return{day:d.getUTCDay(),hour:d.getUTCHours(),min:d.getUTCMinutes(),sec:d.getUTCSeconds()}}}
+function _ncHHMM(v){var n=parseInt(v,10)||0;return Math.floor(n/100)*60+(n%100)}
+function nextChargeLocal(){
+  if(!_ncScheds||!_ncScheds.length)return 0;
+  var now=Math.floor(Date.now()/1000),off=_ncOffMin(now),lp=_ncParts(now);
+  var nowMow=lp.day*1440+lp.hour*60+lp.min,best=1e9;
+  _ncScheds.forEach(function(s){
+    if(!s.enabled)return;var days=parseInt(s.days,10)||0;if(!days)return;
+    var ls=(((_ncHHMM(s.start)+off)%1440)+1440)%1440;   // UTC start -> local time-of-day
+    for(var d=0;d<7;d++){if(!((days>>d)&1))continue;var dt=(d*1440+ls)-nowMow;if(dt<0)dt+=10080;if(dt<best)best=dt}
+  });
+  return best>=1e9?0:(now-lp.sec+best*60);
+}
+function loadNextChargeScheds(){
+  fetch('/api/command?action=bapi&met=r_schs&par=null',{signal:AbortSignal.timeout(8000)}).then(function(x){return x.json()}).then(function(d){
+    var sc=(d&&d.r&&Array.isArray(d.r.schedules))?d.r.schedules:((d&&Array.isArray(d.r))?d.r:null);
+    if(sc)_ncScheds=sc;
+  }).catch(function(){});
+}
 // #129: hide grid/solar surfaces when the charger has no power meter
 // (Power Boost / Power Meter accessory absent — e.g. the original Pulsar).
 // meter===undefined (older firmware) is treated as present, so nothing
@@ -1474,7 +1500,10 @@ function updateChargeReminder(s){
   var b=document.getElementById('charge-reminder');if(!b)return;
   // Don't trust plug/schedule state when the charger link is down.
   if(!s||s.ble!=='connected'){b.style.display='none';return}
-  var nsc=s.next_scheduled_charge;
+  // Charger-local computation only — never the firmware's next_scheduled_charge
+  // (UTC-only, mislands a local-midnight window on the wrong day). Until the
+  // schedules load, show nothing rather than flash the wrong day.
+  var nsc=nextChargeLocal();
   if(s.plug_reminder){
     b.style.background='rgba(239,68,68,.10)';b.style.border='1px solid rgba(239,68,68,.35)';b.style.color='#ef4444';
     b.innerHTML='&#x1F50C; <strong>Not plugged in</strong> — scheduled charge '+(nsc?'at '+fmtCharge(nsc):'due soon')+'. Connect the cable so it can start.';
@@ -1489,6 +1518,7 @@ function updateChargeReminder(s){
 }
 loadNotifs();setInterval(loadNotifs,60000);
 updateBleHealth();setInterval(updateBleHealth,15000);
+loadNextChargeScheds();setInterval(loadNextChargeScheds,600000);  // schedules for the local next-charge calc; refresh slowly
 </script>
 </div>
 )HTML";
@@ -1931,6 +1961,14 @@ function showWiFi(){
 var allSchedules=[];
 var editingSid=null;
 var DAYS_M=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+// The charger stores `days` Sunday-first (bit0=Sun, confirmed: days:1==Sundays)
+// but this GUI works Monday-first (DAYS_M + the #sd day checkboxes, so the
+// weekend sits together). Rotate at the charger boundary — load and save — so
+// the display is Monday-first while the charger keeps its Sunday-first storage.
+// Sun(bit0)->bit6, Mon(bit1)->bit0, ... These apply to EVERY charger family
+// (array + Zentri); only the transport differs.
+function daysSunToMon(d){var o=0;for(var b=0;b<7;b++)if(d&(1<<b))o|=(1<<((b+6)%7));return o}
+function daysMonToSun(d){var o=0;for(var b=0;b<7;b++)if(d&(1<<b))o|=(1<<((b+1)%7));return o}
 function renderCostPanel(T){
   var DAYNAMES=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   var h="<h2>\u{1F4B0} Charging Cost</h2>";
@@ -2120,10 +2158,8 @@ function loadSchedulesZentri(){
       if(!d||d.error||!d.r||typeof d.r.sid==='undefined'){renderSchedules(out);return;}
       var s=d.r;
       if(s.days||s.start!=='0000'||s.stop!=='0000'){
-        // This firmware's days bitmask is Sunday-first (bit0=Sun, confirmed:
-        // days:1 == Sundays). renderSchedules labels bits Monday-first
-        // (DAYS_M), so rotate Sun-first -> Mon-first: Sun(bit0)->bit6, Mon->bit0, etc.
-        var zd=0;for(var b=0;b<7;b++)if(s.days&(1<<b))zd|=(1<<((b+6)%7));
+        // Sunday-first charger bitmask -> the GUI's Monday-first convention.
+        var zd=daysSunToMon(s.days);
         out.push({sid:s.sid,start:s.start,stop:s.stop,days:zd,mcr:s.mcr,enabled:s.days?1:0,target:{type:s.nrg?1:0,value:s.nrg||0}});
       }
       i++;next();
@@ -2151,6 +2187,9 @@ function loadSchedulesArr(_retry){
       if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
       l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return
     }
+    // Charger days are Sunday-first; rotate to the GUI's Monday-first convention
+    // (same as the Zentri path) so the list, timeline, editor + heatmap all agree.
+    sc.forEach(function(s){s.days=daysSunToMon(s.days|0)});
     renderSchedules(sc);
   }).catch(function(e){
     if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
@@ -2191,7 +2230,9 @@ function toggleSchedule(sid){
   var s=allSchedules.find(function(x){return x.sid===sid});
   if(!s){toast('Schedule not found','error');return}
   var newEn=s.enabled?0:1;
-  var entry=buildSchEntry(sid,s.start,s.stop,s.days,newEn,s.mcr,s.type||0,s.target,s.repeat||1);
+  // allSchedules holds Monday-first days (rotated on load); rotate back to the
+  // charger's Sunday-first storage before sending, or a toggle corrupts the days.
+  var entry=buildSchEntry(sid,s.start,s.stop,daysMonToSun(s.days),newEn,s.mcr,s.type||0,s.target,s.repeat||1);
   var verb=newEn?'resumed':'paused';
   toast(newEn?'Resuming...':'Pausing...','info');
   fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(JSON.stringify({schedules:[entry]})),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
@@ -2254,8 +2295,8 @@ function saveSchZentri(){
   var sp=localToUtc(document.getElementById('se').value);
   var dForm=0;document.querySelectorAll('#sd input:checked').forEach(function(c){dForm+=parseInt(c.value)});
   if(!dForm){toast('Select at least one day','error');return}
-  // form day bits are Monday-first; charger is Sunday-first -> Sun bit=(b+1)%7
-  var dZ=0;for(var b=0;b<7;b++)if(dForm&(1<<b))dZ|=(1<<((b+1)%7));
+  // form day bits are Monday-first; charger stores Sunday-first
+  var dZ=daysMonToSun(dForm);
   var sid;
   if(editingSid!==null){sid=editingSid;}
   else{var used={};allSchedules.forEach(function(s){used[s.sid]=1});sid=0;while(sid<4&&used[sid])sid++;if(sid>=4){toast('All 4 schedule slots are in use — edit or delete one first','error');return}}
@@ -2273,6 +2314,7 @@ function saveSch(){
   var sp=localToUtc(document.getElementById('se').value);
   var d=0;document.querySelectorAll('#sd input:checked').forEach(function(c){d+=parseInt(c.value)});
   if(!d){toast('Select at least one day','error');return}
+  d=daysMonToSun(d);   // form is Monday-first; charger stores Sunday-first
   var mcr=parseInt(document.getElementById('sc').value);
   var ekwh=parseInt(document.getElementById('se2').value)||0;
   var tgt=ekwh>0?{type:1,value:ekwh*1000}:{type:0,value:0};
