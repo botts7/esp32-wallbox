@@ -273,6 +273,9 @@ static void publishGatewayInfo() {
                     : String(",\"next_scheduled_charge\":null");
         json += ",\"plug_reminder\":";
         json += wallboxBLE.plugReminderActive(configMgr.get().reminderLeadMin) ? "true" : "false";
+        // Lead window (min) so hosts can recompute the reminder against a
+        // timezone-correct next charge (firmware next_scheduled_charge is UTC).
+        json += ",\"rem_lead\":" + String((unsigned)configMgr.get().reminderLeadMin);
     }
     // Charge-interval capture (#141) — gateway-computed; consumed by the HA
     // last_burst_energy + charge_log_count MQTT entities (parity with the

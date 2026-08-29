@@ -781,6 +781,10 @@ String wb_buildStatusJson() {
                     : String(",\"next_scheduled_charge\":null");
         json += ",\"plug_reminder\":" +
                 String(wallboxBLE.plugReminderActive(configMgr.get().reminderLeadMin) ? "true" : "false");
+        // Lead window (min) so hosts can recompute the reminder against a
+        // timezone-correct next charge — the firmware's next_scheduled_charge is
+        // UTC-only (mislands a local-midnight schedule a day off). 0 = disabled.
+        json += ",\"rem_lead\":" + String((unsigned)configMgr.get().reminderLeadMin);
     }
     // Charge-interval capture (#141): live summary of the real charge-burst
     // tracker. Full interval list is at /api/charge_log; these let surfaces
@@ -1502,9 +1506,14 @@ function updateChargeReminder(s){
   if(!s||s.ble!=='connected'){b.style.display='none';return}
   // Charger-local computation only — never the firmware's next_scheduled_charge
   // (UTC-only, mislands a local-midnight window on the wrong day). Until the
-  // schedules load, show nothing rather than flash the wrong day.
+  // schedules load, show nothing rather than flash the wrong day. Recompute the
+  // plug-in reminder here too (the firmware's plug_reminder uses the UTC next
+  // charge): due within rem_lead minutes AND the car isn't plugged in.
   var nsc=nextChargeLocal();
-  if(s.plug_reminder){
+  var lead=(typeof s.rem_lead==='number')?s.rem_lead:0;
+  var now=Math.floor(Date.now()/1000);
+  var plug=lead>0&&!s.car_connected&&nsc&&(nsc-now)<=lead*60;
+  if(plug){
     b.style.background='rgba(239,68,68,.10)';b.style.border='1px solid rgba(239,68,68,.35)';b.style.color='#ef4444';
     b.innerHTML='&#x1F50C; <strong>Not plugged in</strong> — scheduled charge '+(nsc?'at '+fmtCharge(nsc):'due soon')+'. Connect the cable so it can start.';
     b.style.display='block';
