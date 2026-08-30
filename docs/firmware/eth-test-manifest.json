@@ -1,0 +1,14 @@
+{
+  "name": "Wallbox Gateway — Ethernet (W5500) TEST",
+  "version": "eth-w5500-test.1",
+  "funding_url": "https://github.com/botts7/esp32-wallbox",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "wallbox-eth-test.bin", "offset": 0 }
+      ]
+    }
+  ]
+}
