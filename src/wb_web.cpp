@@ -848,31 +848,7 @@ String wb_buildStatusJson() {
     // expose control_mode (Zentri / original Pulsar, where gen IS the flag).
     // Single source of truth: the Integration + Add-on read this instead of
     // guessing from gen.
-    {
-        String lse; uint32_t lseSeq = 0;
-        wallboxBLE.copyCachedLse(lse, lseSeq);
-        int cmode = -1;
-        if (!lse.isEmpty()) {
-            JsonDocument ld;
-            if (deserializeJson(ld, lse) == DeserializationError::Ok)
-                cmode = ld["r"]["control_mode"] | -1;
-        }
-        bool paused;
-        if (cmode >= 0) {
-            paused = (cmode == 1);
-        } else {
-            String stj; uint32_t sSeq = 0;
-            wallboxBLE.copyCachedStatus(stj, sSeq);
-            int gen = 0;
-            if (!stj.isEmpty()) {
-                JsonDocument sd;
-                if (deserializeJson(sd, stj) == DeserializationError::Ok)
-                    gen = sd["r"]["gen"] | 0;
-            }
-            paused = (gen != 0);
-        }
-        json += ",\"schedule_paused\":" + String(paused ? "true" : "false");
-    }
+    json += ",\"schedule_paused\":" + String(wallboxBLE.schedulePaused() ? "true" : "false");
     json += "}";
     return json;
 }

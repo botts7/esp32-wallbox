@@ -276,6 +276,10 @@ static void publishGatewayInfo() {
         // Lead window (min) so hosts can recompute the reminder against a
         // timezone-correct next charge (firmware next_scheduled_charge is UTC).
         json += ",\"rem_lead\":" + String((unsigned)configMgr.get().reminderLeadMin);
+        // Manual-override (schedules/Eco-Smart paused) — the model-aware signal
+        // (r_lse.control_mode) so the MQTT Schedule Paused sensor stops reading
+        // r_dat.gen (green energy on the MAX Pro), which false-tripped on solar.
+        json += ",\"schedule_paused\":" + String(wallboxBLE.schedulePaused() ? "true" : "false");
     }
     // Charge-interval capture (#141) — gateway-computed; consumed by the HA
     // last_burst_energy + charge_log_count MQTT entities (parity with the

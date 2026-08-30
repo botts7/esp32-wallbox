@@ -170,6 +170,12 @@ public:
     // or r_sta.charger_status == 1). Lets Resume skip its defensive hard-Stop
     // when the charger is merely paused/waiting (error-114 fix).
     bool isCharging();
+    // schedulePaused(): manual override active (schedules / Eco-Smart suspended,
+    // the Wallbox app's "Resume" state). Authoritative signal is
+    // r_lse.control_mode == 1; falls back to r_dat.gen != 0 ONLY for chargers
+    // without control_mode (Zentri) — on the MAX Pro gen is green energy, not a
+    // flag. Single source of truth for /api/status + the gateway MQTT payload.
+    bool schedulePaused();
     // startStopRedundant(): true if a start/stop command is a no-op given the
     // current cached charging state (start while already charging, or stop while
     // already stopped). Used to make start/stop idempotent so a redundant w_cha
