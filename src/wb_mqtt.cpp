@@ -1450,8 +1450,11 @@ const DiscoveryEntry kEntries[] = {
     // Wallbox app's Resume action clears it back to 0; pressing Start
     // or Stop in our gateway does NOT change it. ON = paused.
     /* 57 */ { EntityKind::BINARY_SENSOR, "schedule_paused", "Schedule Paused", "mdi:calendar-clock",
-               TopicSlot::STATUS,
-               "{% if (value_json.r.gen | default(0)) != 0 %}ON{% else %}OFF{% endif %}",
+               // Model-aware override signal from the gateway payload (r_lse
+               // control_mode). Was value_json.r.gen on STATUS — green energy on
+               // the MAX Pro, so it false-tripped ON whenever solar-charging.
+               TopicSlot::GATEWAY,
+               "{% if value_json.schedule_paused %}ON{% else %}OFF{% endif %}",
                nullptr, nullptr, nullptr, nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 

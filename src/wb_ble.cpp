@@ -1955,6 +1955,32 @@ bool WallboxBLE::isCharging() {
     return false;
 }
 
+bool WallboxBLE::schedulePaused() {
+    // Manual override active (schedules / Eco-Smart suspended). Authoritative
+    // signal is r_lse.control_mode == 1 (0 = automatic); model-agnostic. Fall
+    // back to r_dat.gen != 0 ONLY for chargers without control_mode (Zentri /
+    // original Pulsar) — on the MAX Pro `gen` is accumulated green energy, NOT
+    // an override flag (which is why reading gen made the reminder false-ON
+    // during solar charging).
+    String lse; uint32_t lseSeq = 0;
+    copyCachedLse(lse, lseSeq);
+    if (!lse.isEmpty()) {
+        JsonDocument ld;
+        if (deserializeJson(ld, lse) == DeserializationError::Ok) {
+            int cmode = ld["r"]["control_mode"] | -1;
+            if (cmode >= 0) return cmode == 1;
+        }
+    }
+    String stj; uint32_t sSeq = 0;
+    copyCachedStatus(stj, sSeq);
+    if (!stj.isEmpty()) {
+        JsonDocument sd;
+        if (deserializeJson(sd, stj) == DeserializationError::Ok)
+            return (sd["r"]["gen"] | 0) != 0;
+    }
+    return false;
+}
+
 bool WallboxBLE::isPlusCommandFamily() const {
     // Product identity from the charger's own chg_project self-report — the
     // same source the HA device card uses. A Pulsar Plus reports par=0 stop

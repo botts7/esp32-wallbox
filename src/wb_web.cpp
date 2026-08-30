@@ -781,6 +781,10 @@ String wb_buildStatusJson() {
                     : String(",\"next_scheduled_charge\":null");
         json += ",\"plug_reminder\":" +
                 String(wallboxBLE.plugReminderActive(configMgr.get().reminderLeadMin) ? "true" : "false");
+        // Lead window (min) so hosts can recompute the reminder against a
+        // timezone-correct next charge — the firmware's next_scheduled_charge is
+        // UTC-only (mislands a local-midnight schedule a day off). 0 = disabled.
+        json += ",\"rem_lead\":" + String((unsigned)configMgr.get().reminderLeadMin);
     }
     // Charge-interval capture (#141): live summary of the real charge-burst
     // tracker. Full interval list is at /api/charge_log; these let surfaces
@@ -844,31 +848,7 @@ String wb_buildStatusJson() {
     // expose control_mode (Zentri / original Pulsar, where gen IS the flag).
     // Single source of truth: the Integration + Add-on read this instead of
     // guessing from gen.
-    {
-        String lse; uint32_t lseSeq = 0;
-        wallboxBLE.copyCachedLse(lse, lseSeq);
-        int cmode = -1;
-        if (!lse.isEmpty()) {
-            JsonDocument ld;
-            if (deserializeJson(ld, lse) == DeserializationError::Ok)
-                cmode = ld["r"]["control_mode"] | -1;
-        }
-        bool paused;
-        if (cmode >= 0) {
-            paused = (cmode == 1);
-        } else {
-            String stj; uint32_t sSeq = 0;
-            wallboxBLE.copyCachedStatus(stj, sSeq);
-            int gen = 0;
-            if (!stj.isEmpty()) {
-                JsonDocument sd;
-                if (deserializeJson(sd, stj) == DeserializationError::Ok)
-                    gen = sd["r"]["gen"] | 0;
-            }
-            paused = (gen != 0);
-        }
-        json += ",\"schedule_paused\":" + String(paused ? "true" : "false");
-    }
+    json += ",\"schedule_paused\":" + String(wallboxBLE.schedulePaused() ? "true" : "false");
     json += "}";
     return json;
 }
@@ -1416,7 +1396,7 @@ function _clearLive(){
   var cr=document.getElementById('charge-reminder');if(cr)cr.style.display='none';
   try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
 }
-function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=(window._zentri&&ZN[s.st]!==undefined)?ZN[s.st]:SN[s.st];if(s.st===4&&!window._zentri&&!(typeof s.gen==='number'&&s.gen!==0))n='Connected — not charging';_setText('v-st',n||'Code '+s.st)}var pb=document.getElementById('paused-banner');if(pb)pb.style.display=(typeof s.gen==='number'&&s.gen!==0)?'flex':'none';_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var mac=(typeof s.max_available_current==='number')?s.max_available_current:((rt&&typeof rt.max_available_current==='number')?rt.max_available_current:NaN);var mx=(mac>=6&&mac<=80)?mac:32;var sl=document.getElementById('sl');if(sl){sl.max=mx;sl.value=s.cur}var scEl=document.getElementById('sc');if(scEl)scEl.max=mx;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object')applyRT(rt);window._lastUpdate=Date.now()}
+function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=(window._zentri&&ZN[s.st]!==undefined)?ZN[s.st]:SN[s.st];if(s.st===4&&!window._zentri&&!(typeof s.gen==='number'&&s.gen!==0))n='Connected — not charging';_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var mac=(typeof s.max_available_current==='number')?s.max_available_current:((rt&&typeof rt.max_available_current==='number')?rt.max_available_current:NaN);var mx=(mac>=6&&mac<=80)?mac:32;var sl=document.getElementById('sl');if(sl){sl.max=mx;sl.value=s.cur}var scEl=document.getElementById('sc');if(scEl)scEl.max=mx;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object')applyRT(rt);window._lastUpdate=Date.now()}
 // Realtime (r_sta) fields — lock + OCPP. Shared by the polled path (rt arg) and
 // the 'realtime' WS push, so lock state updates live even when WS-driven.
 function applyRT(rt){if(!rt||typeof rt!=='object')return;if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}
@@ -1443,7 +1423,7 @@ fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return 
 var _notifs=[];
 function loadNotifs(){fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.ble!=='connected')return;return fetch('/api/command?action=bapi&met=r_not&par=null',{signal:AbortSignal.timeout(10000)}).then(function(r){return r.json()}).then(function(d){var v=d.r;if(!Array.isArray(v))return;_notifs=v;var bar=document.getElementById('notif-bar');if(!bar)return;if(v.length>0){document.getElementById('notif-count').textContent=v.length;bar.style.display='block'}else{bar.style.display='none'}})}).catch(function(){})}
 function showNotifs(){var m=document.getElementById('notif-modal');var inner=document.getElementById('notif-modal-inner');var html="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0'>&#x1F514; Notifications</h3><button onclick='document.getElementById(\"notif-modal\").style.display=\"none\"' style='background:transparent;border:none;color:var(--text2);font-size:1.6em;cursor:pointer;line-height:1'>×</button></div>";if(!_notifs.length){html+="<div style='color:var(--text3)'>No notifications</div>"}else{_notifs.forEach(function(n,i){var msg=n.message||n.msg||n.text||JSON.stringify(n);var ts=(n.timestamp||n.ts)?new Date((n.timestamp||n.ts)*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ}):'';html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='font-weight:500;font-size:.9em'>#"+(i+1)+" "+msg+"</div>"+(ts?"<div style='font-size:.78em;color:var(--text3);margin-top:4px'>"+ts+"</div>":'')+"</div>"})}inner.innerHTML=html;m.style.display='flex'}
-function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){window._zentri=!!s.zentri;updateChargeReminder(s);applyMeterCapability(s.meter);var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
+function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){window._zentri=!!s.zentri;updateChargeReminder(s);applyMeterCapability(s.meter);var _pb=document.getElementById('paused-banner');if(_pb)_pb.style.display=s.schedule_paused?'flex':'none';var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
 // Charge-reminder banner (#127). Reads next_scheduled_charge (UTC epoch)
 // + plug_reminder from /api/status — both gateway-computed, no BAPI hop.
 // Piggybacks on updateBleHealth's existing /api/status fetch (no extra
@@ -1452,6 +1432,32 @@ function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)
 function fmtCharge(epoch){
   try{return new Date(epoch*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ,weekday:'short',hour:'2-digit',minute:'2-digit'})}
   catch(e){return new Date(epoch*1000).toLocaleString()}
+}
+// The firmware's next_scheduled_charge is computed in UTC, but a schedule's
+// `days` bits are the charger's LOCAL weekday while `start` is UTC — so a
+// local-midnight window (e.g. Sydney "Sunday 00:00" == 14:00 UTC) comes out a
+// day late. Recompute it here in the charger's timezone using Intl for the
+// DST-correct offset (nothing hardcoded), from the schedules read once below.
+var _ncScheds=null;
+function _ncOffMin(epoch){try{var d=new Date(epoch*1000);var p={};new Intl.DateTimeFormat('en-US',{timeZone:CHARGER_TZ,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).formatToParts(d).forEach(function(x){p[x.type]=x.value});var hr=+p.hour;if(hr===24||isNaN(hr))hr=0;var u=Date.UTC(+p.year,(+p.month||1)-1,+p.day,hr,+p.minute||0,+p.second||0);return Math.round((u-d.getTime())/60000)}catch(e){return 0}}
+function _ncParts(epoch){var d=new Date(epoch*1000);try{var p={},W={Sun:0,Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6};new Intl.DateTimeFormat('en-US',{timeZone:CHARGER_TZ,weekday:'short',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).formatToParts(d).forEach(function(x){p[x.type]=x.value});var hr=+p.hour;if(hr===24||isNaN(hr))hr=0;return{day:W[p.weekday]||0,hour:hr,min:+p.minute||0,sec:+p.second||0}}catch(e){return{day:d.getUTCDay(),hour:d.getUTCHours(),min:d.getUTCMinutes(),sec:d.getUTCSeconds()}}}
+function _ncHHMM(v){var n=parseInt(v,10)||0;return Math.floor(n/100)*60+(n%100)}
+function nextChargeLocal(){
+  if(!_ncScheds||!_ncScheds.length)return 0;
+  var now=Math.floor(Date.now()/1000),off=_ncOffMin(now),lp=_ncParts(now);
+  var nowMow=lp.day*1440+lp.hour*60+lp.min,best=1e9;
+  _ncScheds.forEach(function(s){
+    if(!s.enabled)return;var days=parseInt(s.days,10)||0;if(!days)return;
+    var ls=(((_ncHHMM(s.start)+off)%1440)+1440)%1440;   // UTC start -> local time-of-day
+    for(var d=0;d<7;d++){if(!((days>>d)&1))continue;var dt=(d*1440+ls)-nowMow;if(dt<0)dt+=10080;if(dt<best)best=dt}
+  });
+  return best>=1e9?0:(now-lp.sec+best*60);
+}
+function loadNextChargeScheds(){
+  fetch('/api/command?action=bapi&met=r_schs&par=null',{signal:AbortSignal.timeout(8000)}).then(function(x){return x.json()}).then(function(d){
+    var sc=(d&&d.r&&Array.isArray(d.r.schedules))?d.r.schedules:((d&&Array.isArray(d.r))?d.r:null);
+    if(sc)_ncScheds=sc;
+  }).catch(function(){});
 }
 // #129: hide grid/solar surfaces when the charger has no power meter
 // (Power Boost / Power Meter accessory absent — e.g. the original Pulsar).
@@ -1474,8 +1480,16 @@ function updateChargeReminder(s){
   var b=document.getElementById('charge-reminder');if(!b)return;
   // Don't trust plug/schedule state when the charger link is down.
   if(!s||s.ble!=='connected'){b.style.display='none';return}
-  var nsc=s.next_scheduled_charge;
-  if(s.plug_reminder){
+  // Charger-local computation only — never the firmware's next_scheduled_charge
+  // (UTC-only, mislands a local-midnight window on the wrong day). Until the
+  // schedules load, show nothing rather than flash the wrong day. Recompute the
+  // plug-in reminder here too (the firmware's plug_reminder uses the UTC next
+  // charge): due within rem_lead minutes AND the car isn't plugged in.
+  var nsc=nextChargeLocal();
+  var lead=(typeof s.rem_lead==='number')?s.rem_lead:0;
+  var now=Math.floor(Date.now()/1000);
+  var plug=lead>0&&!s.car_connected&&nsc&&(nsc-now)<=lead*60;
+  if(plug){
     b.style.background='rgba(239,68,68,.10)';b.style.border='1px solid rgba(239,68,68,.35)';b.style.color='#ef4444';
     b.innerHTML='&#x1F50C; <strong>Not plugged in</strong> — scheduled charge '+(nsc?'at '+fmtCharge(nsc):'due soon')+'. Connect the cable so it can start.';
     b.style.display='block';
@@ -1489,6 +1503,7 @@ function updateChargeReminder(s){
 }
 loadNotifs();setInterval(loadNotifs,60000);
 updateBleHealth();setInterval(updateBleHealth,15000);
+loadNextChargeScheds();setInterval(loadNextChargeScheds,600000);  // schedules for the local next-charge calc; refresh slowly
 </script>
 </div>
 )HTML";
@@ -1931,6 +1946,14 @@ function showWiFi(){
 var allSchedules=[];
 var editingSid=null;
 var DAYS_M=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+// The charger stores `days` Sunday-first (bit0=Sun, confirmed: days:1==Sundays)
+// but this GUI works Monday-first (DAYS_M + the #sd day checkboxes, so the
+// weekend sits together). Rotate at the charger boundary — load and save — so
+// the display is Monday-first while the charger keeps its Sunday-first storage.
+// Sun(bit0)->bit6, Mon(bit1)->bit0, ... These apply to EVERY charger family
+// (array + Zentri); only the transport differs.
+function daysSunToMon(d){var o=0;for(var b=0;b<7;b++)if(d&(1<<b))o|=(1<<((b+6)%7));return o}
+function daysMonToSun(d){var o=0;for(var b=0;b<7;b++)if(d&(1<<b))o|=(1<<((b+1)%7));return o}
 function renderCostPanel(T){
   var DAYNAMES=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
   var h="<h2>\u{1F4B0} Charging Cost</h2>";
@@ -2120,10 +2143,8 @@ function loadSchedulesZentri(){
       if(!d||d.error||!d.r||typeof d.r.sid==='undefined'){renderSchedules(out);return;}
       var s=d.r;
       if(s.days||s.start!=='0000'||s.stop!=='0000'){
-        // This firmware's days bitmask is Sunday-first (bit0=Sun, confirmed:
-        // days:1 == Sundays). renderSchedules labels bits Monday-first
-        // (DAYS_M), so rotate Sun-first -> Mon-first: Sun(bit0)->bit6, Mon->bit0, etc.
-        var zd=0;for(var b=0;b<7;b++)if(s.days&(1<<b))zd|=(1<<((b+6)%7));
+        // Sunday-first charger bitmask -> the GUI's Monday-first convention.
+        var zd=daysSunToMon(s.days);
         out.push({sid:s.sid,start:s.start,stop:s.stop,days:zd,mcr:s.mcr,enabled:s.days?1:0,target:{type:s.nrg?1:0,value:s.nrg||0}});
       }
       i++;next();
@@ -2151,6 +2172,9 @@ function loadSchedulesArr(_retry){
       if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
       l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return
     }
+    // Charger days are Sunday-first; rotate to the GUI's Monday-first convention
+    // (same as the Zentri path) so the list, timeline, editor + heatmap all agree.
+    sc.forEach(function(s){s.days=daysSunToMon(s.days|0)});
     renderSchedules(sc);
   }).catch(function(e){
     if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
@@ -2191,7 +2215,9 @@ function toggleSchedule(sid){
   var s=allSchedules.find(function(x){return x.sid===sid});
   if(!s){toast('Schedule not found','error');return}
   var newEn=s.enabled?0:1;
-  var entry=buildSchEntry(sid,s.start,s.stop,s.days,newEn,s.mcr,s.type||0,s.target,s.repeat||1);
+  // allSchedules holds Monday-first days (rotated on load); rotate back to the
+  // charger's Sunday-first storage before sending, or a toggle corrupts the days.
+  var entry=buildSchEntry(sid,s.start,s.stop,daysMonToSun(s.days),newEn,s.mcr,s.type||0,s.target,s.repeat||1);
   var verb=newEn?'resumed':'paused';
   toast(newEn?'Resuming...':'Pausing...','info');
   fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(JSON.stringify({schedules:[entry]})),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
@@ -2254,8 +2280,8 @@ function saveSchZentri(){
   var sp=localToUtc(document.getElementById('se').value);
   var dForm=0;document.querySelectorAll('#sd input:checked').forEach(function(c){dForm+=parseInt(c.value)});
   if(!dForm){toast('Select at least one day','error');return}
-  // form day bits are Monday-first; charger is Sunday-first -> Sun bit=(b+1)%7
-  var dZ=0;for(var b=0;b<7;b++)if(dForm&(1<<b))dZ|=(1<<((b+1)%7));
+  // form day bits are Monday-first; charger stores Sunday-first
+  var dZ=daysMonToSun(dForm);
   var sid;
   if(editingSid!==null){sid=editingSid;}
   else{var used={};allSchedules.forEach(function(s){used[s.sid]=1});sid=0;while(sid<4&&used[sid])sid++;if(sid>=4){toast('All 4 schedule slots are in use — edit or delete one first','error');return}}
@@ -2273,6 +2299,7 @@ function saveSch(){
   var sp=localToUtc(document.getElementById('se').value);
   var d=0;document.querySelectorAll('#sd input:checked').forEach(function(c){d+=parseInt(c.value)});
   if(!d){toast('Select at least one day','error');return}
+  d=daysMonToSun(d);   // form is Monday-first; charger stores Sunday-first
   var mcr=parseInt(document.getElementById('sc').value);
   var ekwh=parseInt(document.getElementById('se2').value)||0;
   var tgt=ekwh>0?{type:1,value:ekwh*1000}:{type:0,value:0};
