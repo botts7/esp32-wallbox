@@ -4,6 +4,35 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.11] - 2026-09-02
+
+### Fixed
+- **Dashboard "House Power" now sums all three phases (#51).** The front-page
+  House Power stat cell was bound to `r_dca.p1` (phase 1 only), while the
+  power-flow diagram and the Home Assistant `house_power` entity already summed
+  `p1+p2+p3`. On a single-phase unit the two matched; on a 3-phase meter (e.g. a
+  Carlo Gavazzi EM340 behind a Pulsar Plus) the headline number showed only L1.
+  The cell now shows the sum, matching the diagram and HA. Reported by
+  ollitaipale-cyber and spacemonkey780. The per-phase `grid_power_l1/l2/l3` HA
+  entities are unchanged and remain correct as individual phase values.
+
+## [3.2.10] - 2026-08-31
+
+### Fixed
+- **Schedule days and next-charge are now computed in the charger's local
+  timezone.** Firmware anchored schedules on the UTC weekday, so a Sunday
+  00:00 schedule displayed (and the next-charge computed) as Monday. Days and
+  the next scheduled charge are now resolved against the charger's local
+  timezone across the gateway dashboard and the HA-facing fields.
+- **Plug-in reminder recomputed in local time; `rem_lead` exposed** on
+  `/api/status` so the Add-on and Integration can render a first-paint-correct
+  local reminder instead of the UTC-derived value.
+- **"Schedule Paused / manual override" no longer driven by green energy.**
+  Both the MQTT `schedule_paused` entity and the gateway dashboard banner used
+  `r_dat.gen` (a green-energy flag on MAX Pro) instead of the real control-mode
+  signal, so the banner appeared while the official app showed active solar
+  charging. Both now key off `control_mode`.
+
 ## [3.2.9] - 2026-08-21
 
 ### Fixed
