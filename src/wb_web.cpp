@@ -2182,7 +2182,13 @@ function loadSchedulesArr(_retry){
     }
     // Charger days are Sunday-first; rotate to the GUI's Monday-first convention
     // (same as the Zentri path) so the list, timeline, editor + heatmap all agree.
-    sc.forEach(function(s){s.days=daysSunToMon(s.days|0)});
+    sc.forEach(function(s){
+      // Pre-6.11 Plus (e.g. 6.7.41) omits `enabled` from r_schs entirely — a
+      // schedule with days set is active (#50). Only infer when it's missing, so
+      // firmware that does report enabled (MAX) is left untouched.
+      if(s.enabled===undefined||s.enabled===null)s.enabled=((s.days|0)?1:0);
+      s.days=daysSunToMon(s.days|0);
+    });
     renderSchedules(sc);
   }).catch(function(e){
     if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
