@@ -4,6 +4,23 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.12] - 2026-09-02
+
+### Fixed
+- **Authenticated writes on PIN-protected chargers no longer silently
+  no-op (#47).** `read_pin` returns the charger's own Bluetooth passcode, but
+  the gateway only authenticated when a passcode had been manually configured
+  in its settings. With none configured it logged "Charger has PIN but none
+  configured" and skipped auth entirely. Unauthenticated, the charger silently
+  no-ops every authenticated write (lock/unlock, schedule writes, set-current)
+  and returns `{"r":null}` with no state change, which looked like "MQTT/HTTP
+  write commands are ignored" while reads (which need no auth) kept working.
+  The gateway now adopts the charger-reported passcode on connect when none is
+  configured, authenticates with it, and persists it, so writes work from the
+  first boot with no manual step or reconnect. Only runs when no passcode is
+  set, so a manually-configured PIN is unaffected. Root-caused on-device by
+  Dennyhim321 (Pulsar Plus prj08, firmware 6.7.41).
+
 ## [3.2.11] - 2026-09-02
 
 ### Fixed
