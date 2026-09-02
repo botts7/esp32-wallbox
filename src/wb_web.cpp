@@ -1696,7 +1696,12 @@ function showTab(n){document.querySelectorAll('.tab-panel').forEach(function(p,i
 var DAYS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 var CHARGER_TZ='UTC';
 try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
-var tzReady=fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
+// tzLoaded flips true once the charger's timezone has been fetched (or the
+// fetch failed and we fall back to the browser tz). Schedule read/write guard
+// on it so a Save/render can't run before CHARGER_TZ is known and convert with
+// the wrong offset — shifting stored times by hours (#50).
+var tzLoaded=false;
+var tzReady=fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){}).then(function(){tzLoaded=true;});
 // Get charger-tz minutes-offset from UTC (e.g. AEST = +600). Computed
 // from the browser's Intl support so it handles DST correctly across
 // the year. The old approach used Date.toLocaleString round-trips
@@ -2120,6 +2125,9 @@ function renderSchedules(sc,readonly){
 // one slot at a time via r_sch (bare-int sid). Detect via /api/status and
 // dispatch: Zentri -> per-sid reader (view-only); everyone else -> r_schs array.
 function loadSchedules(_retry){
+  // Wait for the charger timezone before rendering, so utcToLocal uses the right
+  // offset and times don't flash wrong then correct (#50).
+  if(!tzLoaded){tzReady.then(function(){loadSchedules(_retry)});return;}
   var l=document.getElementById('sch-list');if(l)l.innerHTML="<span class='spinner'></span> Loading...";
   fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(x){return x.json()}).then(function(st){
     if(st&&st.zentri){window._schZentri=true;loadSchedulesZentri();}else{window._schZentri=false;loadSchedulesArr(_retry);}
@@ -2310,6 +2318,9 @@ function saveSchZentri(){
   }).catch(function(e){toast('Error: '+(e.message||e),'error')});
 }
 function saveSch(){
+  // Don't convert form times to UTC until the charger timezone is known, or the
+  // offset used to write won't match the one used to display (#50).
+  if(!tzLoaded){tzReady.then(function(){saveSch()});return;}
   if(window._schZentri){saveSchZentri();return;}
   var st=localToUtc(document.getElementById('ss').value);
   var sp=localToUtc(document.getElementById('se').value);
