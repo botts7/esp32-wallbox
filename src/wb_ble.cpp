@@ -1029,8 +1029,19 @@ bool WallboxBLE::_authenticate() {
     _pinRequired = true;
 
     if (_pin.isEmpty()) {
-        Log.println("[BLE] WARNING: Charger has PIN but none configured!");
-        return true;
+        // The charger just handed us its own PIN via read_pin. Adopt it
+        // instead of skipping auth: without authenticating, the charger
+        // silently no-ops every authenticated write (w_lck, schedules,
+        // current, ...) — it returns {"r":null} with no state change, which
+        // looked like "MQTT/HTTP writes ignored" (#47). Only reached when no
+        // PIN was configured, so this strictly adds auth where there was
+        // none. Persist it so the next boot authenticates immediately and the
+        // web UI's stored-PIN state reflects reality. (The value is never
+        // logged.)
+        Log.println("[BLE] No PIN configured — adopting charger-reported PIN (#47)");
+        _pin = pin;
+        configMgr.mut().blePin = _pin;
+        configMgr.save();
     }
 
     Log.println("[BLE] Authenticating with PIN...");
