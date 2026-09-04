@@ -4,6 +4,29 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.13] - 2026-09-04
+
+### Fixed
+- **Schedule writes now work on pre-6.11 Pulsar Plus firmware (e.g. 6.7.41,
+  #50).** That firmware predates the `s_sch` method and rejected every schedule
+  write with "No dispatch method found", even though the official app writes
+  schedules fine. The gateway now falls back to the legacy packed `w_sch` on
+  that error, with the format decoded on-device (thanks to @AJKoster):
+  `sid(2) + startHHMM + stopHHMM + days(3)`, where days is a zero-padded
+  Sunday-first bitmask (Sun=1…Sat=64) and start/stop are HHMM UTC. Also on this
+  path: schedule times wait for the charger timezone to load before converting
+  (no offset mismatch); the enabled flag is inferred from the day mask when the
+  firmware omits it from `r_schs` (schedules no longer all show "Off"); and new
+  schedules are allocated from slot 1 (slot 0 is not usable on this firmware and
+  caused garbled times + overwrites). Add/edit/delete now work end-to-end.
+
+### Added
+- **Command source logging (#26).** Every state-changing `/api/command` is now
+  logged as `[CMD] <action> (met=… par=…) via HTTP <client-ip>`, mirroring the
+  MQTT path's `[MQTT] Received: <topic> = <payload>`. Reads are skipped so status
+  polls don't flood the log. Makes a stray external write (e.g. an HA automation
+  publishing a stop) traceable to its source.
+
 ## [3.2.12] - 2026-09-02
 
 ### Fixed
