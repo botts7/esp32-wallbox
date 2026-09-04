@@ -2366,11 +2366,14 @@ function saveSch(){
   // enabled flag aren't carried by w_sch, so they're silently dropped on that fw.
   function onSchSaved(){toast('Schedule #'+sid+' '+verb,'success');cancelEdit();scheduleReconcile();}
   function saveViaWsch(){
-    // Legacy w_sch is a 4-slot model (sid 0..3), unlike s_sch's monotonic sid,
-    // so pick the slot the same way the original-Pulsar path does.
+    // Legacy w_sch is a 4-slot model. On the pre-6.11 Plus the slots are
+    // 1-based (1..4): the official app and every working write use sid 1-3 and
+    // r_schs never reports sid 0 — writing sid 0 misbehaved (garbled add +
+    // overwrote the existing schedule), #50. So allocate from 1. (The original
+    // Pulsar/Zentri keeps its own 0-based logic in saveSchZentri.)
     var wsid;
     if(editingSid!==null){wsid=editingSid;}
-    else{var used={};allSchedules.forEach(function(s){used[s.sid]=1});wsid=0;while(wsid<4&&used[wsid])wsid++;if(wsid>=4){toast('All 4 schedule slots are in use — edit or delete one first','error');return}}
+    else{var used={};allSchedules.forEach(function(s){used[s.sid]=1});wsid=1;while(wsid<=4&&used[wsid])wsid++;if(wsid>4){toast('All schedule slots are in use — edit or delete one first','error');return}}
     var par=_wSchPar(wsid,st,sp,d);
     fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(par),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r2){
       if(r2&&r2.error){toast('Save failed: '+((r2.error&&r2.error.message)||'rejected by charger'),'error');return}
