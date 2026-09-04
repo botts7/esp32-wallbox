@@ -1720,7 +1720,12 @@ function showTab(n){document.querySelectorAll('.tab-panel').forEach(function(p,i
 var DAYS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 var CHARGER_TZ='UTC';
 try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
-var tzReady=fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
+// tzLoaded flips true once the charger's timezone has been fetched (or the
+// fetch failed and we fall back to the browser tz). Schedule read/write guard
+// on it so a Save/render can't run before CHARGER_TZ is known and convert with
+// the wrong offset — shifting stored times by hours (#50).
+var tzLoaded=false;
+var tzReady=fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){}).then(function(){tzLoaded=true;});
 // Get charger-tz minutes-offset from UTC (e.g. AEST = +600). Computed
 // from the browser's Intl support so it handles DST correctly across
 // the year. The old approach used Date.toLocaleString round-trips
@@ -2144,6 +2149,9 @@ function renderSchedules(sc,readonly){
 // one slot at a time via r_sch (bare-int sid). Detect via /api/status and
 // dispatch: Zentri -> per-sid reader (view-only); everyone else -> r_schs array.
 function loadSchedules(_retry){
+  // Wait for the charger timezone before rendering, so utcToLocal uses the right
+  // offset and times don't flash wrong then correct (#50).
+  if(!tzLoaded){tzReady.then(function(){loadSchedules(_retry)});return;}
   var l=document.getElementById('sch-list');if(l)l.innerHTML="<span class='spinner'></span> Loading...";
   fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(x){return x.json()}).then(function(st){
     if(st&&st.zentri){window._schZentri=true;loadSchedulesZentri();}else{window._schZentri=false;loadSchedulesArr(_retry);}
@@ -2198,7 +2206,13 @@ function loadSchedulesArr(_retry){
     }
     // Charger days are Sunday-first; rotate to the GUI's Monday-first convention
     // (same as the Zentri path) so the list, timeline, editor + heatmap all agree.
-    sc.forEach(function(s){s.days=daysSunToMon(s.days|0)});
+    sc.forEach(function(s){
+      // Pre-6.11 Plus (e.g. 6.7.41) omits `enabled` from r_schs entirely — a
+      // schedule with days set is active (#50). Only infer when it's missing, so
+      // firmware that does report enabled (MAX) is left untouched.
+      if(s.enabled===undefined||s.enabled===null)s.enabled=((s.days|0)?1:0);
+      s.days=daysSunToMon(s.days|0);
+    });
     renderSchedules(sc);
   }).catch(function(e){
     if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
@@ -2238,6 +2252,9 @@ function newSchedule(){
 function toggleSchedule(sid){
   var s=allSchedules.find(function(x){return x.sid===sid});
   if(!s){toast('Schedule not found','error');return}
+  // Pre-6.11 Plus / original Pulsar store schedules via the packed w_sch, which
+  // carries no enabled bit — there is no pause/resume, you delete to disable (#50).
+  if(_schLegacy()){toast('Pause/resume is not available on this charger firmware — delete the schedule to disable it','error');return}
   var newEn=s.enabled?0:1;
   // allSchedules holds Monday-first days (rotated on load); rotate back to the
   // charger's Sunday-first storage before sending, or a toggle corrupts the days.
@@ -2245,7 +2262,8 @@ function toggleSchedule(sid){
   var verb=newEn?'resumed':'paused';
   toast(newEn?'Resuming...':'Pausing...','info');
   fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(JSON.stringify({schedules:[entry]})),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
-    if(r&&r.error){toast(r.error,'error');return}
+    if(_isNoDispatch(r)){window._schLegacyWsch=true;_schScopeForm();toast('Pause/resume is not available on this charger firmware — delete the schedule to disable it','error');return}
+    if(r&&r.error){toast('Toggle failed: '+((r.error&&r.error.message)||r.error),'error');return}
     toast('Schedule #'+sid+' '+verb,'success');
     // optimistic: flip the cached flag + redraw now; reconcile shortly
     var cs=allSchedules.find(function(x){return x.sid===sid});if(cs)cs.enabled=newEn;
@@ -2275,7 +2293,7 @@ function cancelEdit(){
 // #12: the original Pulsar's w_sch write carries only start/stop/days, so hide
 // the Power/Energy-limit row and the Enabled selector in the editor for it.
 function _schScopeForm(){
-  var z=!!window._schZentri,sc=document.getElementById('sc'),sn=document.getElementById('sn');
+  var z=_schLegacy(),sc=document.getElementById('sc'),sn=document.getElementById('sn');
   try{if(sc&&sc.closest('.row'))sc.closest('.row').style.display=z?'none':''}catch(e){}
   try{if(sn&&sn.parentNode)sn.parentNode.style.display=z?'none':''}catch(e){}
 }
@@ -2295,6 +2313,25 @@ function buildSchEntry(sid,start,stop,days,enabled,mcr,type,target,repeat){
           mcr:mcr|0,type:type|0,enabled:enabled|0,
           target:target||{type:0,value:0},repeat:(repeat===undefined?1:repeat|0)}
 }
+// Legacy w_sch packed string for firmware that predates s_sch (the original
+// Pulsar/Zentri AND pre-6.11 Pulsar Plus like fw 6.7.41, #50):
+// "<sid><startHHMM><stopHHMM><days3>" — UTC times, a Sunday-first 3-digit day
+// bitmask, no power/energy/enabled fields. Insert/edit share the call (slot =
+// sid); delete = the same slot all-zeroed.
+// Packed legacy schedule string. Confirmed on Plus 6.7.41 (#50, AJKoster):
+// AA SHSM EHEM DDD = sid(2) + startHHMM(4) + stopHHMM(4) + days(3), where days is
+// a zero-padded Sunday-first bitmask (Sun=1,Mon=2,Tue=4,Wed=8,Thu=16,Fri=32,Sat=64)
+// and start/stop are HHMM UTC. The original Pulsar (Zentri) uses a 1-digit sid.
+function _wSchPar(sid,stUtc,spUtc,dSun){
+  var s=window._schZentri?(''+sid):('0'+sid).slice(-2);
+  return s+stUtc+spUtc+('00'+dSun).slice(-3);
+}
+// True once we've learned this charger only accepts the legacy w_sch (either
+// it's an original Pulsar, or an s_sch write came back "No dispatch method
+// found"). Drives the packed-string path + form scoping without a fw version
+// table (#50).
+function _schLegacy(){return !!window._schZentri||!!window._schLegacyWsch;}
+function _isNoDispatch(r){return !!(r&&r.error&&/no dispatch method/i.test(r.error.message||''));}
 // #12: original Pulsar schedule write — w_sch with a packed string
 // "<sid><startHHMM><stopHHMM><days3>": UTC times, a Sunday-first 3-digit day
 // bitmask, no power/energy fields. Insert/edit use the same call; the slot is
@@ -2309,7 +2346,7 @@ function saveSchZentri(){
   var sid;
   if(editingSid!==null){sid=editingSid;}
   else{var used={};allSchedules.forEach(function(s){used[s.sid]=1});sid=0;while(sid<4&&used[sid])sid++;if(sid>=4){toast('All 4 schedule slots are in use — edit or delete one first','error');return}}
-  var par=''+sid+st+sp+('00'+dZ).slice(-3);  // sid(1)+start(4)+stop(4)+days(3)
+  var par=_wSchPar(sid,st,sp,dZ);  // sid(1)+start(4)+stop(4)+days(3)
   var verb=(editingSid!==null)?'updated':'added';
   toast('Saving...','info');
   fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(par),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
@@ -2318,6 +2355,9 @@ function saveSchZentri(){
   }).catch(function(e){toast('Error: '+(e.message||e),'error')});
 }
 function saveSch(){
+  // Don't convert form times to UTC until the charger timezone is known, or the
+  // offset used to write won't match the one used to display (#50).
+  if(!tzLoaded){tzReady.then(function(){saveSch()});return;}
   if(window._schZentri){saveSchZentri();return;}
   var st=localToUtc(document.getElementById('ss').value);
   var sp=localToUtc(document.getElementById('se').value);
@@ -2343,13 +2383,35 @@ function saveSch(){
   var p=JSON.stringify({schedules:[entry]});
   var verb=(editingSid!==null)?'updated':'added';
   toast('Saving...','info');
+  // #50: pre-6.11 Pulsar Plus (e.g. fw 6.7.41) has no s_sch method and replies
+  // "No dispatch method found". Fall back to the legacy packed w_sch (the same
+  // format the original-Pulsar path uses), then remember it so the form scopes
+  // itself and future writes go straight to w_sch. Power/energy limit and the
+  // enabled flag aren't carried by w_sch, so they're silently dropped on that fw.
+  function onSchSaved(){toast('Schedule #'+sid+' '+verb,'success');cancelEdit();scheduleReconcile();}
+  function saveViaWsch(){
+    // Legacy w_sch is a 4-slot model. On the pre-6.11 Plus the slots are
+    // 1-based (1..4): the official app and every working write use sid 1-3 and
+    // r_schs never reports sid 0 — writing sid 0 misbehaved (garbled add +
+    // overwrote the existing schedule), #50. So allocate from 1. (The original
+    // Pulsar/Zentri keeps its own 0-based logic in saveSchZentri.)
+    var wsid;
+    if(editingSid!==null){wsid=editingSid;}
+    else{var used={};allSchedules.forEach(function(s){used[s.sid]=1});wsid=1;while(wsid<=4&&used[wsid])wsid++;if(wsid>4){toast('All schedule slots are in use — edit or delete one first','error');return}}
+    var par=_wSchPar(wsid,st,sp,d);
+    fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(par),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r2){
+      if(r2&&r2.error){toast('Save failed: '+((r2.error&&r2.error.message)||'rejected by charger'),'error');return}
+      window._schLegacyWsch=true;_schScopeForm();
+      toast('Schedule #'+wsid+' '+verb,'success');cancelEdit();scheduleReconcile();
+    }).catch(function(e){toast('Error: '+(e.message||e),'error')});
+  }
+  if(window._schLegacyWsch){saveViaWsch();return;}
   fetch('/api/command?action=bapi&met=s_sch&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
-    if(r&&r.error){toast(r.error,'error');return}
-    toast('Schedule #'+sid+' '+verb,'success');
-    cancelEdit();
+    if(_isNoDispatch(r)){saveViaWsch();return;}
+    if(r&&r.error){toast('Save failed: '+((r.error&&r.error.message)||r.error),'error');return}
     // Async write — reconcile on a debounced timer so the read-back
     // doesn't race the still-pending s_sch (which stalls on busy BLE).
-    scheduleReconcile();
+    onSchSaved();
   }).catch(function(e){toast('Error: '+(e.message||e),'error')});
 }
 function deleteSchedule(sid){
@@ -2364,18 +2426,22 @@ function deleteSchedule(sid){
 // ("<sid>00000000000"), which the charger reports back as an empty slot.
 function doDeleteScheduleZentri(sid){
   toast('Deleting schedule #'+sid+'...','info');
-  fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(''+sid+'00000000000'),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+  fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(_wSchPar(sid,'0000','0000',0)),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
     if(r&&r.error){toast('Delete failed (code '+(r.error&&r.error.code!==undefined?r.error.code:'?')+')','error');loadSchedules();return;}
     toast('Schedule #'+sid+' deleted','success');setTimeout(loadSchedules,1200);
   }).catch(function(e){toast('Delete error: '+(e.message||e),'error');loadSchedules();});
 }
 function doDeleteSchedule(sid){
-  if(window._schZentri){doDeleteScheduleZentri(sid);return;}
+  // Original Pulsar and pre-6.11 Plus (#50) both delete via the zeroed-slot
+  // packed w_sch; the latter is detected lazily (window._schLegacyWsch) or on a
+  // clr_sch "No dispatch method found" reply below.
+  if(window._schZentri||window._schLegacyWsch){doDeleteScheduleZentri(sid);return;}
   // Not optimistic: keep the row until the charger confirms, so a failed or
   // timed-out delete gives honest feedback instead of the row vanishing then
   // reappearing. Always reload after (success or fail) to show the true state.
   toast('Deleting schedule #'+sid+'...','info');
   fetch('/api/command?action=bapi&met=clr_sch&par='+encodeURIComponent(JSON.stringify({sid:[sid]})),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+    if(_isNoDispatch(r)){window._schLegacyWsch=true;_schScopeForm();doDeleteScheduleZentri(sid);return;}
     if(r&&r.error){
       var m=(r.error&&r.error.message)?r.error.message:'rejected by charger';
       toast('Delete failed: '+m,'error');loadSchedules();return;
