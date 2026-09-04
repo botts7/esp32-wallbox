@@ -2294,7 +2294,14 @@ function buildSchEntry(sid,start,stop,days,enabled,mcr,type,target,repeat){
 // "<sid><startHHMM><stopHHMM><days3>" — UTC times, a Sunday-first 3-digit day
 // bitmask, no power/energy/enabled fields. Insert/edit share the call (slot =
 // sid); delete = the same slot all-zeroed.
-function _wSchPar(sid,stUtc,spUtc,dSun){return ''+sid+stUtc+spUtc+('00'+dSun).slice(-3);}
+// Packed legacy schedule string. Confirmed on Plus 6.7.41 (#50, AJKoster):
+// AA SHSM EHEM DDD = sid(2) + startHHMM(4) + stopHHMM(4) + days(3), where days is
+// a zero-padded Sunday-first bitmask (Sun=1,Mon=2,Tue=4,Wed=8,Thu=16,Fri=32,Sat=64)
+// and start/stop are HHMM UTC. The original Pulsar (Zentri) uses a 1-digit sid.
+function _wSchPar(sid,stUtc,spUtc,dSun){
+  var s=window._schZentri?(''+sid):('0'+sid).slice(-2);
+  return s+stUtc+spUtc+('00'+dSun).slice(-3);
+}
 // True once we've learned this charger only accepts the legacy w_sch (either
 // it's an original Pulsar, or an s_sch write came back "No dispatch method
 // found"). Drives the packed-string path + form scoping without a fw version
@@ -2392,7 +2399,7 @@ function deleteSchedule(sid){
 // ("<sid>00000000000"), which the charger reports back as an empty slot.
 function doDeleteScheduleZentri(sid){
   toast('Deleting schedule #'+sid+'...','info');
-  fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(''+sid+'00000000000'),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
+  fetch('/api/command?action=bapi&met=w_sch&par='+encodeURIComponent(_wSchPar(sid,'0000','0000',0)),{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(r){
     if(r&&r.error){toast('Delete failed (code '+(r.error&&r.error.code!==undefined?r.error.code:'?')+')','error');loadSchedules();return;}
     toast('Schedule #'+sid+' deleted','success');setTimeout(loadSchedules,1200);
   }).catch(function(e){toast('Delete error: '+(e.message||e),'error');loadSchedules();});
