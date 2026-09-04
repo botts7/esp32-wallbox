@@ -1035,6 +1035,19 @@ int wb_web_tokens_remaining() {
     return (int)_tbTokens;
 }
 
+// A "write" BAPI method mutates charger/gateway state (as opposed to r_*/g_*
+// reads). Used to log the SOURCE of state-changing commands (#26) without
+// flooding the log with the constant read-polls that also hit /api/command.
+static bool wb_isWriteMet(const char* m) {
+    if (!m || !*m) return false;
+    if (!strncmp(m, "w_", 2)) return true;   // w_cha, w_lck, w_mxI, w_sch, w_socr
+    if (!strncmp(m, "s_", 2)) return true;   // s_sch, s_ecos, s_alo, s_tzn, s_cmode, ...
+    if (!strncmp(m, "clr_", 4)) return true; // clr_sch
+    if (!strcmp(m, "rebot")) return true;    // reboot
+    if (!strcmp(m, "sulck")) return true;    // socket locking (no s_ prefix)
+    return false;
+}
+
 static void handleApiCommand() {
     if (!checkAuth()) return;
     if (!wallboxBLE.isConnected()) {
@@ -1096,6 +1109,17 @@ static void handleApiCommand() {
     }
     const char* met = plan.met.c_str();
     String par = plan.par;
+
+    // #26: log the source of every state-changing command so a stray external
+    // write (e.g. an HA automation publishing a stop) is traceable in the log,
+    // matching the MQTT path's "[MQTT] Received: <topic> = <payload>" line.
+    // Reads are skipped so the constant status polls don't flood the buffer.
+    if (wb_isWriteMet(met)) {
+        Log.printf("[CMD] %s (met=%s par=%s) via HTTP %s\n",
+                   action.length() ? action.c_str() : "bapi", met,
+                   par.length() ? par.c_str() : "-",
+                   http.client().remoteIP().toString().c_str());
+    }
 
     // Sync escape hatch: preserves the pre-2.7.0 byte-for-byte
     // response shape AND the inflight cap for callers that rely on
