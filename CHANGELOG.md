@@ -4,6 +4,21 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.14] - 2026-09-07
+
+### Fixed
+- **"Grid Energy" sensor read exactly 10× too high (#52).** The `grid_energy`
+  MQTT discovery template divided `r_sta.grid` by 100 (the 10-Wh-unit convention
+  its siblings `en`/`gen` use), but `r_sta.grid` is actually in plain Wh, so the
+  cumulative Grid Energy sensor reported 10× the real value (an impossible
+  ~70 kW average during a normal single-phase charge). Confirmed on two chargers
+  via matched-timestamp history — a Pulsar Plus (6.7.41) and a MAX Pro both had
+  `grid_energy` tracking exactly 10.0× the `grid_energy_session` sensor. Now
+  divides by 1000. Universal (not charger-specific). The HACS integration
+  already exposes only the session-based `grid_energy_session`, so it was
+  unaffected. Reported by Dennyhim321. The per-session `grid_energy_session`
+  sensor was always correct and is unchanged.
+
 ## [3.2.13] - 2026-09-04
 
 ### Fixed
