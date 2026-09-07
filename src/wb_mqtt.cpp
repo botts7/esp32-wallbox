@@ -1081,7 +1081,11 @@ const DiscoveryEntry kEntries[] = {
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
     /*  5 */ { EntityKind::SENSOR, "grid_energy", "Grid Energy", "mdi:transmission-tower",
-               TopicSlot::STATUS, "{{ (value_json.r.grid / 100) | round(2) }}",
+               // r_sta.grid is in Wh (÷1000 → kWh), NOT the 10-Wh units its
+               // siblings en/gen use. The old ÷100 read exactly 10x too high;
+               // confirmed on both a Pulsar Plus (6.7.41) and a MAX Pro, where
+               // grid_energy tracked 10.0x the grid_energy_session sensor (#52).
+               TopicSlot::STATUS, "{{ (value_json.r.grid / 1000) | round(2) }}",
                "kWh", "energy", "total_increasing", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
