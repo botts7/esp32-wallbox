@@ -4,7 +4,7 @@
 
 # ESP32 Wallbox BLE Gateway
 
-> **Local BLE → MQTT gateway for the Wallbox Pulsar MAX. Full Home Assistant control with zero cloud, in ~$15 of hardware.**
+> **Local BLE → MQTT gateway for Wallbox Pulsar chargers — MAX, MAX Pro, Plus, Pro, and the original Pulsar. Full Home Assistant control with zero cloud, in ~$15 of hardware.**
 
 <p align="center">
   <img src="docs/screenshots/dashboard.png" alt="Wallbox Gateway dashboard" width="320">
@@ -25,8 +25,23 @@
 
 > **Disclaimer:** Independent open-source project. Not affiliated with, endorsed by, or connected to Wallbox Chargers SL. Use at your own risk; modifying charger settings may void your warranty.
 
+### Compatibility
+
+**Chargers:** Pulsar MAX, MAX Pro, Plus (including pre-6.11 firmware, via a legacy schedule-write fallback), Pulsar Pro, and the original (Zentri) Pulsar. Reads work across all of them; a few writes are firmware-specific (see below).
+
+**Boards:** any ESP32-S3. A board **with PSRAM** is recommended (e.g. ESP32-S3-WROOM-1/1U N16R8, S3-DevKitC-1) — no-PSRAM boards run but have tighter heap headroom under sustained load. The classic ESP32-WROOM (`esp32dev`) is also built and supported. An experimental wired-Ethernet build exists for the Waveshare ESP32-S3-ETH.
+
+**Known limitation:** charger **lock/unlock** does not yet work on pre-6.11 Pulsar Plus firmware — `w_lck` is accepted but no-ops, and the exact parameter the official app uses isn't known yet (#47). Everything else (status, start/stop, current, schedules, eco-smart) works on that firmware.
+
 ### Recent releases
 
+- **3.2.15** — **per-phase L1/L2/L3 grid power** shown under House Power on the dashboard for 3-phase / Power Boost meters (#51); BAPI status **code 19** labelled "Connected (No Current)" (#9).
+- **3.2.14** — **Grid Energy sensor read 10× too high** (#52): `r_sta.grid` is in Wh, not the 10-Wh unit its siblings use, so the cumulative Grid Energy was 10× over (confirmed on both Plus and MAX Pro). Divided by 1000 now; the per-session sensor was always correct.
+- **3.2.13** — **schedule writes on pre-6.11 Pulsar Plus** (#50): firmware without `s_sch` now falls back to the legacy packed `w_sch` (format decoded on-device), so add / edit / delete work. Plus **command-source logging** (#26): every state-changing `/api/command` records its origin, so a stray external write is traceable.
+- **3.2.12** — **authenticated writes on PIN-protected chargers** (#47): the gateway adopts the charger-reported Bluetooth passcode on connect, so lock / current / schedule writes are no longer silently no-op'd when no PIN was configured.
+- **3.2.11** — **House Power** now sums all three phases (was showing L1 only on 3-phase meters) (#51).
+- **3.2.10** — schedule days + next-charge computed in the **charger's local timezone**; the "Schedules / Eco-Smart paused" signal keys off the real control mode, not the green-energy flag.
+- **3.2.9** — `/api/status.board` reports the real build target so HA OTA picks the right asset; releases attach a classic ESP32-WROOM (`esp32dev`) OTA binary.
 - **3.2.8** — **Dynamic Power Sharing toggle no longer corrupts the config**
   (#181): `s_psh` is a whole-record replace, so the toggle now replays the full
   record (min current / group count survive) instead of zeroing the omitted

@@ -4,6 +4,19 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.15] - 2026-09-08
+
+### Added
+- **Per-phase grid power (L1/L2/L3) on the dashboard (#51 follow-up).** The
+  House Power cell now shows the per-phase split beneath it, so Power Boost
+  balancing is visible. Data-driven: only shown when the meter reports L2/L3
+  voltage (a genuine 3-phase meter); single-phase chargers are unchanged. The
+  values were already fetched (House Power sums them), just not displayed.
+- **BAPI status code 19 is labelled "Connected (No Current)"** in the web-UI and
+  the MQTT `charger_status` template, instead of falling through to "Code 19".
+  It's the cable-connected-but-not-yet-drawing precursor state, confirmed by two
+  users (hass-wallbox-gateway #9). Mirrors the integration's status map.
+
 ## [3.2.14] - 2026-09-07
 
 ### Fixed
