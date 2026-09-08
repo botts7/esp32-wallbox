@@ -1109,7 +1109,8 @@ const DiscoveryEntry kEntries[] = {
                "8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',"
                "10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',"
                "13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',"
-               "16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)'} %}"
+               "16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)',"
+               "19:'Connected (No Current)'} %}"
                "{{ m.get(s, 'Code ' ~ s) }}",
                nullptr, nullptr, nullptr, nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
