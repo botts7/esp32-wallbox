@@ -1296,7 +1296,7 @@ static const char* DASH_BODY_SOURCE = R"HTML(
     <div><label>Max Current</label><div id='v-mc' class='info-value'>--</div></div>
     <div><label>Socket Lock</label><div id='v-lk' class='info-value'>--</div></div>
     <div id='cell-vt'><label>Mains Voltage</label><div id='v-vt' class='info-value'>--</div></div>
-    <div id='cell-gp'><label title='Whole-house power from charger MID meter'>House Power</label><div id='v-gp' class='info-value'>--</div></div>
+    <div id='cell-gp'><label title='Whole-house power from charger MID meter'>House Power</label><div id='v-gp' class='info-value'>--</div><div id='v-gp-phases' style='font-size:.72em;color:var(--text3);margin-top:2px;line-height:1.3'></div></div>
   </div>
 </div>
 
@@ -1323,7 +1323,7 @@ static const char* DASH_BODY_SOURCE = R"HTML(
 // benvanmierloo PR #7). Confirmed on both Pulsar MAX and Pulsar Plus
 // — there's no MAX-specific cloud-code variant, the older
 // model-aware split was incorrect.
-var SN={0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',4:'Paused',5:'Charge Complete',6:'Locked',7:'Error',8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)'};
+var SN={0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',4:'Paused',5:'Charge Complete',6:'Locked',7:'Error',8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)',19:'Connected (No Current)'};
 // Original/Zentri Pulsar (#12) reports a small status enum that doesn't line
 // up with the MAX 0-18 codes (esp. st4 = charge ramp, not "Paused"). Used in
 // place of SN when /api/status reports zentri:true.
@@ -1424,7 +1424,7 @@ function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st=
 // Realtime (r_sta) fields — lock + OCPP. Shared by the polled path (rt arg) and
 // the 'realtime' WS push, so lock state updates live even when WS-driven.
 function applyRT(rt){if(!rt||typeof rt!=='object')return;if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}
-function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=house+' W'}/* House Power = sum of all phases (p1+p2+p3), not just p1 — the cell was showing phase 1 only on 3-phase meters (#51). */_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
+function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=house+' W'}var ph=document.getElementById('v-gp-phases');if(ph){if((d.v2||0)>0||(d.v3||0)>0){ph.textContent='L1 '+(d.p1||0)+' · L2 '+(d.p2||0)+' · L3 '+(d.p3||0)+' W'}else{ph.textContent=''}}/* House Power = sum of all phases (p1+p2+p3), not just p1 — the cell was showing phase 1 only on 3-phase meters (#51). Per-phase L1/L2/L3 shown only when the meter reports L2/L3 voltage, i.e. a genuine 3-phase meter — data-driven, not charger-model-specific (#51 follow-up). */_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
 function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null'){/* BLE not delivering charger status — reset power flow + session cache so the animation can't outlive a BLE drop on stale localStorage values */_pfState.cp=null;_pfState.en=null;_pfRender();return}var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(!d||!d.r){_pfState.house=null;_pfRender();return}applyMeterData(d.r)}).catch(function(){_pfState.house=null;_pfRender()})}
 // Hook WS push handlers
 if(window.wbws){window.wbws.subscribe('status',function(d){var s=d&&d.r?d.r:d;applyStatusData(s,null);if(window.wbCheckStatus)window.wbCheckStatus(s)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});window.wbws.subscribe('realtime',function(d){applyRT(d&&d.r?d.r:d)});window.wbws.subscribe('ble',function(d){if(d&&d.state&&d.state!=='connected')_clearLive()});}
