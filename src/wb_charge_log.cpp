@@ -359,17 +359,36 @@ String toJson() {
     JsonDocument doc;
     load(doc);
     JsonArray src = doc.as<JsonArray>();
+    const size_t   n           = src.size();
+    const bool     chargingNow = _chargingNow;
+    const uint32_t openSince    = _openSince;
 
-    JsonDocument out;
-    out["charging_now"] = _chargingNow;
-    out["open_since"]   = _openSince;
-    out["count"]        = (uint32_t)src.size();
-    JsonArray arr = out["intervals"].to<JsonArray>();
-    // Newest first.
-    for (int i = (int)src.size() - 1; i >= 0; i--) arr.add(src[i]);
-
+    // Serialize the source array in place (newest first) instead of copying
+    // every interval into a second JsonDocument. That duplicate was the single
+    // largest transient heap block on a full ring; under the HA integration's
+    // concurrent polls it could collapse the internal-DRAM largest-free-block
+    // and starve /api/status, flapping every entity unavailable. One document
+    // plus a reserved output string now — roughly halves the peak.
     String s;
-    serializeJson(out, s);
+    s.reserve(measureJson(doc) + 96);
+    s += "{\"charging_now\":";
+    s += chargingNow ? "true" : "false";
+    s += ",\"open_since\":";
+    s += openSince;
+    s += ",\"count\":";
+    s += (uint32_t)n;
+    s += ",\"intervals\":[";
+    // NB: serializeJson(src[i], dest) REPLACES dest, it does not append — so
+    // each element is serialized into a small temp string and appended. The
+    // temp is one interval (~70 B), allocated and freed per iteration, versus
+    // the old full-array duplicate JsonDocument.
+    for (int i = (int)n - 1; i >= 0; i--) {
+        if (i != (int)n - 1) s += ',';
+        String elem;
+        serializeJson(src[i], elem);
+        s += elem;
+    }
+    s += "]}";
     return s;
 }
 
