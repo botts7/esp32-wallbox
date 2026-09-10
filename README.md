@@ -35,6 +35,7 @@
 
 ### Recent releases
 
+- **3.2.16** — **fixes entities periodically flapping to `unavailable`** under HA polling: the JSON API path now streams responses (no double-copy), the heavy endpoints back off under heap pressure so `/api/status` is never starved, and `/api/charge_log` no longer duplicates its ring. Internal-heap exhaustion, so it affected big-PSRAM boards too. Also closes a charge-log `store()` data-loss window.
 - **3.2.15** — **per-phase L1/L2/L3 grid power** shown under House Power on the dashboard for 3-phase / Power Boost meters (#51); BAPI status **code 19** labelled "Connected (No Current)" (#9).
 - **3.2.14** — **Grid Energy sensor read 10× too high** (#52): `r_sta.grid` is in Wh, not the 10-Wh unit its siblings use, so the cumulative Grid Energy was 10× over (confirmed on both Plus and MAX Pro). Divided by 1000 now; the per-session sensor was always correct.
 - **3.2.13** — **schedule writes on pre-6.11 Pulsar Plus** (#50): firmware without `s_sch` now falls back to the legacy packed `w_sch` (format decoded on-device), so add / edit / delete work. Plus **command-source logging** (#26): every state-changing `/api/command` records its origin, so a stray external write is traceable.

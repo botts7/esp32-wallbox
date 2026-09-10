@@ -68,17 +68,23 @@ static void store(const JsonDocument& doc) {
     }
     String s;
     serializeJson(doc, s);
-    // Free the old value BEFORE writing the new one. Growing a key in place needs
-    // room for old+new simultaneously; on a near-full NVS partition that write
-    // silently fails and the ring gets stranded at its last-fitting size (this is
-    // why the log sat at a fixed count while bursts kept "closing"). remove()
-    // first frees the space so the write only needs room for the new blob.
-    p.remove(NVS_KEY);
+    // Overwrite in place first. NVS keeps the old value until the new one is
+    // committed, so a failed write here (e.g. a genuinely near-full partition)
+    // leaves the PREVIOUS ring intact rather than empty. Only if that in-place
+    // write can't fit alongside the old value do we free the old copy and retry.
+    // The earlier unconditional remove()-first (needed when the log shared the
+    // crowded 20 KB default nvs, #166) had a data-loss window: if the putString
+    // after the remove failed, the whole ring was gone. In the dedicated 64 KB
+    // nvs2 (typically ~1% full) the retry path is essentially never taken.
     size_t wrote = p.putString(NVS_KEY, s);
+    if (wrote == 0 && s.length() > 0) {
+        p.remove(NVS_KEY);
+        wrote = p.putString(NVS_KEY, s);
+    }
     p.end();
     if (wrote == 0 && s.length() > 0)
         Log.printf("[chargelog] NVS putString failed (%u bytes, partition full?) "
-                   "— interval NOT persisted\n", (unsigned)s.length());
+                   "— interval NOT persisted (previous ring preserved)\n", (unsigned)s.length());
 }
 
 // ---- open-burst persistence (survive a reboot / OTA mid-charge) --------
@@ -149,12 +155,28 @@ static void appendInterval(uint32_t usid, uint32_t start, uint32_t stop,
 // erase + re-init once, the standard custom-partition pattern.
 static void _initNvs2() {
     esp_err_t e = nvs_flash_init_partition(NVS_PART);
+    bool erased = false;
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // This erases the WHOLE nvs2 partition (charge-log + migration flag +
+        // open-burst key) — the only path that wipes stored charge history. It
+        // should fire only on a genuinely-full/incompatible partition, so log
+        // it loudly: if it ever appears on a normal boot it explains a history
+        // reset. (nvs2 is 64 KB and typically ~1% used, so this is not expected.)
+        Log.printf("[chargelog] nvs2 init returned %d — ERASING partition (history reset)\n", (int)e);
         nvs_flash_erase_partition(NVS_PART);
         e = nvs_flash_init_partition(NVS_PART);
+        erased = true;
     }
-    if (e != ESP_OK)
+    if (e != ESP_OK) {
         Log.printf("[chargelog] nvs2 init failed (%d) — charge-log won't persist\n", (int)e);
+        return;
+    }
+    nvs_stats_t st;
+    if (nvs_get_stats(NVS_PART, &st) == ESP_OK) {
+        Log.printf("[chargelog] nvs2 ok erased=%d used=%u free=%u total=%u\n",
+                   erased ? 1 : 0, (unsigned)st.used_entries,
+                   (unsigned)st.free_entries, (unsigned)st.total_entries);
+    }
 }
 
 // One-time move of the charge-log from the crowded 20 KB default nvs into the
@@ -359,17 +381,36 @@ String toJson() {
     JsonDocument doc;
     load(doc);
     JsonArray src = doc.as<JsonArray>();
+    const size_t   n           = src.size();
+    const bool     chargingNow = _chargingNow;
+    const uint32_t openSince    = _openSince;
 
-    JsonDocument out;
-    out["charging_now"] = _chargingNow;
-    out["open_since"]   = _openSince;
-    out["count"]        = (uint32_t)src.size();
-    JsonArray arr = out["intervals"].to<JsonArray>();
-    // Newest first.
-    for (int i = (int)src.size() - 1; i >= 0; i--) arr.add(src[i]);
-
+    // Serialize the source array in place (newest first) instead of copying
+    // every interval into a second JsonDocument. That duplicate was the single
+    // largest transient heap block on a full ring; under the HA integration's
+    // concurrent polls it could collapse the internal-DRAM largest-free-block
+    // and starve /api/status, flapping every entity unavailable. One document
+    // plus a reserved output string now — roughly halves the peak.
     String s;
-    serializeJson(out, s);
+    s.reserve(measureJson(doc) + 96);
+    s += "{\"charging_now\":";
+    s += chargingNow ? "true" : "false";
+    s += ",\"open_since\":";
+    s += openSince;
+    s += ",\"count\":";
+    s += (uint32_t)n;
+    s += ",\"intervals\":[";
+    // NB: serializeJson(src[i], dest) REPLACES dest, it does not append — so
+    // each element is serialized into a small temp string and appended. The
+    // temp is one interval (~70 B), allocated and freed per iteration, versus
+    // the old full-array duplicate JsonDocument.
+    for (int i = (int)n - 1; i >= 0; i--) {
+        if (i != (int)n - 1) s += ',';
+        String elem;
+        serializeJson(src[i], elem);
+        s += elem;
+    }
+    s += "]}";
     return s;
 }
 

@@ -4,6 +4,32 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.16] - 2026-09-09
+
+### Fixed
+- **Entities periodically flapping to `unavailable` under Home Assistant
+  polling (internal-heap exhaustion).** The HA-polled JSON endpoints were the
+  one path never given the v3.0.4 (#103) heap relief that the HTML pages got:
+  every `/api/*` response was built into a String and then copied whole into an
+  `AsyncBasicResponse` (two full copies live at once), and `/api/charge_log`
+  additionally duplicated the entire NVS ring into a second `JsonDocument`
+  before serializing. Under the integration's 5-8 concurrent polls every 10 s,
+  on a gateway with a full 96-entry charge-log ring, that transient could
+  collapse the internal-DRAM largest free block so a concurrent `/api/status`
+  couldn't allocate and hung to the client's 4 s timeout — every entity went
+  unavailable for that cycle (~15 min cadence, emergent). This is internal DRAM,
+  so PSRAM boards are **not** immune (confirmed on an 8 MB-PSRAM board dipping to
+  ~5 KB heap-min). Fixes: a chunked `shared_ptr` JSON sender (no second copy),
+  a heap-headroom guard that makes the heavy secondary endpoints return 503 +
+  Retry-After under pressure (the integration keeps its last value and the
+  device stays available) while `/api/status` is always served, and
+  `charge_log` now serialises its ring in place instead of duplicating it.
+- **Charge-log `store()` data-loss window closed.** It removed the NVS key
+  before rewriting, so a failed write left the ring empty. It now overwrites in
+  place (the previous ring survives a failed write) and only falls back to
+  remove-and-retry if the in-place write can't fit. nvs2 health is logged on
+  boot.
+
 ## [3.2.15] - 2026-09-08
 
 ### Added
