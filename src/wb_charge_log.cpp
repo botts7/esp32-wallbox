@@ -145,7 +145,14 @@ static void appendInterval(uint32_t usid, uint32_t start, uint32_t stop,
     e["stop"]  = stop;
     e["wh"]    = wh;
     e["gwh"]   = gwh;   // green (solar) Wh within this burst
-    while ((int)arr.size() > MAX_INTERVALS) arr.remove(0);
+    // Cap by serialized SIZE, not just count. Preferences::putString goes
+    // through nvs_set_str, whose value is limited to ~4000 bytes — a ring that
+    // grew past ~58 intervals serialised over that limit, the write failed, and
+    // the history was lost (before store() was hardened; the overflow still
+    // caps the ring). Trimming oldest until the blob is comfortably under the
+    // limit is the REAL cap (~54 intervals); MAX_INTERVALS is just a ceiling.
+    while ((int)arr.size() > MAX_INTERVALS || measureJson(doc) > 3800)
+        arr.remove(0);
     store(doc);
     _count = (uint8_t)arr.size();
 }
