@@ -4,6 +4,21 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.17] - 2026-09-09
+
+### Fixed
+- **Charge-log history no longer resets when the ring fills up.** The ring is
+  persisted as a single NVS string, and `nvs_set_str` values are limited to
+  ~4000 bytes, so once the log grew past ~58 intervals the serialised blob
+  exceeded the limit, the write failed, and (with the pre-v3.2.16 remove-first
+  `store()`) the whole history was wiped, resetting to a handful of entries.
+  `appendInterval` now trims the oldest entries by **serialised size** (keeping
+  the blob comfortably under the NVS limit), not just by count, so the ring
+  self-limits (~54 intervals) and can never overflow-and-wipe. Combined with the
+  v3.2.16 `store()` hardening (overwrite-in-place so a failed write preserves the
+  previous ring), charge history is now durable. `MAX_INTERVALS` is now just a
+  ceiling; the byte budget is the real cap.
+
 ## [3.2.16] - 2026-09-09
 
 ### Fixed
