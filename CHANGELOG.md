@@ -4,6 +4,23 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.18] - 2026-09-11
+
+### Fixed
+- **Many concurrent web-page loads can no longer exhaust internal heap and wedge
+  the gateway.** Each dashboard / `/info` / `/sessions` page is a ~13 KB HTML
+  shell held in memory until its async send completes. Several open at once (a
+  couple of wall panels or browser tabs auto-refreshing, on top of the Home
+  Assistant pollers) piled up shell buffers and could collapse the internal-DRAM
+  heap, timing out the critical `/api/status` read (entities flap unavailable)
+  or, in the extreme, hanging the whole stack. Concurrent big-page responses are
+  now hard-capped (at most 3 in flight); excess get an immediate 503 +
+  Retry-After, so the small `/api` endpoints always have memory to be served.
+  Also re-added the heap-headroom guard to `/`, `/info` and `/sessions` — #103
+  removed it on the mistaken assumption they were ~2 KB shells; they are ~13 KB.
+  A per-request heap check alone proved too leaky under a burst (many requests
+  pass the check before any of their allocations register), hence the hard cap.
+
 ## [3.2.17] - 2026-09-09
 
 ### Fixed

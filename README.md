@@ -35,6 +35,7 @@
 
 ### Recent releases
 
+- **3.2.18** — **many concurrent web-page loads can no longer exhaust heap and wedge the gateway.** Big pages (dashboard/info/sessions, ~13 KB each) are hard-capped at 3 in flight (excess get a 503 + Retry-After), so several open wall-panels/tabs plus the HA pollers can't collapse memory and starve `/api/status`.
 - **3.2.17** — **charge-log history no longer resets when the ring fills.** The NVS string that stores the ring is limited to ~4 KB, so past ~58 intervals the write failed and the log wiped; it now trims oldest by serialised size (self-limits ~54 intervals) so it can never overflow.
 - **3.2.16** — **fixes entities periodically flapping to `unavailable`** under HA polling: the JSON API path now streams responses (no double-copy), the heavy endpoints back off under heap pressure so `/api/status` is never starved, and `/api/charge_log` no longer duplicates its ring. Internal-heap exhaustion, so it affected big-PSRAM boards too. Also closes a charge-log `store()` data-loss window.
 - **3.2.15** — **per-phase L1/L2/L3 grid power** shown under House Power on the dashboard for 3-phase / Power Boost meters (#51); BAPI status **code 19** labelled "Connected (No Current)" (#9).
