@@ -4,6 +4,27 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.19] - 2026-09-12
+
+### Fixed
+- **BLE response parser could grow its buffer without bound after a framing
+  desync, exhausting internal heap.** `ResponseParser::feed()` appends every
+  received byte and only completes (and clears) when the JSON brace depth
+  returns to 0. A single stray or dropped byte on a marginal link — a leading
+  `}` (drives brace depth negative, so it can never return to 0) or an
+  unbalanced `"` (sticks the in-string flag so braces stop counting) —
+  permanently desynced the parser, so every subsequent byte accumulated until
+  the next command reset. On the Pulsar Plus / Copper / Quasar (BGX13P) path,
+  where responses stream as asynchronous notifications, this could run the
+  internal heap down until new connections could not be allocated and
+  `/api/status` stalled (entities flap unavailable roughly every 15 minutes).
+  The parser now caps the buffer at 16 KB (far above the largest real response)
+  and resyncs from the next object start, and resets immediately if brace depth
+  goes negative. Well-formed single- and multi-packet responses are unaffected.
+  Applies to all charger models (one shared parser); the Plus family was the
+  most exposed. Diagnosed from a user's Pulsar Plus gateway showing a ~4 KB
+  heap-min and 6 s `/api/status` stalls on a 15-minute cadence.
+
 ## [3.2.18] - 2026-09-11
 
 ### Fixed
