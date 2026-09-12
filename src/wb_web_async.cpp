@@ -5,6 +5,7 @@
 #include "wb_health.h"
 #include "wb_diag.h"
 #include "wb_charge_log.h"
+#include "wb_heaptrace.h"  // TEMP diagnostic
 #include "wb_coredump.h"
 #include "wb_ota_history.h"
 #include "wb_ble.h"
@@ -431,6 +432,13 @@ static void _registerReadOnlyRoutes() {
         if (!_checkAuth(req)) return;
         if (!_checkHeapHeadroomJson(req, 20480)) return;
         _sendJson(req, wb_charge_log::toJson());
+    });
+
+    // GET /api/diag/heaptrace — TEMP: 1 Hz ring of heap + BLE-activity samples
+    // to catch a periodic stall in the act. Reverted before release.
+    _async.on("/api/diag/heaptrace", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkAuth(req)) return;
+        _sendJson(req, wb_heaptrace::toJson());
     });
 
     // GET /api/diag/runtime — heap + per-task stack high-water marks.

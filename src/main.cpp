@@ -10,6 +10,7 @@
 #include "wb_mqtt.h"
 #include "wb_web.h"
 #include "wb_ws.h"
+#include "wb_heaptrace.h"  // TEMP diagnostic
 #include "wb_log.h"
 #include "wb_health.h"
 #include "wb_diag.h"
@@ -457,6 +458,7 @@ void setup() {
     });
     ArduinoOTA.begin();
     Log.println("[OTA] Ready");
+    wb_heaptrace::begin();  // TEMP diagnostic
 
     if (configMgr.hasBLE()) {
         const WBConfig& cfg = configMgr.get();
@@ -545,6 +547,8 @@ void loop() {
     // us roughly when in the boot we crashed (high count = late, low
     // count = early). Negligible cost — single non-atomic increment.
     wb_health::bumpBreadcrumbLoop();
+
+    wb_heaptrace::tick();  // TEMP diagnostic — self-throttles to 1 Hz
 
     // Always run web server + OTA + telnet
     ArduinoOTA.handle();
