@@ -42,6 +42,13 @@ public:
     // reallocations during feed(). Larger responses — r_log, r_schs —
     // grow normally from here. Called by reset() with the default size.
     static constexpr size_t kReserveBytes = 4096;
+    // Hard ceiling for the accumulation buffer. No real BAPI response comes
+    // close (r_log, the largest, is a few KB); exceeding it means the frame
+    // parser has lost sync (dropped/stray byte on a marginal link, most likely
+    // on the Plus/BGX async-notification path). feed() resets and resyncs from
+    // the next object start rather than growing without bound and exhausting
+    // internal heap. 16 KB leaves generous headroom above the largest response.
+    static constexpr size_t kMaxBufBytes = 16384;
 private:
     String _buf;
     int _braceDepth = 0;

@@ -98,6 +98,23 @@ String ResponseParser::takeBuffer() {
 bool ResponseParser::feed(const uint8_t* data, size_t len) {
     for (size_t i = 0; i < len; i++) {
         char c = (char)data[i];
+
+        // Framing-desync backstop. The buffer only clears when a complete
+        // brace-balanced object arrives or the next command calls reset(). A
+        // single stray/dropped byte on a marginal link — a leading '}' (drives
+        // depth negative so it can never return to 0), or an unbalanced '"'
+        // (sticks _inString so braces stop counting) — would otherwise make
+        // every subsequent byte accumulate forever, exhausting internal heap.
+        // This is far more likely on the Plus/BGX path where responses stream
+        // as async notifications. No real BAPI response approaches this size
+        // (r_log, the largest, is a few KB), so exceeding it means we have lost
+        // sync: drop what we have and resync from the next '{'. Bytes up to the
+        // next object start are discarded, which is the correct recovery.
+        if (_buf.length() >= kMaxBufBytes) {
+            reset();
+            if (c != '{') continue;  // wait for a fresh object start
+        }
+
         _buf += c;
 
         if (_escape) {
@@ -120,6 +137,11 @@ bool ResponseParser::feed(const uint8_t* data, size_t len) {
             if (_braceDepth == 0 && _buf.length() > 0) {
                 return true;  // complete JSON object
             }
+            // A '}' with no matching '{' means we started mid-frame (a dropped
+            // opening packet). Depth can never climb back to 0, so every later
+            // byte would accumulate forever. Resync: discard and wait for the
+            // next object start rather than growing without bound.
+            if (_braceDepth < 0) reset();
         }
     }
     return false;
