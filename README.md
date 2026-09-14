@@ -35,6 +35,7 @@
 
 ### Recent releases
 
+- **3.2.20** — **charging start now works when schedule/Eco-Smart paused** (start also clears the override, so it no longer self-reverts after ~10s), and **Resume Schedule is idempotent** (a redundant press can no longer interrupt an active charge). Both HTTP and MQTT paths (#47).
 - **3.2.19** — **BLE response parser can no longer grow without bound after a framing desync.** A stray or dropped byte on a marginal link could permanently desync the parser so it accumulated every subsequent byte, exhausting internal heap (worst on the Plus/BGX async-notification path, seen as `/api/status` stalls / entity flapping ~every 15 min). The buffer is now capped and resyncs. All models; well-formed responses unaffected.
 - **3.2.18** — **many concurrent web-page loads can no longer exhaust heap and wedge the gateway.** Big pages (dashboard/info/sessions, ~13 KB each) are hard-capped at 3 in flight (excess get a 503 + Retry-After), so several open wall-panels/tabs plus the HA pollers can't collapse memory and starve `/api/status`.
 - **3.2.17** — **charge-log history no longer resets when the ring fills.** The NVS string that stores the ring is limited to ~4 KB, so past ~58 intervals the write failed and the log wiped; it now trims oldest by serialised size (self-limits ~54 intervals) so it can never overflow.

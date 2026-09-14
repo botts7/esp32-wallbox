@@ -4,6 +4,24 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.20] - 2026-09-14
+
+### Fixed
+- **Starting charging now works when the charger is schedule/Eco-Smart paused.**
+  A bare `w_cha` start left the schedule-override flag set, so the charger
+  re-paused itself within ~10 s (looked like the charging switch "flapping"
+  off). Now, when the charger is paused (`control_mode == 1`), a start also
+  clears the override (`s_cmode {mode:0}`), so "turn charging on" actually
+  charges — the same start-then-Resume pairing users did by hand. A normal
+  (not-paused) start is unchanged.
+- **Resume Schedule is now idempotent — re-sending it can't interrupt an active
+  charge.** `resume` sent a defensive Stop (par 2 on the MAX) before its
+  `s_cmode {mode:0}`; if an automation re-affirmed an already-charging session
+  (e.g. every 15 min on a price refresh), that Stop interrupted charging for
+  ~10 s. `resume` now no-ops when nothing is actually paused, so redundant
+  presses are harmless. Both fixes apply to the HTTP/integration and MQTT
+  command paths. Reported and analysed by @ollitaipale-cyber (#47).
+
 ## [3.2.19] - 2026-09-12
 
 ### Fixed
