@@ -673,16 +673,33 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
             Log.printf("[CMD] charging %s skipped — already in target state\n", payload);
             return;
         }
-        par = String(val);
-        wallboxBLE.enqueueRequest(bapi::MET_START_STOP, par.c_str());
+        // Pause-aware start (ollitaipale #47): if the charger is schedule/Eco
+        // paused, a bare w_cha start gets re-paused within ~10s. Clear the pause
+        // too (start then s_cmode mode:0), so the charging switch actually
+        // charges. Only when paused; a normal start is unchanged. Mirrors
+        // wb_cmd.cpp's action=start.
+        if (val == 1 && wallboxBLE.schedulePaused()) {
+            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, "1");
+            wallboxBLE.enqueueRequest("s_cmode", "{\"mode\":0}");
+        } else {
+            par = String(val);
+            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, par.c_str());
+        }
 
     } else if (sub == "resume_schedule") {
         // Clears the schedule/eco-smart manual-override flag — what the Wallbox
-        // app's Resume button does. Defensive prefix: send Stop first because
-        // s_cmode mode=0 rejects (subcode 6) when actively charging. But a hard
-        // Stop (par=2 on the MAX) while merely paused/waiting is NOT a no-op — it
-        // can fault the charger (error 114). So gate the Stop on isCharging(),
-        // matching the web/async paths (was unconditional — bug).
+        // app's Resume button does. Idempotent: if nothing is paused there is
+        // nothing to clear, and re-sending it while charging normally would fire
+        // the defensive Stop below and interrupt charging ~10s (ollitaipale #47).
+        if (!wallboxBLE.schedulePaused()) {
+            Log.println("[CMD] resume_schedule skipped — not paused");
+            return;
+        }
+        // Defensive prefix: send Stop first because s_cmode mode=0 rejects
+        // (subcode 6) when actively charging. But a hard Stop (par=2 on the MAX)
+        // while merely paused/waiting is NOT a no-op — it can fault the charger
+        // (error 114). So gate the Stop on isCharging(), matching the web/async
+        // paths (was unconditional — bug).
         if (wallboxBLE.isCharging()) {
             const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
             wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
