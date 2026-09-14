@@ -35,6 +35,7 @@
 
 ### Recent releases
 
+- **3.2.21** — **charging switch/status no longer flickers off on a transient charger blip.** A single spurious "Waiting for Car"/"Paused" poll mid-charge used to flap the entity for a full 10 s; the gateway now confirms a Charging→not-charging transition with an immediate re-read before reporting it (#47).
 - **3.2.20** — **charging start now works when schedule/Eco-Smart paused** (start also clears the override, so it no longer self-reverts after ~10s), and **Resume Schedule is idempotent** (a redundant press can no longer interrupt an active charge). Both HTTP and MQTT paths (#47).
 - **3.2.19** — **BLE response parser can no longer grow without bound after a framing desync.** A stray or dropped byte on a marginal link could permanently desync the parser so it accumulated every subsequent byte, exhausting internal heap (worst on the Plus/BGX async-notification path, seen as `/api/status` stalls / entity flapping ~every 15 min). The buffer is now capped and resyncs. All models; well-formed responses unaffected.
 - **3.2.18** — **many concurrent web-page loads can no longer exhaust heap and wedge the gateway.** Big pages (dashboard/info/sessions, ~13 KB each) are hard-capped at 3 in flight (excess get a 503 + Retry-After), so several open wall-panels/tabs plus the HA pollers can't collapse memory and starve `/api/status`.

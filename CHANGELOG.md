@@ -4,6 +4,22 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.21] - 2026-09-14
+
+### Fixed
+- **Charging switch/status no longer flickers off on a transient charger blip.**
+  Plus chargers occasionally return a single "Waiting for Car" / "Paused" status
+  mid-charge (a pilot/CP blip or the car's charging negotiation dropping for a
+  moment). Because status is polled every 10 s, that one anomalous read flapped
+  the charging switch and status sensor off for a full 10 s and back
+  (ollitaipale #47: 21/35 drops, every one a clean multiple of the 10 s poll).
+  When the status flips Charging → not-charging, the gateway now re-reads once
+  immediately: if the confirmation says Charging, the blip was transient and the
+  last-good status is kept (no flicker); a failed/empty confirmation also keeps
+  last-good (a dropped read is never treated as a stop); a confirmed not-charging
+  is real and reported as before. User-issued stops go through the command path
+  and are unaffected.
+
 ## [3.2.20] - 2026-09-14
 
 ### Fixed
