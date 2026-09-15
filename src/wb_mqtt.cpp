@@ -1524,10 +1524,13 @@ const DiscoveryEntry kEntries[] = {
 
     // ----- Charge-reminder engine (#127), gateway-computed from gTopic -----
     // next_scheduled_charge: UTC epoch -> as_datetime gives HA a tz-aware
-    // timestamp; empty render (no schedule / null) leaves the state unknown.
+    // timestamp. When there's no schedule the field is null; render the literal
+    // `None` (HA maps it to `unknown`) rather than an empty string — a
+    // device_class:timestamp sensor rejects '' and logs "Invalid state message
+    // ''" on every 60s gateway publish (#47). Same idiom as chg_sessions below.
     /* 64 */ { EntityKind::SENSOR, "next_scheduled_charge", "Next Scheduled Charge", "mdi:calendar-clock",
                TopicSlot::GATEWAY,
-               "{% if value_json.next_scheduled_charge %}{{ value_json.next_scheduled_charge | as_datetime }}{% endif %}",
+               "{% if value_json.next_scheduled_charge %}{{ value_json.next_scheduled_charge | as_datetime }}{% else %}None{% endif %}",
                nullptr, "timestamp", nullptr, nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
