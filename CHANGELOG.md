@@ -4,6 +4,18 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.22] - 2026-09-15
+
+### Fixed
+- **"Next Scheduled Charge" no longer logs `Invalid state message ''` every
+  60s** when no schedule is programmed. Its MQTT discovery template rendered an
+  empty string when `next_scheduled_charge` was null, and a `device_class:
+  timestamp` sensor rejects `''`, so HA logged the warning on every gateway-info
+  publish (#47). The template now renders `None` (which HA maps to `unknown`)
+  when there is no schedule, matching the null-handling idiom already used
+  elsewhere. HTTP/integration users were unaffected (that sensor returns Python
+  `None` natively).
+
 ## [3.2.21] - 2026-09-14
 
 ### Fixed
