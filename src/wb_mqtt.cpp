@@ -662,7 +662,14 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         if (action == "start" || action == "1") {
             val = 1;
         } else if (action == "stop" || action == "pause" || action == "2") {
-            val = configMgr.isPlusFamily() ? 0 : 2;
+            // Plus family -> par 0 (pause; a Plus ACKs par 2 but ignores it),
+            // MAX -> par 2 (hard stop). Use the charger's RUNTIME chg_project
+            // self-report, not the statically configured model — a custom model
+            // string made configMgr.isPlusFamily() false for an actual Plus, so
+            // MQTT stop sent par 2 and the charger kept charging while the web/
+            // api path (which already uses the runtime detector) stopped it
+            // correctly (jncanches, forum). Matches wb_cmd.cpp's action=stop.
+            val = wallboxBLE.isPlusCommandFamily() ? 0 : 2;
         } else {
             Log.printf("[CMD] Unknown charging action: %s\n", payload);
             return;
@@ -701,7 +708,7 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         // (error 114). So gate the Stop on isCharging(), matching the web/async
         // paths (was unconditional — bug).
         if (wallboxBLE.isCharging()) {
-            const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
+            const char* stopPar = wallboxBLE.isPlusCommandFamily() ? "0" : "2";  // runtime chg_project, not static config
             wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
         }
         wallboxBLE.enqueueRequest("s_cmode", "{\"mode\":0}");
