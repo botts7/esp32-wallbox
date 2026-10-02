@@ -4,6 +4,20 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.23] - 2026-09-16
+
+### Fixed
+- **MQTT stop had no effect on a Pulsar Plus with a custom model configuration.**
+  The MQTT charging handler chose the stop parameter from the *statically
+  configured* model (`configMgr.isPlusFamily()`), so a custom model string that
+  isn't exactly "plus" made it send `par=2` (MAX hard-stop) to a Plus — which the
+  Plus ACKs but ignores, so charging continued. The Web UI / integration path
+  already used the charger's *runtime* `chg_project` self-report
+  (`isPlusCommandFamily()`) and stopped correctly. The MQTT stop (and the
+  resume_schedule defensive stop) now use the same runtime detector, so the stop
+  parameter matches the actual charger regardless of the configured model. No
+  change for normally-configured chargers. Reported and diagnosed by jncanches.
+
 ## [3.2.22] - 2026-09-15
 
 ### Fixed
