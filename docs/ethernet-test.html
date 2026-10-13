@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wallbox Gateway — Ethernet (W5500) Test Installer</title>
+  <meta name="description" content="Experimental wired-Ethernet build for the Waveshare ESP32-S3-ETH (W5500). Flash from your browser.">
+  <style>
+    :root { --bg:#0e1116; --card:#161b22; --border:#2d333b; --text:#e6edf3; --muted:#9198a1; --accent:#2f81f7; --warn:#f0b429; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+           background:var(--bg); color:var(--text); line-height:1.5; }
+    .wrap { max-width:640px; margin:0 auto; padding:48px 20px; }
+    h1 { font-size:1.6rem; margin:0 0 4px; }
+    .sub { color:var(--muted); margin:0 0 24px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:24px; margin-bottom:20px; }
+    .card h2 { font-size:1.05rem; margin:0 0 12px; }
+    ol { margin:0; padding-left:20px; } ol li { margin:6px 0; }
+    .install { text-align:center; padding:28px 24px; }
+    .note { color:var(--muted); font-size:.9rem; margin-top:14px; }
+    a { color:var(--accent); }
+    code { background:#1f2430; border-radius:4px; padding:1px 5px; font-size:.85em; }
+    pre { background:#1f2430; border:1px solid var(--border); border-radius:8px; padding:12px; overflow-x:auto; font-size:.85rem; }
+    .warn { background:rgba(240,180,41,.10); border:1px solid rgba(240,180,41,.35); border-radius:10px;
+            padding:14px 16px; color:var(--warn); font-size:.92rem; margin-bottom:20px; }
+    .browser { background:#1f2430; border:1px solid var(--border); border-radius:8px; padding:10px 14px; font-size:.9rem; color:var(--muted); margin-top:16px; }
+    footer { text-align:center; color:var(--muted); font-size:.85rem; margin-top:8px; }
+  </style>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</head>
+<body>
+  <div class="wrap">
+    <h1>🧪 Wallbox Gateway — Ethernet (W5500) Test</h1>
+    <p class="sub">Experimental wired-Ethernet build. No WiFi — pulls DHCP over the RJ45, freeing the ESP32's radio for BLE.</p>
+
+    <div class="warn">
+      <strong>⚠️ Experimental &amp; untested on hardware.</strong> This is a first-flash trial build for community testers.
+      Pins are set for the <strong>base Waveshare ESP32-S3-ETH</strong> (the Type-C + microSD board). Other variants
+      (POE-ETH, 8DI-8RO) wire the W5500 to different GPIOs and won't work with this build.
+    </div>
+
+    <div class="card install">
+      <h2>One-click install</h2>
+      <esp-web-install-button manifest="firmware/eth-test-manifest.json">
+        <span slot="unsupported">⚠️ Your browser doesn't support Web Serial — use desktop <strong>Chrome</strong> or <strong>Edge</strong>.</span>
+        <span slot="not-allowed">⚠️ This page must be served over HTTPS to flash.</span>
+      </esp-web-install-button>
+      <p class="note">Full erase + flash of the Ethernet build. <strong>ESP32-S3 boards only.</strong> Takes about a minute.</p>
+      <div class="browser">Needs desktop <strong>Chrome</strong> or <strong>Edge</strong> (Web Serial). Or via CLI:
+        <br><code>esptool.py --chip esp32s3 write_flash 0x0 wallbox-eth-test.bin</code></div>
+    </div>
+
+    <div class="card">
+      <h2>After flashing</h2>
+      <ol>
+        <li>Open a serial monitor at <code>115200</code> and watch for:
+          <pre>[ETH] W5500 up (...)
+[ETH] DHCP lease 192.168.x.x</pre></li>
+        <li>Browse to that IP → the gateway web UI → set your charger's BLE + your MQTT broker (no captive-portal step on the wired build).</li>
+        <li>Confirm BLE connects and stays stable to the Pulsar.</li>
+      </ol>
+      <p class="note">No <code>[ETH]</code> line? The pins are likely off for your exact board — report back in the
+        <a href="https://community.home-assistant.io/t/wallbox-gateway-local-ble-mqtt-ha-for-pulsar-chargers-no-cloud-full-ha-control/1007464">community thread</a>
+        and it's a quick fix.</p>
+    </div>
+
+    <footer>← Back to the <a href="./">standard (WiFi) installer</a></footer>
+  </div>
+</body>
+</html>

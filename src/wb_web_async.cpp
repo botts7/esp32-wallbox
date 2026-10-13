@@ -210,11 +210,31 @@ static bool _checkHeapHeadroom(AsyncWebServerRequest* req, size_t need) {
 // unlike AsyncResponseStream's push cbuf (which tripped the task WDT
 // under load — see task #103) the filler just copies from a complete
 // buffer and returns immediately. WDT-safe by construction.
+static int _htmlInFlight = 0;
+static const int _HTML_MAX_INFLIGHT = 3;
+
 static void _sendHtmlPage(AsyncWebServerRequest* req, String&& html) {
+    // Bound concurrent big-page responses. Each shell is ~13 KB held in a
+    // shared_ptr until the async send finishes, so a per-request heap check is
+    // too leaky (measured: 10 concurrent /info let 6 through and drove heap to
+    // ~8 KB even with a 24 KB guard). Hard cap instead: at most
+    // _HTML_MAX_INFLIGHT served at once, the rest get a fast 503 + Retry-After.
+    // 3 x ~13 KB is a safe peak. All on the single AsyncTCP task, so a plain int
+    // needs no atomics. Released when the captured guard (hence the response) is
+    // destroyed — covers normal completion and a mid-send disconnect alike.
+    if (_htmlInFlight >= _HTML_MAX_INFLIGHT) {
+        AsyncWebServerResponse* busy = req->beginResponse(503, "text/plain", "busy, retry");
+        busy->addHeader("Retry-After", "2");
+        req->send(busy);
+        return;
+    }
+    _htmlInFlight++;
     auto body = std::make_shared<String>(std::move(html));
+    auto guard = std::shared_ptr<void>(reinterpret_cast<void*>(1),
+                                       [](void*){ if (_htmlInFlight > 0) _htmlInFlight--; });
     const size_t len = body->length();
     AsyncWebServerResponse* res = req->beginResponse("text/html", len,
-        [body](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+        [body, guard](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
             size_t remaining = body->length() - index;
             size_t n = remaining < maxLen ? remaining : maxLen;
             if (n) memcpy(buf, body->c_str() + index, n);
@@ -228,6 +248,52 @@ static void _sendHtmlPage(AsyncWebServerRequest* req, String&& html) {
     // here and guarantees a fresh page every load.
     res->addHeader("Cache-Control", "no-store");
     req->send(res);
+}
+
+// --- Large-JSON send helper ---
+//
+// Same rationale as _sendHtmlPage: req->send(code, "application/json", big)
+// forwards to the const char* overload, which COPIES the whole body into an
+// AsyncBasicResponse. So a multi-KB /api/charge_log or /api/diag response needs
+// two full copies live at once on the fragmented internal heap — exactly the
+// transient peak that starves a concurrent /api/status poll and flaps HA
+// entities (heap-min watermark seen collapsing to ~5 KB on a full charge-log
+// ring under the integration's 5-8 concurrent polls). Hand the built String to
+// a shared_ptr pull-based filler instead: AsyncTCP memcpy's slices out on
+// demand, so no second full-size allocation ever happens. Pull-based (not
+// AsyncResponseStream's push cbuf), so WDT-safe by construction — same proven
+// mechanism as _sendHtmlPage.
+static void _sendJson(AsyncWebServerRequest* req, String&& json) {
+    auto body = std::make_shared<String>(std::move(json));
+    const size_t len = body->length();
+    AsyncWebServerResponse* res = req->beginResponse("application/json", len,
+        [body](uint8_t* buf, size_t maxLen, size_t index) -> size_t {
+            size_t remaining = body->length() - index;
+            size_t n = remaining < maxLen ? remaining : maxLen;
+            if (n) memcpy(buf, body->c_str() + index, n);
+            return n;
+        });
+    res->addHeader("Cache-Control", "no-store");
+    req->send(res);
+}
+
+// JSON variant of the heap-headroom guard. When the largest free block is below
+// `need`, fail fast with a tiny 503 + Retry-After rather than building a
+// multi-KB response that would collapse the heap and starve the critical
+// /api/status poll. The HA integration treats a non-200 on these secondary
+// endpoints (charge_log, diag) as "keep the previous value" (integration #8),
+// so the device stays available while the gateway rides out the pressure —
+// unlike the HTML guard this sends JSON, not the busy page.
+static bool _checkHeapHeadroomJson(AsyncWebServerRequest* req, size_t need) {
+    size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largest >= need) return true;
+    Log.printf("[Web] heap pressure: largest=%u needed=%u — 503 %s\n",
+               (unsigned)largest, (unsigned)need, req->url().c_str());
+    AsyncWebServerResponse* res = req->beginResponse(503, "application/json",
+        "{\"error\":\"heap_pressure\"}");
+    res->addHeader("Retry-After", "3");
+    req->send(res);
+    return false;
 }
 
 // --- Auth helper ---
@@ -316,7 +382,7 @@ static void _registerReadOnlyRoutes() {
         doc["ota_min_uptime"] = wb_health::effectiveOtaMinUptimeMs() / 1000;
         String out;
         serializeJson(doc, out);
-        req->send(200, "application/json", out);
+        _sendJson(req, std::move(out));
     });
 
     // GET /api/async/ping — async-stack proof of life. No auth.
@@ -334,7 +400,10 @@ static void _registerReadOnlyRoutes() {
     // diag panel.
     _async.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
-        req->send(200, "application/json", wb_buildStatusJson());
+        // No heap guard here: /api/status is the critical endpoint HA depends
+        // on, so it must always be served. _sendJson keeps it single-copy so it
+        // survives even when the heavy endpoints are under pressure.
+        _sendJson(req, wb_buildStatusJson());
     });
 
     // GET /api/charger — cached status JSON for the dashboard. Never
@@ -342,7 +411,7 @@ static void _registerReadOnlyRoutes() {
     // poll completion.
     _async.on("/api/charger", HTTP_GET, [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
-        req->send(200, "application/json", wb_buildChargerJson());
+        _sendJson(req, wb_buildChargerJson());
     });
 
     // GET /api/diag/disconnects — counters + NVS-persisted ring of
@@ -350,10 +419,8 @@ static void _registerReadOnlyRoutes() {
     _async.on("/api/diag/disconnects", HTTP_GET,
               [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
-        AsyncWebServerResponse* res = req->beginResponse(200,
-            "application/json", wb_diag::toJson());
-        res->addHeader("Cache-Control", "no-store");
-        req->send(res);
+        if (!_checkHeapHeadroomJson(req, 12288)) return;
+        _sendJson(req, wb_diag::toJson());
     });
 
     // GET /api/charge_log — real per-session charge-burst windows (cp>0
@@ -362,20 +429,16 @@ static void _registerReadOnlyRoutes() {
     _async.on("/api/charge_log", HTTP_GET,
               [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
-        AsyncWebServerResponse* res = req->beginResponse(200,
-            "application/json", wb_charge_log::toJson());
-        res->addHeader("Cache-Control", "no-store");
-        req->send(res);
+        if (!_checkHeapHeadroomJson(req, 20480)) return;
+        _sendJson(req, wb_charge_log::toJson());
     });
 
     // GET /api/diag/runtime — heap + per-task stack high-water marks.
     _async.on("/api/diag/runtime", HTTP_GET,
               [](AsyncWebServerRequest* req) {
         if (!_checkAuth(req)) return;
-        AsyncWebServerResponse* res = req->beginResponse(200,
-            "application/json", wb_buildDiagRuntimeJson());
-        res->addHeader("Cache-Control", "no-store");
-        req->send(res);
+        if (!_checkHeapHeadroomJson(req, 12288)) return;
+        _sendJson(req, wb_buildDiagRuntimeJson());
     });
 
     // GET /api/diag/gatt — GATT topology captured at the last connect
@@ -734,9 +797,12 @@ static void _registerHtmlPages() {
     // portal-only). Match that to keep sync vs async behavior
     // identical.
     _async.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
-        // v3.1 (#103): the dashboard is now a ~2 KB shell that fetches
-        // /dashboard/body.gz from PROGMEM, so the old 36 KB heap guard is
-        // gone — "/" no longer 503s under heap pressure.
+        // The dashboard shell is ~13 KB (not the ~2 KB the #103 note assumed),
+        // built into a String. Many concurrent loads — a wall panel or extra
+        // tabs on top of the HA pollers — pile up shell copies and can exhaust
+        // internal heap (an aggressive burst wedged a gateway). Shed load with a
+        // 503 under real memory pressure. Re-adds the guard #103 removed.
+        if (!_checkHeapHeadroom(req, 24000)) return;
         _sendHtmlPage(req, wb_buildDashboardPage());
     });
 
@@ -791,6 +857,7 @@ static void _registerHtmlPages() {
     // becomes a runtime String — it streams from PROGMEM.
     _async.on("/info", HTTP_GET, [](AsyncWebServerRequest* req) {
         wb_health::setBreadcrumbPath("/info");
+        if (!_checkHeapHeadroom(req, 24000)) return;
         _sendHtmlPage(req, wb_buildInfoPage());
     });
 
@@ -812,6 +879,7 @@ static void _registerHtmlPages() {
     // fetches /sessions/body.gz from PROGMEM (v3.1 #103), so the old 20 KB
     // heap guard is gone — /sessions no longer 503s under heap pressure.
     _async.on("/sessions", HTTP_GET, [](AsyncWebServerRequest* req) {
+        if (!_checkHeapHeadroom(req, 24000)) return;
         _sendHtmlPage(req, wb_buildSessionsPage());
     });
 

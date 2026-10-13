@@ -35,8 +35,21 @@ Plan buildCommand(const String& action, const String& value,
 
     p.outcome = Plan::ENQUEUE;
     if (action == "start") {
-        p.met = bapi::MET_START_STOP;
-        p.par = "1";
+        // If the charger is schedule/Eco-Smart paused, a bare w_cha start is
+        // re-paused by the charger within ~10 s (ollitaipale #47) — the override
+        // flag is still set. Clear it too, so "start charging" actually charges:
+        // the same start-then-Resume pairing users do by hand. Only when paused
+        // (schedulePaused() == control_mode 1); a normal start is unchanged. We
+        // are not charging while paused, so no defensive Stop is needed (that
+        // Stop is what can fault the charger, error 114 — see resume below).
+        if (wallboxBLE.schedulePaused()) {
+            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, "1");  // w_cha 1 first
+            p.met = "s_cmode";                                     // then clear the pause
+            p.par = "{\"mode\":0}";
+        } else {
+            p.met = bapi::MET_START_STOP;
+            p.par = "1";
+        }
     }
     // w_cha stop par follows the charger's PRODUCT (chg_project), not the BLE
     // transport the auto-switch adopts: Pulsar Plus family -> par=0 (pause; a
@@ -57,6 +70,18 @@ Plan buildCommand(const String& action, const String& value,
     // (par=2 on the MAX) when merely paused/waiting is NOT a harmless no-op — it
     // can fault the charger (error 114), so we skip it unless actually charging.
     else if (action == "resume") {
+        // Idempotent: if nothing is actually paused/overridden there is nothing
+        // to clear. Re-sending resume while charging normally would otherwise
+        // fire the defensive Stop below and interrupt charging for ~10 s — an
+        // automation re-affirming an already-active session every 15 min caused
+        // exactly that (ollitaipale #47, 10/25 drops on the quarter-hour). Skip
+        // when not schedule-paused.
+        if (!wallboxBLE.schedulePaused()) {
+            p.outcome = Plan::RESPOND;
+            p.statusCode = 200;
+            p.responseJson = "{\"status\":\"ok\",\"skipped\":\"not-paused\"}";
+            return p;
+        }
         if (wallboxBLE.isCharging()) {
             const char* stopPar = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
             wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);

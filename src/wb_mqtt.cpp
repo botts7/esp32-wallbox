@@ -662,7 +662,14 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         if (action == "start" || action == "1") {
             val = 1;
         } else if (action == "stop" || action == "pause" || action == "2") {
-            val = configMgr.isPlusFamily() ? 0 : 2;
+            // Plus family -> par 0 (pause; a Plus ACKs par 2 but ignores it),
+            // MAX -> par 2 (hard stop). Use the charger's RUNTIME chg_project
+            // self-report, not the statically configured model — a custom model
+            // string made configMgr.isPlusFamily() false for an actual Plus, so
+            // MQTT stop sent par 2 and the charger kept charging while the web/
+            // api path (which already uses the runtime detector) stopped it
+            // correctly (jncanches, forum). Matches wb_cmd.cpp's action=stop.
+            val = wallboxBLE.isPlusCommandFamily() ? 0 : 2;
         } else {
             Log.printf("[CMD] Unknown charging action: %s\n", payload);
             return;
@@ -673,18 +680,35 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
             Log.printf("[CMD] charging %s skipped — already in target state\n", payload);
             return;
         }
-        par = String(val);
-        wallboxBLE.enqueueRequest(bapi::MET_START_STOP, par.c_str());
+        // Pause-aware start (ollitaipale #47): if the charger is schedule/Eco
+        // paused, a bare w_cha start gets re-paused within ~10s. Clear the pause
+        // too (start then s_cmode mode:0), so the charging switch actually
+        // charges. Only when paused; a normal start is unchanged. Mirrors
+        // wb_cmd.cpp's action=start.
+        if (val == 1 && wallboxBLE.schedulePaused()) {
+            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, "1");
+            wallboxBLE.enqueueRequest("s_cmode", "{\"mode\":0}");
+        } else {
+            par = String(val);
+            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, par.c_str());
+        }
 
     } else if (sub == "resume_schedule") {
         // Clears the schedule/eco-smart manual-override flag — what the Wallbox
-        // app's Resume button does. Defensive prefix: send Stop first because
-        // s_cmode mode=0 rejects (subcode 6) when actively charging. But a hard
-        // Stop (par=2 on the MAX) while merely paused/waiting is NOT a no-op — it
-        // can fault the charger (error 114). So gate the Stop on isCharging(),
-        // matching the web/async paths (was unconditional — bug).
+        // app's Resume button does. Idempotent: if nothing is paused there is
+        // nothing to clear, and re-sending it while charging normally would fire
+        // the defensive Stop below and interrupt charging ~10s (ollitaipale #47).
+        if (!wallboxBLE.schedulePaused()) {
+            Log.println("[CMD] resume_schedule skipped — not paused");
+            return;
+        }
+        // Defensive prefix: send Stop first because s_cmode mode=0 rejects
+        // (subcode 6) when actively charging. But a hard Stop (par=2 on the MAX)
+        // while merely paused/waiting is NOT a no-op — it can fault the charger
+        // (error 114). So gate the Stop on isCharging(), matching the web/async
+        // paths (was unconditional — bug).
         if (wallboxBLE.isCharging()) {
-            const char* stopPar = configMgr.isPlusFamily() ? "0" : "2";
+            const char* stopPar = wallboxBLE.isPlusCommandFamily() ? "0" : "2";  // runtime chg_project, not static config
             wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
         }
         wallboxBLE.enqueueRequest("s_cmode", "{\"mode\":0}");
@@ -1081,7 +1105,11 @@ const DiscoveryEntry kEntries[] = {
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
     /*  5 */ { EntityKind::SENSOR, "grid_energy", "Grid Energy", "mdi:transmission-tower",
-               TopicSlot::STATUS, "{{ (value_json.r.grid / 100) | round(2) }}",
+               // r_sta.grid is in Wh (÷1000 → kWh), NOT the 10-Wh units its
+               // siblings en/gen use. The old ÷100 read exactly 10x too high;
+               // confirmed on both a Pulsar Plus (6.7.41) and a MAX Pro, where
+               // grid_energy tracked 10.0x the grid_energy_session sensor (#52).
+               TopicSlot::STATUS, "{{ (value_json.r.grid / 1000) | round(2) }}",
                "kWh", "energy", "total_increasing", nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 
@@ -1105,7 +1133,8 @@ const DiscoveryEntry kEntries[] = {
                "8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',"
                "10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',"
                "13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',"
-               "16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)'} %}"
+               "16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)',"
+               "19:'Connected (No Current)'} %}"
                "{{ m.get(s, 'Code ' ~ s) }}",
                nullptr, nullptr, nullptr, nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
@@ -1502,10 +1531,13 @@ const DiscoveryEntry kEntries[] = {
 
     // ----- Charge-reminder engine (#127), gateway-computed from gTopic -----
     // next_scheduled_charge: UTC epoch -> as_datetime gives HA a tz-aware
-    // timestamp; empty render (no schedule / null) leaves the state unknown.
+    // timestamp. When there's no schedule the field is null; render the literal
+    // `None` (HA maps it to `unknown`) rather than an empty string — a
+    // device_class:timestamp sensor rejects '' and logs "Invalid state message
+    // ''" on every 60s gateway publish (#47). Same idiom as chg_sessions below.
     /* 64 */ { EntityKind::SENSOR, "next_scheduled_charge", "Next Scheduled Charge", "mdi:calendar-clock",
                TopicSlot::GATEWAY,
-               "{% if value_json.next_scheduled_charge %}{{ value_json.next_scheduled_charge | as_datetime }}{% endif %}",
+               "{% if value_json.next_scheduled_charge %}{{ value_json.next_scheduled_charge | as_datetime }}{% else %}None{% endif %}",
                nullptr, "timestamp", nullptr, nullptr,
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
 

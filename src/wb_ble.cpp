@@ -1029,8 +1029,19 @@ bool WallboxBLE::_authenticate() {
     _pinRequired = true;
 
     if (_pin.isEmpty()) {
-        Log.println("[BLE] WARNING: Charger has PIN but none configured!");
-        return true;
+        // The charger just handed us its own PIN via read_pin. Adopt it
+        // instead of skipping auth: without authenticating, the charger
+        // silently no-ops every authenticated write (w_lck, schedules,
+        // current, ...) — it returns {"r":null} with no state change, which
+        // looked like "MQTT/HTTP writes ignored" (#47). Only reached when no
+        // PIN was configured, so this strictly adds auth where there was
+        // none. Persist it so the next boot authenticates immediately and the
+        // web UI's stored-PIN state reflects reality. (The value is never
+        // logged.)
+        Log.println("[BLE] No PIN configured — adopting charger-reported PIN (#47)");
+        _pin = pin;
+        configMgr.mut().blePin = _pin;
+        configMgr.save();
     }
 
     Log.println("[BLE] Authenticating with PIN...");
@@ -1494,6 +1505,15 @@ void WallboxBLE::_storeCache(String& dst, uint32_t& seq, const String& value) {
     }
 }
 
+// Extract r_dat.st (charger status enum) from a status JSON, or -1 if absent.
+static int _statusStOf(const String& js) {
+    if (js.isEmpty()) return -1;
+    JsonDocument d;
+    if (deserializeJson(d, js) != DeserializationError::Ok) return -1;
+    JsonVariantConst st = d["r"]["st"];
+    return st.is<int>() ? st.as<int>() : -1;
+}
+
 void WallboxBLE::_pollStatus() {
     if (_state != State::CONNECTED) return;
     String resp = _sendCommandDirect(bapi::MET_GET_STATUS);
@@ -1506,22 +1526,50 @@ void WallboxBLE::_pollStatus() {
         resp = _sendCommandDirect(bapi::MET_GET_STATUS);
     }
     if (!resp.isEmpty()) {
-        // Zentri/original Pulsar omits `cp` — synthesise charge power from the
-        // phase currents so every downstream consumer (dashboard, MQTT,
-        // charge-interval log) works unchanged (#12). Uses the previous
-        // cycle's cached meter for measured voltage, else the nominal setting.
-        if (_isZentri)
-            wb_zentri::normaliseStatus(resp, (float)_mainsVoltage, _cachedMeterJson);
-        // Copper SB / Business firmware names its status fields differently (#20).
-        // Self-detecting no-op until the Copper mapping is implemented.
-        wb_copper::normaliseStatus(resp, (float)_mainsVoltage, _cachedMeterJson);
-        _storeCache(_cachedStatusJson, _seqStatus, resp);
-        // r_dat may be where this charger reports its current ceiling (#39);
-        // capture it here too so the dashboard (which reads the status object)
-        // and the setpoint clamps agree regardless of which response carries it.
-        JsonDocument sd;
-        if (deserializeJson(sd, resp) == DeserializationError::Ok)
-            _captureMaxAvail(sd["r"]);
+        // Charging-blip debounce (ollitaipale #47). Plus chargers occasionally
+        // return a single transient "Waiting for Car"/"Paused" status mid-charge
+        // (a pilot/CP blip or the car's negotiation dropping for a moment). Since
+        // the status poll is every 10 s, that one anomalous read flapped the
+        // charging switch / status entity off for a full 10 s. When the status
+        // flips Charging -> not-charging, re-read ONCE immediately: if the
+        // confirm says Charging, the blip was transient -> keep the last-good
+        // charging status (skip this store). A failed/empty confirm also keeps
+        // last-good (never treat a dropped read as a stop). A confirmed
+        // not-charging is real -> store the fresh confirm. User-issued stops go
+        // through the command path, not this poll, so they are unaffected.
+        bool storeStatus = true;
+        int newSt  = _statusStOf(resp);
+        int prevSt = _statusStOf(_cachedStatusJson);
+        if (prevSt == 1 && newSt != -1 && newSt != 1 && _state == State::CONNECTED) {
+            delay(50);
+            String confirm = _sendCommandDirect(bapi::MET_GET_STATUS);
+            int confSt = _statusStOf(confirm);
+            if (confSt == 1 || confirm.isEmpty()) {
+                storeStatus = false;   // transient blip / dropped confirm — hold last-good
+                Log.printf("[BLE] status blip suppressed (st %d->%d, confirm=%d) — kept Charging\n",
+                           prevSt, newSt, confSt);
+            } else {
+                resp = confirm;        // confirmed real transition — use freshest read
+            }
+        }
+        if (storeStatus) {
+            // Zentri/original Pulsar omits `cp` — synthesise charge power from the
+            // phase currents so every downstream consumer (dashboard, MQTT,
+            // charge-interval log) works unchanged (#12). Uses the previous
+            // cycle's cached meter for measured voltage, else the nominal setting.
+            if (_isZentri)
+                wb_zentri::normaliseStatus(resp, (float)_mainsVoltage, _cachedMeterJson);
+            // Copper SB / Business firmware names its status fields differently (#20).
+            // Self-detecting no-op until the Copper mapping is implemented.
+            wb_copper::normaliseStatus(resp, (float)_mainsVoltage, _cachedMeterJson);
+            _storeCache(_cachedStatusJson, _seqStatus, resp);
+            // r_dat may be where this charger reports its current ceiling (#39);
+            // capture it here too so the dashboard (which reads the status object)
+            // and the setpoint clamps agree regardless of which response carries it.
+            JsonDocument sd;
+            if (deserializeJson(sd, resp) == DeserializationError::Ok)
+                _captureMaxAvail(sd["r"]);
+        }
     }
     // Energy meter on same cycle — lightweight & useful
     if (_state != State::CONNECTED) return;

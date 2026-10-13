@@ -4,6 +4,242 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.2.23] - 2026-09-16
+
+### Fixed
+- **MQTT stop had no effect on a Pulsar Plus with a custom model configuration.**
+  The MQTT charging handler chose the stop parameter from the *statically
+  configured* model (`configMgr.isPlusFamily()`), so a custom model string that
+  isn't exactly "plus" made it send `par=2` (MAX hard-stop) to a Plus — which the
+  Plus ACKs but ignores, so charging continued. The Web UI / integration path
+  already used the charger's *runtime* `chg_project` self-report
+  (`isPlusCommandFamily()`) and stopped correctly. The MQTT stop (and the
+  resume_schedule defensive stop) now use the same runtime detector, so the stop
+  parameter matches the actual charger regardless of the configured model. No
+  change for normally-configured chargers. Reported and diagnosed by jncanches.
+
+## [3.2.22] - 2026-09-15
+
+### Fixed
+- **"Next Scheduled Charge" no longer logs `Invalid state message ''` every
+  60s** when no schedule is programmed. Its MQTT discovery template rendered an
+  empty string when `next_scheduled_charge` was null, and a `device_class:
+  timestamp` sensor rejects `''`, so HA logged the warning on every gateway-info
+  publish (#47). The template now renders `None` (which HA maps to `unknown`)
+  when there is no schedule, matching the null-handling idiom already used
+  elsewhere. HTTP/integration users were unaffected (that sensor returns Python
+  `None` natively).
+
+## [3.2.21] - 2026-09-14
+
+### Fixed
+- **Charging switch/status no longer flickers off on a transient charger blip.**
+  Plus chargers occasionally return a single "Waiting for Car" / "Paused" status
+  mid-charge (a pilot/CP blip or the car's charging negotiation dropping for a
+  moment). Because status is polled every 10 s, that one anomalous read flapped
+  the charging switch and status sensor off for a full 10 s and back
+  (ollitaipale #47: 21/35 drops, every one a clean multiple of the 10 s poll).
+  When the status flips Charging → not-charging, the gateway now re-reads once
+  immediately: if the confirmation says Charging, the blip was transient and the
+  last-good status is kept (no flicker); a failed/empty confirmation also keeps
+  last-good (a dropped read is never treated as a stop); a confirmed not-charging
+  is real and reported as before. User-issued stops go through the command path
+  and are unaffected.
+
+## [3.2.20] - 2026-09-14
+
+### Fixed
+- **Starting charging now works when the charger is schedule/Eco-Smart paused.**
+  A bare `w_cha` start left the schedule-override flag set, so the charger
+  re-paused itself within ~10 s (looked like the charging switch "flapping"
+  off). Now, when the charger is paused (`control_mode == 1`), a start also
+  clears the override (`s_cmode {mode:0}`), so "turn charging on" actually
+  charges — the same start-then-Resume pairing users did by hand. A normal
+  (not-paused) start is unchanged.
+- **Resume Schedule is now idempotent — re-sending it can't interrupt an active
+  charge.** `resume` sent a defensive Stop (par 2 on the MAX) before its
+  `s_cmode {mode:0}`; if an automation re-affirmed an already-charging session
+  (e.g. every 15 min on a price refresh), that Stop interrupted charging for
+  ~10 s. `resume` now no-ops when nothing is actually paused, so redundant
+  presses are harmless. Both fixes apply to the HTTP/integration and MQTT
+  command paths. Reported and analysed by @ollitaipale-cyber (#47).
+
+## [3.2.19] - 2026-09-12
+
+### Fixed
+- **BLE response parser could grow its buffer without bound after a framing
+  desync, exhausting internal heap.** `ResponseParser::feed()` appends every
+  received byte and only completes (and clears) when the JSON brace depth
+  returns to 0. A single stray or dropped byte on a marginal link — a leading
+  `}` (drives brace depth negative, so it can never return to 0) or an
+  unbalanced `"` (sticks the in-string flag so braces stop counting) —
+  permanently desynced the parser, so every subsequent byte accumulated until
+  the next command reset. On the Pulsar Plus / Copper / Quasar (BGX13P) path,
+  where responses stream as asynchronous notifications, this could run the
+  internal heap down until new connections could not be allocated and
+  `/api/status` stalled (entities flap unavailable roughly every 15 minutes).
+  The parser now caps the buffer at 16 KB (far above the largest real response)
+  and resyncs from the next object start, and resets immediately if brace depth
+  goes negative. Well-formed single- and multi-packet responses are unaffected.
+  Applies to all charger models (one shared parser); the Plus family was the
+  most exposed. Diagnosed from a user's Pulsar Plus gateway showing a ~4 KB
+  heap-min and 6 s `/api/status` stalls on a 15-minute cadence.
+
+## [3.2.18] - 2026-09-11
+
+### Fixed
+- **Many concurrent web-page loads can no longer exhaust internal heap and wedge
+  the gateway.** Each dashboard / `/info` / `/sessions` page is a ~13 KB HTML
+  shell held in memory until its async send completes. Several open at once (a
+  couple of wall panels or browser tabs auto-refreshing, on top of the Home
+  Assistant pollers) piled up shell buffers and could collapse the internal-DRAM
+  heap, timing out the critical `/api/status` read (entities flap unavailable)
+  or, in the extreme, hanging the whole stack. Concurrent big-page responses are
+  now hard-capped (at most 3 in flight); excess get an immediate 503 +
+  Retry-After, so the small `/api` endpoints always have memory to be served.
+  Also re-added the heap-headroom guard to `/`, `/info` and `/sessions` — #103
+  removed it on the mistaken assumption they were ~2 KB shells; they are ~13 KB.
+  A per-request heap check alone proved too leaky under a burst (many requests
+  pass the check before any of their allocations register), hence the hard cap.
+
+## [3.2.17] - 2026-09-09
+
+### Fixed
+- **Charge-log history no longer resets when the ring fills up.** The ring is
+  persisted as a single NVS string, and `nvs_set_str` values are limited to
+  ~4000 bytes, so once the log grew past ~58 intervals the serialised blob
+  exceeded the limit, the write failed, and (with the pre-v3.2.16 remove-first
+  `store()`) the whole history was wiped, resetting to a handful of entries.
+  `appendInterval` now trims the oldest entries by **serialised size** (keeping
+  the blob comfortably under the NVS limit), not just by count, so the ring
+  self-limits (~54 intervals) and can never overflow-and-wipe. Combined with the
+  v3.2.16 `store()` hardening (overwrite-in-place so a failed write preserves the
+  previous ring), charge history is now durable. `MAX_INTERVALS` is now just a
+  ceiling; the byte budget is the real cap.
+
+## [3.2.16] - 2026-09-09
+
+### Fixed
+- **Entities periodically flapping to `unavailable` under Home Assistant
+  polling (internal-heap exhaustion).** The HA-polled JSON endpoints were the
+  one path never given the v3.0.4 (#103) heap relief that the HTML pages got:
+  every `/api/*` response was built into a String and then copied whole into an
+  `AsyncBasicResponse` (two full copies live at once), and `/api/charge_log`
+  additionally duplicated the entire NVS ring into a second `JsonDocument`
+  before serializing. Under the integration's 5-8 concurrent polls every 10 s,
+  on a gateway with a full 96-entry charge-log ring, that transient could
+  collapse the internal-DRAM largest free block so a concurrent `/api/status`
+  couldn't allocate and hung to the client's 4 s timeout — every entity went
+  unavailable for that cycle (~15 min cadence, emergent). This is internal DRAM,
+  so PSRAM boards are **not** immune (confirmed on an 8 MB-PSRAM board dipping to
+  ~5 KB heap-min). Fixes: a chunked `shared_ptr` JSON sender (no second copy),
+  a heap-headroom guard that makes the heavy secondary endpoints return 503 +
+  Retry-After under pressure (the integration keeps its last value and the
+  device stays available) while `/api/status` is always served, and
+  `charge_log` now serialises its ring in place instead of duplicating it.
+- **Charge-log `store()` data-loss window closed.** It removed the NVS key
+  before rewriting, so a failed write left the ring empty. It now overwrites in
+  place (the previous ring survives a failed write) and only falls back to
+  remove-and-retry if the in-place write can't fit. nvs2 health is logged on
+  boot.
+
+## [3.2.15] - 2026-09-08
+
+### Added
+- **Per-phase grid power (L1/L2/L3) on the dashboard (#51 follow-up).** The
+  House Power cell now shows the per-phase split beneath it, so Power Boost
+  balancing is visible. Data-driven: only shown when the meter reports L2/L3
+  voltage (a genuine 3-phase meter); single-phase chargers are unchanged. The
+  values were already fetched (House Power sums them), just not displayed.
+- **BAPI status code 19 is labelled "Connected (No Current)"** in the web-UI and
+  the MQTT `charger_status` template, instead of falling through to "Code 19".
+  It's the cable-connected-but-not-yet-drawing precursor state, confirmed by two
+  users (hass-wallbox-gateway #9). Mirrors the integration's status map.
+
+## [3.2.14] - 2026-09-07
+
+### Fixed
+- **"Grid Energy" sensor read exactly 10× too high (#52).** The `grid_energy`
+  MQTT discovery template divided `r_sta.grid` by 100 (the 10-Wh-unit convention
+  its siblings `en`/`gen` use), but `r_sta.grid` is actually in plain Wh, so the
+  cumulative Grid Energy sensor reported 10× the real value (an impossible
+  ~70 kW average during a normal single-phase charge). Confirmed on two chargers
+  via matched-timestamp history — a Pulsar Plus (6.7.41) and a MAX Pro both had
+  `grid_energy` tracking exactly 10.0× the `grid_energy_session` sensor. Now
+  divides by 1000. Universal (not charger-specific). The HACS integration
+  already exposes only the session-based `grid_energy_session`, so it was
+  unaffected. Reported by Dennyhim321. The per-session `grid_energy_session`
+  sensor was always correct and is unchanged.
+
+## [3.2.13] - 2026-09-04
+
+### Fixed
+- **Schedule writes now work on pre-6.11 Pulsar Plus firmware (e.g. 6.7.41,
+  #50).** That firmware predates the `s_sch` method and rejected every schedule
+  write with "No dispatch method found", even though the official app writes
+  schedules fine. The gateway now falls back to the legacy packed `w_sch` on
+  that error, with the format decoded on-device (thanks to @AJKoster):
+  `sid(2) + startHHMM + stopHHMM + days(3)`, where days is a zero-padded
+  Sunday-first bitmask (Sun=1…Sat=64) and start/stop are HHMM UTC. Also on this
+  path: schedule times wait for the charger timezone to load before converting
+  (no offset mismatch); the enabled flag is inferred from the day mask when the
+  firmware omits it from `r_schs` (schedules no longer all show "Off"); and new
+  schedules are allocated from slot 1 (slot 0 is not usable on this firmware and
+  caused garbled times + overwrites). Add/edit/delete now work end-to-end.
+
+### Added
+- **Command source logging (#26).** Every state-changing `/api/command` is now
+  logged as `[CMD] <action> (met=… par=…) via HTTP <client-ip>`, mirroring the
+  MQTT path's `[MQTT] Received: <topic> = <payload>`. Reads are skipped so status
+  polls don't flood the log. Makes a stray external write (e.g. an HA automation
+  publishing a stop) traceable to its source.
+
+## [3.2.12] - 2026-09-02
+
+### Fixed
+- **Authenticated writes on PIN-protected chargers no longer silently
+  no-op (#47).** `read_pin` returns the charger's own Bluetooth passcode, but
+  the gateway only authenticated when a passcode had been manually configured
+  in its settings. With none configured it logged "Charger has PIN but none
+  configured" and skipped auth entirely. Unauthenticated, the charger silently
+  no-ops every authenticated write (lock/unlock, schedule writes, set-current)
+  and returns `{"r":null}` with no state change, which looked like "MQTT/HTTP
+  write commands are ignored" while reads (which need no auth) kept working.
+  The gateway now adopts the charger-reported passcode on connect when none is
+  configured, authenticates with it, and persists it, so writes work from the
+  first boot with no manual step or reconnect. Only runs when no passcode is
+  set, so a manually-configured PIN is unaffected. Root-caused on-device by
+  Dennyhim321 (Pulsar Plus prj08, firmware 6.7.41).
+
+## [3.2.11] - 2026-09-02
+
+### Fixed
+- **Dashboard "House Power" now sums all three phases (#51).** The front-page
+  House Power stat cell was bound to `r_dca.p1` (phase 1 only), while the
+  power-flow diagram and the Home Assistant `house_power` entity already summed
+  `p1+p2+p3`. On a single-phase unit the two matched; on a 3-phase meter (e.g. a
+  Carlo Gavazzi EM340 behind a Pulsar Plus) the headline number showed only L1.
+  The cell now shows the sum, matching the diagram and HA. Reported by
+  ollitaipale-cyber and spacemonkey780. The per-phase `grid_power_l1/l2/l3` HA
+  entities are unchanged and remain correct as individual phase values.
+
+## [3.2.10] - 2026-08-31
+
+### Fixed
+- **Schedule days and next-charge are now computed in the charger's local
+  timezone.** Firmware anchored schedules on the UTC weekday, so a Sunday
+  00:00 schedule displayed (and the next-charge computed) as Monday. Days and
+  the next scheduled charge are now resolved against the charger's local
+  timezone across the gateway dashboard and the HA-facing fields.
+- **Plug-in reminder recomputed in local time; `rem_lead` exposed** on
+  `/api/status` so the Add-on and Integration can render a first-paint-correct
+  local reminder instead of the UTC-derived value.
+- **"Schedule Paused / manual override" no longer driven by green energy.**
+  Both the MQTT `schedule_paused` entity and the gateway dashboard banner used
+  `r_dat.gen` (a green-energy flag on MAX Pro) instead of the real control-mode
+  signal, so the banner appeared while the official app showed active solar
+  charging. Both now key off `control_mode`.
+
 ## [3.2.9] - 2026-08-21
 
 ### Fixed
