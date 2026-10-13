@@ -352,6 +352,9 @@ void setup() {
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_KEYBOARD_ONLY);
     Log.println("[BLE] TX power: +9 dBm, IO cap: KeyboardOnly");
 
+    // Ethernet build: no SSID needed (DHCP) and WiFi is never started, so skip
+    // the first-boot AP gate and the WiFi power-save/coex tuning.
+#ifndef WB_ETH_W5500
     // Check if WiFi is configured
     if (!configMgr.hasWiFi()) {
         // First boot — AP mode for setup
@@ -364,6 +367,7 @@ void setup() {
     esp_wifi_set_ps(WIFI_PS_NONE);              // no WiFi power save — prevents BLE stalls
     esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);  // fair share between WiFi and BLE
     Log.println("[Radio] Coexistence: BALANCE, WiFi PS: OFF");
+#endif  // !WB_ETH_W5500
 
     // Try connecting to WiFi via the wb_net module. wb_net::begin()
     // does the initial blocking connect (~20 s timeout, same as
@@ -559,7 +563,13 @@ void loop() {
     // (MQTT/WS/STA server) were never started in that boot, so we must not fall
     // through to them. A runtime STA drop (services WERE started) is handled by
     // wb_net's own watchdog and never sets g_bootWifiFailedAP, so it's excluded.
-    if (!configMgr.hasWiFi() || !wb_net::isConnected() || g_bootWifiFailedAP) {
+#ifdef WB_ETH_W5500
+    // Ethernet build has no SSID to configure — gate only on link + DHCP lease.
+    const bool netConfigured = true;
+#else
+    const bool netConfigured = configMgr.hasWiFi();
+#endif
+    if (!netConfigured || !wb_net::isConnected() || g_bootWifiFailedAP) {
         // Boot-fail AP fallback (#182). Two exits, both bounded by the retry
         // budget so nothing loops forever:
         if (g_bootWifiFailedAP && _apFailRetries < kApFailMaxRetries) {
