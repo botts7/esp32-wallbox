@@ -8,9 +8,11 @@ This list grows as users report. Reports of **either** working **or** broken set
 
 | Model | Firmware | Status | Notes |
 |---|---|---|---|
-| **Pulsar MAX** | 6.11.16 | ✅ Fully working | Reference device. All features tested. |
-| **Pulsar MAX** | 6.11.26+ | ✅ Working (v2.3.0+) | Requires v2.3.0 (BLE SMP pairing). Older gateway versions will fail on notification subscription. |
-| **Pulsar Plus** | _any_ | 🟡 In active prep | Branch [`v2.4-pulsar-plus`](https://github.com/botts7/esp32-wallbox/tree/v2.4-pulsar-plus) has dual-RX/TX-characteristic support staged. Looking for testers — see issue template `pulsar-plus-compat`. |
+| **Pulsar MAX** | all (6.x) | ✅ Fully working | Reference device. All features tested. |
+| **Pulsar MAX Pro** | all (6.x) | ✅ Working | Same single-char protocol family as MAX. |
+| **Pulsar Pro** | all (6.x) | ✅ Working | u-blox NINA-B22, single-char protocol. Confirmed by users (#53). |
+| **Pulsar Plus** | all (6.x) | ✅ Working | Both radios auto-detected: dual-char (Silicon Labs BGX13P) and the newer single-char (u-blox NINA-B22) units. On firmware 6.11+ a Bluetooth passcode is required — set it on the Config page (BLE Passcode). |
+| **Original Pulsar** (Zentri) | all | ✅ Working (reads + start/stop) | TruConnect / Zentri radio. Reads and start/stop work; live current control over BLE is not available. |
 | **Copper SB** | _any_ | ⚪ Unknown | Protocol likely overlaps with Pulsar Plus. Reports welcome. |
 | **Commander 2** | _any_ | ⚪ Unknown | Similar BAPI surface expected. Reports welcome. |
 | **Quasar / Quasar 2** | _any_ | ⚪ Unknown | DC bidirectional models — `den` (discharge) field already in the protocol; UI is ready. Untested. |
@@ -24,7 +26,8 @@ Legend: ✅ working · 🟡 work in progress / partial · ⚪ unknown · ❌ blo
 | **ESP32-S3-WROOM-1U-N16R8** (external IPEX antenna) | ✅ Recommended | Reference build. 16 MB flash, 8 MB PSRAM. The external antenna matters — internal-antenna boards have struggled at typical distances. |
 | **ESP32-S3-DevKitC-1** | ✅ Should work | 8 MB flash version. Built-in PCB antenna will be marginal beyond ~5 m line of sight. |
 | **ESP32-S3 with PSRAM** (generic) | ✅ Should work | Needs ≥ 8 MB flash for the OTA partition layout. |
-| Plain **ESP32** (not S3) | ❌ Not supported | Build targets ESP32-S3 specifically. |
+| **Waveshare ESP32-S3-ETH / POE-ETH** (WIZnet W5500) | ✅ Working | Wired-Ethernet build (`esp32s3-eth` env) — frees the 2.4 GHz radio for BLE, the usual cure for flaky-WiFi gateways. Validated on the POE-ETH (#59). Confirm your board's SPI pins before flashing. |
+| Classic **ESP32-WROOM** (`esp32dev`) | ✅ Working | Non-S3 build target. Less heap headroom than an S3, but supported. |
 
 ## Tested BLE signal strength
 
@@ -52,8 +55,8 @@ The gateway publishes the Wallbox device with native HA entities (sensors, switc
 
 - BAPI framing: `EaE` + length + JSON + checksum — appears stable across Wallbox models.
 - BAPI method names (`r_dat`, `g_alo`, `w_cha`, etc.) — mostly shared across models. Some are Pulsar-Plus-only (grid code, multi-user, mobile connectivity).
-- Authentication: Pulsar MAX uses BAPI-layer PIN (no OS pairing). Pulsar Plus appears to require OS-level BLE pairing before BAPI works (handled transparently in v2.3.0+).
-- Newer firmware (≥ 6.11.26) on any model: requires encrypted BLE for notifications. v2.3.0+ handles this.
+- Authentication: older firmware used a BAPI-layer PIN. Firmware 6.11+ adds a Bluetooth passcode (OS-level SMP pairing) that is required before BAPI works — enter it on the Config page (BLE Passcode) and the gateway sends it during pairing. For CMS/OCPP-provisioned units where the passcode isn't known, see issue #55.
+- A "Pulsar Plus" may ship with either the dual-char (Silicon Labs BGX13P) or the single-char (u-blox NINA-B22) radio; the gateway auto-detects and adopts the right protocol family.
 
 ## How to contribute a report
 
