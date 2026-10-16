@@ -3,6 +3,7 @@
 #include "wb_log.h"
 #include "wb_diag.h"
 #include "wb_version.h"
+#include "wb_eth.h"   // W5500 Ethernet (no-op stubs on WiFi builds)
 
 #include <WiFi.h>
 #include <ESPmDNS.h>
@@ -134,6 +135,13 @@ static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 uint8_t lastDisconnectReason() { return _lastDiscReason; }
 
 bool begin() {
+#ifdef WB_ETH_W5500
+    // Ethernet build: bring up the W5500 instead of WiFi. lwIP carries every
+    // socket over the wired link, so MQTT / web / OTA work unchanged. No SSID
+    // needed — DHCP. Link + IP arrive asynchronously (see isConnected()).
+    Log.println("[NET] W5500 Ethernet build — starting wired networking (no WiFi)");
+    return wb_eth::begin();
+#else
     const WBConfig& cfg = configMgr.get();
     if (cfg.wifiSSID.length() == 0) {
         Log.println("[WiFi] begin() early-return: wifiSSID empty");
@@ -201,13 +209,23 @@ bool begin() {
     uint8_t r = _lastDiscReason ? _lastDiscReason : 1;
     configMgr.recordWifiFail(r, cfg.wifiSSID);
     return false;
+#endif  // WB_ETH_W5500
 }
 
 bool isConnected() {
+#ifdef WB_ETH_W5500
+    return wb_eth::isUp();
+#else
     return _connected;
+#endif
 }
 
 void tick() {
+#ifdef WB_ETH_W5500
+    // Ethernet has no WiFi reconnect/backoff/mDNS-rebind work to drive here; the
+    // esp_eth driver + DHCP client handle link recovery on their own.
+    return;
+#else
     uint32_t now = millis();
 
     // ---- Drain pending event-driven work ----
@@ -290,12 +308,16 @@ void tick() {
     WiFi.reconnect();
     _backoffMs       = _nextBackoff(_backoffMs);
     _nextAttemptAtMs = now + _backoffMs;
+#endif  // WB_ETH_W5500
 }
 
 uint32_t lastConnectedAtMs()    { return _lastConnectedAt; }
 uint32_t lastDisconnectedAtMs() { return _lastDisconnectedAt; }
 
 void forceReconnect() {
+#ifdef WB_ETH_W5500
+    return;   // wired link — nothing to force
+#else
     // Skip the 60 s "driver gave up" gate; still respect backoff.
     if (_nextAttemptAtMs != 0 && (int32_t)(millis() - _nextAttemptAtMs) < 0) {
         Log.println("[WiFi] forceReconnect() throttled by backoff");
@@ -305,6 +327,7 @@ void forceReconnect() {
     WiFi.reconnect();
     _backoffMs       = _nextBackoff(_backoffMs);
     _nextAttemptAtMs = millis() + _backoffMs;
+#endif
 }
 
 }  // namespace wb_net
