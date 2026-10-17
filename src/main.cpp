@@ -399,11 +399,17 @@ void setup() {
         return;
     }
 
-    // WiFi connected — clear the boot-fail retry budget (#182) and mark the
-    // OTA partition valid (smart rollback).
+    // Network started — clear the boot-fail retry budget (#182) and mark the
+    // OTA partition valid (smart rollback) if the link is already usable.
+    // On WiFi begin() only returns true after GOT_IP, so this always fires.
+    // On the Ethernet build begin() returns once the driver starts, before
+    // link/DHCP (#62); validation is left to wb_health::markHealthy(), which
+    // loop() calls once the lease is up and uptime > 30 s.
     _apFailRetries = 0;
-    esp_ota_mark_app_valid_cancel_rollback();
-    Log.println("[OTA] Firmware validated (WiFi OK)");
+    if (wb_net::isConnected()) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        Log.println("[OTA] Firmware validated (network OK)");
+    }
 
     // Kick off SNTP. Used by wb_health::updateBootTimeIfPossible() so
     // boot-history entries get a real wall-clock timestamp once sync
@@ -420,7 +426,7 @@ void setup() {
     // webServer.beginSTA / OTA — both expect mDNS to be up.
     wb_net::tick();
 
-    // WiFi connected — start services
+    // Network started — start services
     webServer.beginSTA();
     wallboxMQTT.begin();
     wbws::begin();
