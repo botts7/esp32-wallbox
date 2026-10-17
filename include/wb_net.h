@@ -48,6 +48,12 @@ String macString();         // MAC used on the wire, "AA:BB:CC:DD:EE:FF"
 const char* transport();    // "eth" or "wifi"
 bool isWired();             // true on the Ethernet build
 
+// Blocking IPv4 DNS lookup (lwIP bounds it, ~14 s worst case). Returns true
+// with a non-zero `out` on success. Use instead of WiFi.hostByName(): that
+// waits on the Arduino WiFi event group, which the Ethernet build never
+// creates (#62), so its DNS callback would fire into a dead stack frame.
+bool hostByName(const char* host, IPAddress& out);
+
 // Per-loop tick: drains pending state changes (mDNS refresh on
 // reconnect, diag reportDisconnect / reportReconnect), and invokes
 // the backoff-gated explicit WiFi.reconnect() only when needed.

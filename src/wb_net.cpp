@@ -7,6 +7,7 @@
 
 #include <WiFi.h>
 #include <ESPmDNS.h>
+#include "lwip/api.h"   // netconn_gethostbyname_addrtype (Ethernet DNS)
 
 namespace wb_net {
 
@@ -248,6 +249,21 @@ bool isWired() {
     return true;
 #else
     return false;
+#endif
+}
+
+bool hostByName(const char* host, IPAddress& out) {
+#ifdef WB_ETH_W5500
+    // netconn API runs the lookup on the tcpip thread and blocks this task
+    // on its own semaphore — no Arduino WiFi event group involved.
+    ip_addr_t addr;
+    if (netconn_gethostbyname_addrtype(host, &addr, NETCONN_DNS_IPV4) != ERR_OK) {
+        return false;
+    }
+    out = IPAddress(ip4_addr_get_u32(ip_2_ip4(&addr)));
+    return out != IPAddress();
+#else
+    return WiFi.hostByName(host, out) == 1 && out != IPAddress();
 #endif
 }
 

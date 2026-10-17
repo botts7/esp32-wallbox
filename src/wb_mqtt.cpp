@@ -576,12 +576,13 @@ bool WallboxMQTT::_resolveBroker(const String& host, IPAddress& out) {
     const uint32_t now = millis();
     static const uint32_t kTtlMs = 10UL * 60UL * 1000UL;    // 10 min
     if (_brokerIpValid && (now - _brokerIpAt) < kTtlMs) { out = _brokerIp; return true; }
-    // 2-arg hostByName (this core has no timeout overload); lwIP bounds it
+    // wb_net::hostByName (no timeout overload on this core); lwIP bounds it
     // internally. The 10-min cache above keeps DNS off the hot reconnect path,
     // so a transient overnight outage skips it entirely and only pays the
-    // bounded 4 s TCP connect below.
+    // bounded 4 s TCP connect below. Not WiFi.hostByName(): unsafe on the
+    // Ethernet build (#62, see wb_net.h).
     IPAddress ip;
-    if (WiFi.hostByName(host.c_str(), ip) == 1 && ip != IPAddress()) {
+    if (wb_net::hostByName(host.c_str(), ip)) {
         _brokerIp = ip; _brokerIpValid = true; _brokerIpAt = now;
         out = ip; return true;
     }
