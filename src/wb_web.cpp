@@ -1962,10 +1962,14 @@ function showWiFi(){
      a single 'Connected' word from the charger's gwsta. */
   var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;
   r.style.display='block';
-  r.innerHTML="<h2>&#x1F4F6; WiFi Status</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";
+  r.innerHTML="<h2>&#x1F4F6; Network Status</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";
   fetch('/api/status').then(function(x){return x.json()}).then(function(s){
-    var h="<h2>&#x1F4F6; WiFi Status</h2>";
-    var sBadge=s.wifi==='connected'?"<span class='badge badge-success'>Connected</span>":"<span class='badge badge-warning'>"+(s.wifi||'Unknown')+"</span>";
+    /* #62: s.net / s.net_connected follow the active link (wired on the
+       W5500 build); older firmware without them falls back to s.wifi. */
+    var eth=s.net==='eth';
+    var h="<h2>&#x1F4F6; "+(eth?'Ethernet':'WiFi')+" Status</h2>";
+    var on=s.net?s.net_connected:s.wifi==='connected';
+    var sBadge=on?"<span class='badge badge-success'>Connected</span>":"<span class='badge badge-warning'>"+(eth?'No link':(s.wifi||'Unknown'))+"</span>";
     h+=row('Status',sBadge);
     if(s.ssid)h+=row('Network',s.ssid);
     if(s.ip)h+=row('IP Address',s.ip);
@@ -2932,10 +2936,10 @@ String wb_buildConfigPage() {
 
     page += "<h1>&#x1F527; Configuration</h1>";
 
-    bool wifiOk = WiFi.status() == WL_CONNECTED;
+    bool netOk = wb_net::isConnected();
     bool bleOk = wallboxBLE.isConnected();
     page += "<div class='status-bar'>";
-    page += "<span class='status-item'><span class='status-dot " + String(wifiOk ? "dot-green" : "dot-red") + "'></span>" + (wifiOk ? WiFi.localIP().toString() : String("No WiFi")) + "</span>";
+    page += "<span class='status-item'><span class='status-dot " + String(netOk ? "dot-green" : "dot-red") + "'></span>" + (netOk ? wb_net::localIP().toString() : String(wb_net::isWired() ? "No link" : "No WiFi")) + "</span>";
     page += "<span class='status-item'><span class='status-dot " + String(bleOk ? "dot-green" : "dot-yellow") + "'></span>BLE: " + String(wallboxBLE.stateStr()) + "</span>";
     page += "</div>";
 
@@ -3329,7 +3333,7 @@ function loadGW(){return fetch('/api/status').then(function(r){return r.json()})
   if(d.ssid)s+=row('WiFi',d.ssid);
   if(d.ip)s+=row('IP',d.ip);
   if(typeof d.wifi_rssi==='number')s+=row('Signal',d.wifi_rssi+' dBm');
-  if(s){c+=_sect('Gateway WiFi')+s}
+  if(s){c+=_sect(d.net==='eth'?'Gateway Ethernet':'Gateway WiFi')+s}
   document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>';
   if(d.chg_fw_changed){var b=document.getElementById('fw-changed-banner');var det=document.getElementById('fw-changed-detail');if(b){b.style.display='block';if(det&&d.chg_fw_prev&&d.dev_fw)det.textContent='Was '+d.chg_fw_prev+', now '+d.dev_fw+'.';}}
 }).catch(function(){})}
@@ -3449,7 +3453,7 @@ function loadDiag(){
   }).catch(function(){})
 }
 function clearDiag(){if(!confirm('Reset disconnect counters and clear event history?'))return;fetch('/api/diag/clear?csrf='+window.WB_CSRF,{method:'POST'}).then(function(){loadDiag()}).catch(function(){})}
-function renderGW(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi Signal',d.wifi_rssi+' dBm');h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h}
+function renderGW(d){var h='';if(d.net==='eth')h+=row('Ethernet',d.ip);else{h+=row('WiFi',d.ssid+' ('+d.ip+')');if(typeof d.wifi_rssi==='number')h+=row('WiFi Signal',d.wifi_rssi+' dBm')}h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h}
 // Live-update the Gateway card off the same WS push the top banner uses,
 // so BLE Signal here can't drift away from the banner's value.
 if(window.wbws){window.wbws.subscribe('ble',function(d){if(!window._lastStatus)return;window._lastStatus.ble=d.state;window._lastStatus.rssi=d.rssi;renderGW(window._lastStatus)});}
@@ -4988,8 +4992,14 @@ void WBWebServer::beginSTA() {
     // there's nothing left for the sync server to do — no fallback
     // listener, no registerRoutes(), no http.begin().
     _apMode = false;
-    Log.printf("[Web] http://%s/ (async on :80, sync retired)\n",
-        WiFi.localIP().toString().c_str());
+    // On the Ethernet build this runs before the DHCP lease (#62); the URL
+    // is logged by wb_net::tick() once the lease arrives instead.
+    if (wb_net::isConnected()) {
+        Log.printf("[Web] http://%s/ (async on :80, sync retired)\n",
+            wb_net::localIP().toString().c_str());
+    } else {
+        Log.println("[Web] async on :80 (sync retired), waiting for network");
+    }
 }
 
 void WBWebServer::loop() {

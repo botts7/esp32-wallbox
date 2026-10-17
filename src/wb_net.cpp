@@ -34,6 +34,11 @@ static void _setupMdns() {
     MDNS.addServiceTxt("http", "tcp", "version", WB_VERSION);
     MDNS.addServiceTxt("http", "tcp", "path", "/");
     MDNS.addService("telnet", "tcp", 23);
+    // MDNS.end() above also dropped ArduinoOTA's _arduino._tcp record, so a
+    // rebind after ArduinoOTA.begin() (every reconnect, and the first lease on
+    // the Ethernet build, #62) would hide the device from espota / IDE OTA.
+    // auth=true: main.cpp always sets an OTA password.
+    MDNS.enableArduino(3232, true);
     Log.printf("[mDNS] http://wallbox-gw.local (IP: %s)\n",
                localIP().toString().c_str());
 }
@@ -269,8 +274,14 @@ bool hostByName(const char* host, IPAddress& out) {
 
 void tick() {
 #ifdef WB_ETH_W5500
-    // Ethernet has no WiFi reconnect/backoff/mDNS-rebind work to drive here; the
-    // esp_eth driver + DHCP client handle link recovery on their own.
+    // Ethernet has no WiFi reconnect/backoff work to drive here; the esp_eth
+    // driver + DHCP client handle link recovery on their own. Each new lease
+    // (first boot and every re-plug) still needs the mDNS rebind, same as the
+    // WiFi GOT_IP path below (#62).
+    if (wb_eth::takeGotIp()) {
+        Log.printf("[NET] http://%s/\n", localIP().toString().c_str());
+        _setupMdns();
+    }
     return;
 #else
     uint32_t now = millis();

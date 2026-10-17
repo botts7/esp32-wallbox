@@ -57,7 +57,8 @@ bool hostByName(const char* host, IPAddress& out);
 // Per-loop tick: drains pending state changes (mDNS refresh on
 // reconnect, diag reportDisconnect / reportReconnect), and invokes
 // the backoff-gated explicit WiFi.reconnect() only when needed.
-// Cheap (~10 us) when nothing's pending.
+// On the Ethernet build it only drains a new DHCP lease (URL log +
+// mDNS rebind). Cheap (~10 us) when nothing's pending.
 void tick();
 
 // Counters / diag (mirrors wb_diag, surfaced for /api/status and HA).
