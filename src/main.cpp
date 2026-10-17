@@ -614,10 +614,10 @@ void loop() {
     // Run WS loop (handle client connects/disconnects + frames)
     wbws::loop();
 
-    // Mark healthy once WiFi is connected AND we've been up > 30s.
+    // Mark healthy once the network is connected AND we've been up > 30s.
     // Healthy = clears the boot counter and tells ESP OTA layer the
     // partition is good (no rollback on next boot). Only fires once.
-    if (!wb_health::isHealthy() && WiFi.status() == WL_CONNECTED && millis() > 30000) {
+    if (!wb_health::isHealthy() && wb_net::isConnected() && millis() > 30000) {
         wb_health::markHealthy();
     }
 

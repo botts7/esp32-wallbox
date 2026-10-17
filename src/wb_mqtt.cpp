@@ -3,6 +3,7 @@
 #include "wb_config.h"
 #include "wb_log.h"
 #include "wb_diag.h"
+#include "wb_net.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
 
@@ -484,11 +485,12 @@ void WallboxMQTT::loop() {
             _wasConnected = false;
             wb_diag::reportDisconnect(wb_diag::Kind::MQTT);
         }
-        // #168: never call PubSubClient::connect() while WiFi is down. Its
-        // connect() -> readPacket() -> WiFiClient::read() path dereferences a
-        // NULL/torn-down socket handle -> LoadProhibited crash in loopTask
-        // (confirmed by coredump: read @0x14 in WiFiClient::read). Wait for WiFi.
-        if (WiFi.status() != WL_CONNECTED) return;
+        // #168: never call PubSubClient::connect() while the network is down.
+        // Its connect() -> readPacket() -> WiFiClient::read() path dereferences
+        // a NULL/torn-down socket handle -> LoadProhibited crash in loopTask
+        // (confirmed by coredump: read @0x14 in WiFiClient::read). Wait for the
+        // link: WiFi GOT_IP, or on the Ethernet build link + DHCP lease (#62).
+        if (!wb_net::isConnected()) return;
         if (millis() - _lastConnectAttempt >= _reconnectGateMs) {
             _connect();
         }

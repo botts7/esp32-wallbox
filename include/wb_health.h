@@ -5,7 +5,7 @@
 // Runtime health tracking — drives /api/health and the OTA admission guard.
 //
 // Boot counter: incremented at very early setup() and persisted to NVS.
-// When the device reaches a healthy state (WiFi + MQTT both up for >30s)
+// When the device reaches a healthy state (network + MQTT both up for >30s)
 // we reset the counter. If a fresh boot reads counter >= BOOT_FAIL_THRESHOLD
 // before doing anything else, we force-revert to the other OTA partition
 // (or just hold off on the new firmware) and reset the counter ourselves.
@@ -73,7 +73,7 @@ void bootCountReset();
 // Number of failed-to-be-healthy boots before forcing a rollback.
 static const uint8_t BOOT_FAIL_THRESHOLD = 3;
 
-// Called once when WiFi+MQTT are both up for >30s. Marks the current
+// Called once when network+MQTT are both up for >30s. Marks the current
 // firmware as healthy (resets boot counter, marks OTA partition valid).
 void markHealthy();
 
