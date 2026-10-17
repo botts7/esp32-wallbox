@@ -223,10 +223,11 @@ static void populateDeviceBlock(JsonObject dev) {
         String fw = wallboxBLE.chargerAppFirmware();
         dev["sw_version"] = fw.length() ? fw : String(WB_VERSION);
     }
-    // MAC connection — uses the gateway's WiFi MAC. Helps HA's device
-    // registry merge entities that arrive via different code paths.
+    // MAC connection — the gateway's MAC on its active link (WiFi STA, or
+    // the Ethernet MAC on the W5500 build). Helps HA's device registry
+    // merge entities that arrive via different code paths.
     {
-        String mac = WiFi.macAddress();  // upper-case colon-separated
+        String mac = wb_net::macString();  // upper-case colon-separated
         mac.toLowerCase();
         JsonArray conns = dev["connections"].to<JsonArray>();
         JsonArray pair  = conns.add<JsonArray>();
@@ -234,10 +235,10 @@ static void populateDeviceBlock(JsonObject dev) {
         pair.add(mac);
     }
     // Direct link to the gateway dashboard from the HA Device page
-    // header. STA mode -> use the WiFi IP; AP fallback skipped (HA
-    // can't reach a captive-portal address anyway).
-    if (WiFi.status() == WL_CONNECTED) {
-        String url = "http://" + WiFi.localIP().toString() + "/";
+    // header. Connected -> use the gateway's WiFi / wired IP; AP fallback
+    // skipped (HA can't reach a captive-portal address anyway).
+    if (wb_net::isConnected()) {
+        String url = "http://" + wb_net::localIP().toString() + "/";
         dev["configuration_url"] = url;
     }
 }
@@ -1617,14 +1618,21 @@ static const char* _discComponentFor(wb_disc::EntityKind k) {
     return nullptr;
 }
 
+// Entities that make no sense on this build's transport. The Ethernet build
+// has no WiFi link, so "WiFi Signal" (#56) would be a fake 0 dBm sensor (#62).
+static bool _hiddenOnThisTransport(const wb_disc::DiscoveryEntry& e) {
+    return wb_net::isWired() && strcmp(e.objectId, "wifi_rssi") == 0;
+}
+
 void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
     if (index >= wb_disc::kEntryCount) return;
     const auto& e = wb_disc::kEntries[index];
 
-    // Discovery disabled: delete the entity instead of publishing it. An
-    // empty retained payload to the config topic is HA's documented "remove
-    // this entity" mechanism. Idempotent on every reconnect.
-    if (_discoveryClearing) {
+    // Discovery disabled (or entity hidden on this transport): delete the
+    // entity instead of publishing it. An empty retained payload to the
+    // config topic is HA's documented "remove this entity" mechanism.
+    // Idempotent on every reconnect.
+    if (_discoveryClearing || _hiddenOnThisTransport(e)) {
         const char* comp = _discComponentFor(e.kind);
         if (comp) {
             const WBConfig& cfg = configMgr.get();

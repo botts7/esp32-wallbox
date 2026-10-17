@@ -203,8 +203,12 @@ static void publishGatewayInfo() {
     // spot a slow leak before it hits the panic threshold.
     json += ",\"heap_min_ever\":";
     json += String((uint32_t)esp_get_minimum_free_heap_size());
-    json += ",\"wifi_rssi\":";
-    json += String(WiFi.RSSI());
+    // Omitted on the Ethernet build (#62) — there's no radio link, and its
+    // discovery entity (#56) isn't published there either.
+    if (!wb_net::isWired()) {
+        json += ",\"wifi_rssi\":";
+        json += String(WiFi.RSSI());
+    }
     // Die temperature — MUST match the /api/status field so the MQTT
     // "Gateway Temperature" discovery entity (reads value_json.chip_temp) isn't
     // stuck at 0. This gateway payload is a separate builder from
@@ -213,7 +217,7 @@ static void publishGatewayInfo() {
     // ESP32/WROOM) so HA shows the sensor unavailable, not a fake value.
     json += ",\"chip_temp\":";
     json += wb_chipTempJson();
-    json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
+    json += ",\"ip\":\"" + wb_net::localIP().toString() + "\"";
     // Gateway-side firmware version (gateway, not the BLE module) — so HA
     // can show which build is running and alert on unexpected downgrade.
     json += ",\"fw\":\"" WB_VERSION "\"";
