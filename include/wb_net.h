@@ -40,6 +40,14 @@ bool begin();
 // instead of `WiFi.status()` to avoid the driver's internal mutex.
 bool isConnected();
 
+// Transport-neutral accessors — use these instead of the `WiFi` singleton
+// so the W5500 Ethernet build (WB_ETH_W5500) reports the wired link. On
+// WiFi builds they return exactly what the `WiFi` calls they replace did.
+IPAddress localIP();        // 0.0.0.0 until connected
+String macString();         // MAC used on the wire, "AA:BB:CC:DD:EE:FF"
+const char* transport();    // "eth" or "wifi"
+bool isWired();             // true on the Ethernet build
+
 // Per-loop tick: drains pending state changes (mDNS refresh on
 // reconnect, diag reportDisconnect / reportReconnect), and invokes
 // the backoff-gated explicit WiFi.reconnect() only when needed.

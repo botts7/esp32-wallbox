@@ -34,7 +34,7 @@ static void _setupMdns() {
     MDNS.addServiceTxt("http", "tcp", "path", "/");
     MDNS.addService("telnet", "tcp", 23);
     Log.printf("[mDNS] http://wallbox-gw.local (IP: %s)\n",
-               WiFi.localIP().toString().c_str());
+               localIP().toString().c_str());
 }
 
 // ---- Cached state, written by WiFi event task, read by main task ----
@@ -217,6 +217,37 @@ bool isConnected() {
     return wb_eth::isUp();
 #else
     return _connected;
+#endif
+}
+
+IPAddress localIP() {
+#ifdef WB_ETH_W5500
+    return IPAddress(wb_eth::localIP());
+#else
+    return WiFi.localIP();
+#endif
+}
+
+String macString() {
+#ifdef WB_ETH_W5500
+    uint8_t mac[6];
+    wb_eth::macAddress(mac);
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return String(buf);
+#else
+    return WiFi.macAddress();
+#endif
+}
+
+const char* transport() { return isWired() ? "eth" : "wifi"; }
+
+bool isWired() {
+#ifdef WB_ETH_W5500
+    return true;
+#else
+    return false;
 #endif
 }
 

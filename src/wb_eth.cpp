@@ -32,6 +32,7 @@ esp_eth_handle_t s_eth = nullptr;
 esp_netif_t*     s_netif = nullptr;
 volatile bool    s_linkUp = false;
 volatile uint32_t s_ip = 0;
+volatile bool    s_gotIpPending = false;   // GOT_IP fired → wb_net::tick() drains it
 uint8_t          s_mac[6] = {0};
 
 void onEth(void*, esp_event_base_t base, int32_t id, void*) {
@@ -43,6 +44,7 @@ void onIp(void*, esp_event_base_t, int32_t id, void* data) {
     if (id == IP_EVENT_ETH_GOT_IP) {
         auto* ev = static_cast<ip_event_got_ip_t*>(data);
         s_ip = ev->ip_info.ip.addr;
+        s_gotIpPending = true;
         Log.printf("[ETH] DHCP lease " IPSTR "\n", IP2STR(&ev->ip_info.ip));
     }
 }
@@ -121,6 +123,11 @@ bool begin() {
 bool isUp() { return s_linkUp && s_ip != 0; }
 uint32_t localIP() { return s_ip; }
 void macAddress(uint8_t out[6]) { memcpy(out, s_mac, 6); }
+bool takeGotIp() {
+    if (!s_gotIpPending) return false;
+    s_gotIpPending = false;
+    return true;
+}
 
 }  // namespace wb_eth
 
@@ -130,5 +137,6 @@ bool begin() { return false; }
 bool isUp() { return false; }
 uint32_t localIP() { return 0; }
 void macAddress(uint8_t out[6]) { for (int i = 0; i < 6; i++) out[i] = 0; }
+bool takeGotIp() { return false; }
 }  // namespace wb_eth
 #endif
