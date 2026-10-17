@@ -1622,7 +1622,8 @@ static const char* _discComponentFor(wb_disc::EntityKind k) {
 // Entities that make no sense on this build's transport. The Ethernet build
 // has no WiFi link, so "WiFi Signal" (#56) would be a fake 0 dBm sensor (#62).
 static bool _hiddenOnThisTransport(const wb_disc::DiscoveryEntry& e) {
-    return wb_net::isWired() && strcmp(e.objectId, "wifi_rssi") == 0;
+    // objectId is nullptr on NOOP placeholder slots (e.g. #9).
+    return wb_net::isWired() && e.objectId && strcmp(e.objectId, "wifi_rssi") == 0;
 }
 
 void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
