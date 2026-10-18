@@ -9,6 +9,7 @@ on:
       - 'platformio.ini'
       - 'partitions_ota.csv'
       - 'partitions_8mb.csv'
+      - '.github/workflows/build.yml'
   pull_request:
     paths:
       - 'src/**'
@@ -16,6 +17,7 @@ on:
       - 'platformio.ini'
       - 'partitions_ota.csv'
       - 'partitions_8mb.csv'
+      - '.github/workflows/build.yml'
   release:
     types: [created]
 
