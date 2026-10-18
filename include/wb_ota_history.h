@@ -37,7 +37,7 @@ void recordOta(uint32_t uptime_s, const String& was_running,
                const String& target = "");
 
 // Record that a firmware version reached healthy state on this boot.
-// Called from wb_health::markHealthy() once WiFi + BLE/MQTT are up
+// Called from wb_health::markHealthy() once the network + BLE/MQTT are up
 // and steady. Deduplicated — if the most recent entry is already a
 // boot with the same version (e.g. multiple markHealthy calls in
 // quick succession), it's a no-op. Pair with recordOta() to see the

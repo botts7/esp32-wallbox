@@ -7,6 +7,7 @@
 
 #include <WiFi.h>
 #include <ESPmDNS.h>
+#include "lwip/api.h"   // netconn_gethostbyname_addrtype (Ethernet DNS)
 
 namespace wb_net {
 
@@ -33,8 +34,13 @@ static void _setupMdns() {
     MDNS.addServiceTxt("http", "tcp", "version", WB_VERSION);
     MDNS.addServiceTxt("http", "tcp", "path", "/");
     MDNS.addService("telnet", "tcp", 23);
+    // MDNS.end() above also dropped ArduinoOTA's _arduino._tcp record, so a
+    // rebind after ArduinoOTA.begin() (every reconnect, and the first lease on
+    // the Ethernet build, #62) would hide the device from espota / IDE OTA.
+    // auth=true: main.cpp always sets an OTA password.
+    MDNS.enableArduino(3232, true);
     Log.printf("[mDNS] http://wallbox-gw.local (IP: %s)\n",
-               WiFi.localIP().toString().c_str());
+               localIP().toString().c_str());
 }
 
 // ---- Cached state, written by WiFi event task, read by main task ----
@@ -220,10 +226,62 @@ bool isConnected() {
 #endif
 }
 
+IPAddress localIP() {
+#ifdef WB_ETH_W5500
+    return IPAddress(wb_eth::localIP());
+#else
+    return WiFi.localIP();
+#endif
+}
+
+String macString() {
+#ifdef WB_ETH_W5500
+    uint8_t mac[6];
+    wb_eth::macAddress(mac);
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return String(buf);
+#else
+    return WiFi.macAddress();
+#endif
+}
+
+const char* transport() { return isWired() ? "eth" : "wifi"; }
+
+bool isWired() {
+#ifdef WB_ETH_W5500
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool hostByName(const char* host, IPAddress& out) {
+#ifdef WB_ETH_W5500
+    // netconn API runs the lookup on the tcpip thread and blocks this task
+    // on its own semaphore — no Arduino WiFi event group involved.
+    ip_addr_t addr;
+    if (netconn_gethostbyname_addrtype(host, &addr, NETCONN_DNS_IPV4) != ERR_OK) {
+        return false;
+    }
+    out = IPAddress(ip4_addr_get_u32(ip_2_ip4(&addr)));
+    return out != IPAddress();
+#else
+    return WiFi.hostByName(host, out) == 1 && out != IPAddress();
+#endif
+}
+
 void tick() {
 #ifdef WB_ETH_W5500
-    // Ethernet has no WiFi reconnect/backoff/mDNS-rebind work to drive here; the
-    // esp_eth driver + DHCP client handle link recovery on their own.
+    // Ethernet has no WiFi reconnect/backoff work to drive here; the esp_eth
+    // driver + DHCP client handle link recovery on their own. Each new lease
+    // (first boot and every re-plug) still needs the mDNS rebind, same as the
+    // WiFi GOT_IP path below (#62).
+    if (wb_eth::takeGotIp()) {
+        Log.printf("[NET] http://%s/\n", localIP().toString().c_str());
+        _setupMdns();
+    }
     return;
 #else
     uint32_t now = millis();

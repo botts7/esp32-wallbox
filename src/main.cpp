@@ -203,8 +203,12 @@ static void publishGatewayInfo() {
     // spot a slow leak before it hits the panic threshold.
     json += ",\"heap_min_ever\":";
     json += String((uint32_t)esp_get_minimum_free_heap_size());
-    json += ",\"wifi_rssi\":";
-    json += String(WiFi.RSSI());
+    // Omitted on the Ethernet build (#62) — there's no radio link, and its
+    // discovery entity (#56) isn't published there either.
+    if (!wb_net::isWired()) {
+        json += ",\"wifi_rssi\":";
+        json += String(WiFi.RSSI());
+    }
     // Die temperature — MUST match the /api/status field so the MQTT
     // "Gateway Temperature" discovery entity (reads value_json.chip_temp) isn't
     // stuck at 0. This gateway payload is a separate builder from
@@ -213,7 +217,7 @@ static void publishGatewayInfo() {
     // ESP32/WROOM) so HA shows the sensor unavailable, not a fake value.
     json += ",\"chip_temp\":";
     json += wb_chipTempJson();
-    json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
+    json += ",\"ip\":\"" + wb_net::localIP().toString() + "\"";
     // Gateway-side firmware version (gateway, not the BLE module) — so HA
     // can show which build is running and alert on unexpected downgrade.
     json += ",\"fw\":\"" WB_VERSION "\"";
@@ -399,11 +403,17 @@ void setup() {
         return;
     }
 
-    // WiFi connected — clear the boot-fail retry budget (#182) and mark the
-    // OTA partition valid (smart rollback).
+    // Network started — clear the boot-fail retry budget (#182) and mark the
+    // OTA partition valid (smart rollback) if the link is already usable.
+    // On WiFi begin() only returns true after GOT_IP, so this always fires.
+    // On the Ethernet build begin() returns once the driver starts, before
+    // link/DHCP (#62); validation is left to wb_health::markHealthy(), which
+    // loop() calls once the lease is up and uptime > 30 s.
     _apFailRetries = 0;
-    esp_ota_mark_app_valid_cancel_rollback();
-    Log.println("[OTA] Firmware validated (WiFi OK)");
+    if (wb_net::isConnected()) {
+        esp_ota_mark_app_valid_cancel_rollback();
+        Log.println("[OTA] Firmware validated (network OK)");
+    }
 
     // Kick off SNTP. Used by wb_health::updateBootTimeIfPossible() so
     // boot-history entries get a real wall-clock timestamp once sync
@@ -420,7 +430,7 @@ void setup() {
     // webServer.beginSTA / OTA — both expect mDNS to be up.
     wb_net::tick();
 
-    // WiFi connected — start services
+    // Network started — start services
     webServer.beginSTA();
     wallboxMQTT.begin();
     wbws::begin();
@@ -614,10 +624,10 @@ void loop() {
     // Run WS loop (handle client connects/disconnects + frames)
     wbws::loop();
 
-    // Mark healthy once WiFi is connected AND we've been up > 30s.
+    // Mark healthy once the network is connected AND we've been up > 30s.
     // Healthy = clears the boot counter and tells ESP OTA layer the
     // partition is good (no rollback on next boot). Only fires once.
-    if (!wb_health::isHealthy() && WiFi.status() == WL_CONNECTED && millis() > 30000) {
+    if (!wb_health::isHealthy() && wb_net::isConnected() && millis() > 30000) {
         wb_health::markHealthy();
     }
 

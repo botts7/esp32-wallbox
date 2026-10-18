@@ -7,7 +7,7 @@
 #include <Preferences.h>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
-#include <WiFi.h>
+#include "wb_net.h"
 #include <ArduinoJson.h>
 #include <time.h>
 
@@ -288,8 +288,8 @@ bool canAcceptOta(String& reasonOut) {
         reasonOut = "uptime too low (need >" + String(need / 1000) + "s, have " + String(up / 1000) + "s)";
         return false;
     }
-    if (WiFi.status() != WL_CONNECTED) {
-        reasonOut = "WiFi not connected";
+    if (!wb_net::isConnected()) {
+        reasonOut = "network not connected";
         return false;
     }
     if (!_healthy) {
@@ -308,7 +308,7 @@ uint32_t otaRetryAfterSeconds() {
         uint32_t remainSec = (need - up + 999) / 1000;
         return remainSec + 2;
     }
-    // Other rejection reasons (WiFi, healthy gate) are transient and
+    // Other rejection reasons (network, healthy gate) are transient and
     // typically self-heal within a few seconds — short retry is fine.
     return 5;
 }

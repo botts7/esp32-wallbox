@@ -26,4 +26,8 @@ uint32_t localIP();
 // The Ethernet MAC (derived from the chip's eFuse — W5500 has none of its own).
 void macAddress(uint8_t out[6]);
 
+// True once per DHCP lease (initial boot and every re-plug), then clears.
+// Set from the IP event task; drained by wb_net::tick() on the main task.
+bool takeGotIp();
+
 }  // namespace wb_eth

@@ -12,6 +12,7 @@
 #include "wb_watchdog.h"
 #include "wb_ws.h"
 #include "wb_mqtt.h"
+#include "wb_net.h"
 #include "_gen_settings_body_gz.h"  // build-time gzipped /settings body (task #75)
 #include "_gen_info_body_gz.h"      // build-time gzipped /info body (v3.1 #103)
 #include "_gen_dashboard_body_gz.h" // build-time gzipped "/" dashboard body (v3.1 #103)
@@ -753,10 +754,17 @@ String wb_buildStatusJson() {
     // binary asset suffix so the HA integration's Update entity fetches the right
     // .bin for OTA. See scripts/version.py (WB_BOARD).
     json += ",\"board\":\"" WB_BOARD "\"";
+    // Transport-neutral link state (#62): net = "wifi" | "eth". ip and mac
+    // are the gateway's address on whichever link it uses. The wifi / ssid /
+    // wifi_rssi fields below keep their literal WiFi meaning; wifi_rssi is
+    // null on the Ethernet build (no radio link to measure).
+    json += ",\"net\":\"" + String(wb_net::transport()) + "\"";
+    json += ",\"net_connected\":" + String(wb_net::isConnected() ? "true" : "false");
+    json += ",\"mac\":\"" + wb_net::macString() + "\"";
     json += ",\"wifi\":\"" + String(WiFi.status() == WL_CONNECTED ? "connected" : "disconnected") + "\"";
-    json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
+    json += ",\"ip\":\"" + wb_net::localIP().toString() + "\"";
     json += ",\"ssid\":\"" + wb_jsonEsc(WiFi.SSID()) + "\"";
-    json += ",\"wifi_rssi\":" + String(WiFi.RSSI());
+    json += ",\"wifi_rssi\":" + (wb_net::isWired() ? String("null") : String(WiFi.RSSI()));
     // ESP32-S3 internal die temperature (°C). Diagnostic — lets users watch for
     // thermal issues (e.g. a hot garage) rather than guessing (task #162, _Mike).
     json += ",\"chip_temp\":" + wb_chipTempJson();  // null on hw without a real sensor
@@ -770,7 +778,8 @@ String wb_buildStatusJson() {
     // the power-meter's presence. True once g_ecos returns a valid object.
     json += ",\"eco_smart\":" + String(wallboxBLE.ecoSmartPresent() ? "true" : "false");
     // Whether a vehicle is plugged in (r_dat.st-based, see carConnected()).
-    // Surfaces a real cable signal — NB sta_connected above is WiFi, not the car.
+    // Surfaces a real cable signal — NB sta_connected below is the gateway's
+    // own network link, not the car.
     json += ",\"car_connected\":" + String(wallboxBLE.carConnected() ? "true" : "false");
     // Charge-reminder engine (#127): UTC epoch of the next enabled
     // schedule (null when none / NTP not synced) + the plug-in nudge.
@@ -839,7 +848,9 @@ String wb_buildStatusJson() {
     json += ",\"ble_pause_remaining\":" + String(wallboxBLE.pauseRemainingMs() / 1000);
     json += ",\"ble_last_activity_s\":" + String(wallboxBLE.lastActivityAge() / 1000);
     json += ",\"auth_enabled\":" + String(configMgr.get().authEnabled && configMgr.get().authPass.length() > 0 ? "true" : "false");
-    json += ",\"sta_connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
+    // "Gateway is on the LAN" (WiFi STA or wired, #62). Only reader is the
+    // firmware's own auth-disabled warning.
+    json += ",\"sta_connected\":" + String(wb_net::isConnected() ? "true" : "false");
     // schedule_paused: manual override active (schedules / Eco-Smart suspended,
     // the Wallbox app's "Resume" state). Authoritative signal is
     // r_lse.control_mode == 1 (0 = automatic); this is model-agnostic. r_dat.gen
@@ -1951,10 +1962,14 @@ function showWiFi(){
      a single 'Connected' word from the charger's gwsta. */
   var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;
   r.style.display='block';
-  r.innerHTML="<h2>&#x1F4F6; WiFi Status</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";
+  r.innerHTML="<h2>&#x1F4F6; Network Status</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";
   fetch('/api/status').then(function(x){return x.json()}).then(function(s){
-    var h="<h2>&#x1F4F6; WiFi Status</h2>";
-    var sBadge=s.wifi==='connected'?"<span class='badge badge-success'>Connected</span>":"<span class='badge badge-warning'>"+(s.wifi||'Unknown')+"</span>";
+    /* #62: s.net / s.net_connected follow the active link (wired on the
+       W5500 build); older firmware without them falls back to s.wifi. */
+    var eth=s.net==='eth';
+    var h="<h2>&#x1F4F6; "+(eth?'Ethernet':'WiFi')+" Status</h2>";
+    var on=s.net?s.net_connected:s.wifi==='connected';
+    var sBadge=on?"<span class='badge badge-success'>Connected</span>":"<span class='badge badge-warning'>"+(eth?'No link':(s.wifi||'Unknown'))+"</span>";
     h+=row('Status',sBadge);
     if(s.ssid)h+=row('Network',s.ssid);
     if(s.ip)h+=row('IP Address',s.ip);
@@ -2921,10 +2936,10 @@ String wb_buildConfigPage() {
 
     page += "<h1>&#x1F527; Configuration</h1>";
 
-    bool wifiOk = WiFi.status() == WL_CONNECTED;
+    bool netOk = wb_net::isConnected();
     bool bleOk = wallboxBLE.isConnected();
     page += "<div class='status-bar'>";
-    page += "<span class='status-item'><span class='status-dot " + String(wifiOk ? "dot-green" : "dot-red") + "'></span>" + (wifiOk ? WiFi.localIP().toString() : String("No WiFi")) + "</span>";
+    page += "<span class='status-item'><span class='status-dot " + String(netOk ? "dot-green" : "dot-red") + "'></span>" + (netOk ? wb_net::localIP().toString() : String(wb_net::isWired() ? "No link" : "No WiFi")) + "</span>";
     page += "<span class='status-item'><span class='status-dot " + String(bleOk ? "dot-green" : "dot-yellow") + "'></span>BLE: " + String(wallboxBLE.stateStr()) + "</span>";
     page += "</div>";
 
@@ -3318,7 +3333,7 @@ function loadGW(){return fetch('/api/status').then(function(r){return r.json()})
   if(d.ssid)s+=row('WiFi',d.ssid);
   if(d.ip)s+=row('IP',d.ip);
   if(typeof d.wifi_rssi==='number')s+=row('Signal',d.wifi_rssi+' dBm');
-  if(s){c+=_sect('Gateway WiFi')+s}
+  if(s){c+=_sect(d.net==='eth'?'Gateway Ethernet':'Gateway WiFi')+s}
   document.getElementById('chg').innerHTML=c||'<span style="color:var(--text3)">Connect BLE to see charger details</span>';
   if(d.chg_fw_changed){var b=document.getElementById('fw-changed-banner');var det=document.getElementById('fw-changed-detail');if(b){b.style.display='block';if(det&&d.chg_fw_prev&&d.dev_fw)det.textContent='Was '+d.chg_fw_prev+', now '+d.dev_fw+'.';}}
 }).catch(function(){})}
@@ -3438,7 +3453,7 @@ function loadDiag(){
   }).catch(function(){})
 }
 function clearDiag(){if(!confirm('Reset disconnect counters and clear event history?'))return;fetch('/api/diag/clear?csrf='+window.WB_CSRF,{method:'POST'}).then(function(){loadDiag()}).catch(function(){})}
-function renderGW(d){var h='';h+=row('WiFi',d.ssid+' ('+d.ip+')');h+=row('WiFi Signal',d.wifi_rssi+' dBm');h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h}
+function renderGW(d){var h='';if(d.net==='eth')h+=row('Ethernet',d.ip);else{h+=row('WiFi',d.ssid+' ('+d.ip+')');if(typeof d.wifi_rssi==='number')h+=row('WiFi Signal',d.wifi_rssi+' dBm')}h+=row('BLE State',d.ble);h+=row('BLE Signal',d.rssi+' dBm');h+=row('Commands Sent',d.tx);h+=row('Responses',d.rx);var m=Math.floor(d.uptime/60),hr=Math.floor(m/60);h+=row('Uptime',hr+'h '+m%60+'m');h+=row('Free Memory',Math.round(d.heap/1024)+' KB');document.getElementById('gw').innerHTML=h}
 // Live-update the Gateway card off the same WS push the top banner uses,
 // so BLE Signal here can't drift away from the banner's value.
 if(window.wbws){window.wbws.subscribe('ble',function(d){if(!window._lastStatus)return;window._lastStatus.ble=d.state;window._lastStatus.rssi=d.rssi;renderGW(window._lastStatus)});}
@@ -4977,8 +4992,14 @@ void WBWebServer::beginSTA() {
     // there's nothing left for the sync server to do — no fallback
     // listener, no registerRoutes(), no http.begin().
     _apMode = false;
-    Log.printf("[Web] http://%s/ (async on :80, sync retired)\n",
-        WiFi.localIP().toString().c_str());
+    // On the Ethernet build this runs before the DHCP lease (#62); the URL
+    // is logged by wb_net::tick() once the lease arrives instead.
+    if (wb_net::isConnected()) {
+        Log.printf("[Web] http://%s/ (async on :80, sync retired)\n",
+            wb_net::localIP().toString().c_str());
+    } else {
+        Log.println("[Web] async on :80 (sync retired), waiting for network");
+    }
 }
 
 void WBWebServer::loop() {

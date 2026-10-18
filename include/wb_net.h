@@ -40,10 +40,25 @@ bool begin();
 // instead of `WiFi.status()` to avoid the driver's internal mutex.
 bool isConnected();
 
+// Transport-neutral accessors — use these instead of the `WiFi` singleton
+// so the W5500 Ethernet build (WB_ETH_W5500) reports the wired link. On
+// WiFi builds they return exactly what the `WiFi` calls they replace did.
+IPAddress localIP();        // 0.0.0.0 until connected
+String macString();         // MAC used on the wire, "AA:BB:CC:DD:EE:FF"
+const char* transport();    // "eth" or "wifi"
+bool isWired();             // true on the Ethernet build
+
+// Blocking IPv4 DNS lookup (lwIP bounds it, ~14 s worst case). Returns true
+// with a non-zero `out` on success. Use instead of WiFi.hostByName(): that
+// waits on the Arduino WiFi event group, which the Ethernet build never
+// creates (#62), so its DNS callback would fire into a dead stack frame.
+bool hostByName(const char* host, IPAddress& out);
+
 // Per-loop tick: drains pending state changes (mDNS refresh on
 // reconnect, diag reportDisconnect / reportReconnect), and invokes
 // the backoff-gated explicit WiFi.reconnect() only when needed.
-// Cheap (~10 us) when nothing's pending.
+// On the Ethernet build it only drains a new DHCP lease (URL log +
+// mDNS rebind). Cheap (~10 us) when nothing's pending.
 void tick();
 
 // Counters / diag (mirrors wb_diag, surfaced for /api/status and HA).
