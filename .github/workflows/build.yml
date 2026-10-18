@@ -55,6 +55,14 @@ jobs:
       - name: Build ESP32-WROOM (esp32dev) firmware
         run: pio run -e esp32dev
 
+      # W5500 wired-Ethernet build (esp32s3-eth, #59 / #62). Compile-only guard so
+      # the Ethernet target can't silently regress the way #62 did: that was a
+      # shared-code change that built fine but broke MQTT / OTA on the eth build,
+      # which CI never compiled. Not attached to releases (flashed per board with
+      # the right SPI pins), just kept compiling on every push/PR.
+      - name: Build W5500 Ethernet (esp32s3-eth) firmware
+        run: pio run -e esp32s3-eth
+
       - name: Upload ESP32-WROOM artifact
         uses: actions/upload-artifact@v4
         with:
