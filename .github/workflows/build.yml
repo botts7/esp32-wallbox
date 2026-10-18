@@ -57,11 +57,14 @@ jobs:
       - name: Build ESP32-WROOM (esp32dev) firmware
         run: pio run -e esp32dev
 
-      # W5500 wired-Ethernet build (esp32s3-eth, #59 / #62). Compile-only guard so
-      # the Ethernet target can't silently regress the way #62 did: that was a
-      # shared-code change that built fine but broke MQTT / OTA on the eth build,
-      # which CI never compiled. Not attached to releases (flashed per board with
-      # the right SPI pins), just kept compiling on every push/PR.
+      # W5500 wired-Ethernet build (esp32s3-eth, #59 / #62 / #65). Built on every
+      # push/PR so the Ethernet target can't silently regress the way #62 did
+      # (a shared-code change that built fine but broke MQTT / OTA on the eth
+      # build, which CI never compiled). Releases attach a board-named OTA
+      # binary (like esp32dev) so wired gateways can update from HA. Its stock
+      # pins match the Waveshare ESP32-S3-ETH / POE-ETH; a board wired
+      # differently needs its OWN env (own WB_BOARD), never edited pins here, or
+      # HA would offer it this stock-pin image (see platformio.ini).
       - name: Build W5500 Ethernet (esp32s3-eth) firmware
         run: pio run -e esp32s3-eth
 
@@ -74,6 +77,16 @@ jobs:
             .pio/build/esp32dev/firmware.elf
             .pio/build/esp32dev/bootloader.bin
             .pio/build/esp32dev/partitions.bin
+
+      - name: Upload W5500 Ethernet artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-esp32s3-eth
+          path: |
+            .pio/build/esp32s3-eth/firmware.bin
+            .pio/build/esp32s3-eth/firmware.elf
+            .pio/build/esp32s3-eth/bootloader.bin
+            .pio/build/esp32s3-eth/partitions.bin
 
       - name: Compute SHA256
         run: |
@@ -143,6 +156,13 @@ jobs:
              ".pio/build/esp32dev/wallbox-gateway-${GITHUB_REF_NAME}-esp32dev.bin"
           cp .pio/build/esp32dev/firmware.elf \
              ".pio/build/esp32dev/wallbox-gateway-${GITHUB_REF_NAME}-esp32dev.elf"
+          # W5500 Ethernet (esp32s3-eth, #65): same idea for wired gateways
+          # (board="esp32s3-eth"). '-esp32s3.bin' and '-esp32s3-eth.bin' never
+          # suffix-match each other, so neither target can pick the other's image.
+          cp .pio/build/esp32s3-eth/firmware.bin \
+             ".pio/build/esp32s3-eth/wallbox-gateway-${GITHUB_REF_NAME}-esp32s3-eth.bin"
+          cp .pio/build/esp32s3-eth/firmware.elf \
+             ".pio/build/esp32s3-eth/wallbox-gateway-${GITHUB_REF_NAME}-esp32s3-eth.elf"
 
       - name: Attach to release
         if: github.event_name == 'release'
@@ -158,3 +178,5 @@ jobs:
             .pio/build/esp32s3/install.json
             .pio/build/esp32dev/wallbox-gateway-*-esp32dev.bin
             .pio/build/esp32dev/wallbox-gateway-*-esp32dev.elf
+            .pio/build/esp32s3-eth/wallbox-gateway-*-esp32s3-eth.bin
+            .pio/build/esp32s3-eth/wallbox-gateway-*-esp32s3-eth.elf

@@ -29,7 +29,7 @@
 
 **Chargers:** Pulsar MAX, MAX Pro, Plus (including pre-6.11 firmware, via a legacy schedule-write fallback), Pulsar Pro, and the original (Zentri) Pulsar. Reads work across all of them; a few writes are firmware-specific (see below).
 
-**Boards:** any ESP32-S3. A board **with PSRAM** is recommended (e.g. ESP32-S3-WROOM-1/1U N16R8, S3-DevKitC-1) — no-PSRAM boards run but have tighter heap headroom under sustained load. The classic ESP32-WROOM (`esp32dev`) is also built and supported. A wired-Ethernet build is available for Waveshare ESP32-S3-ETH / POE-ETH (WIZnet W5500) boards — it frees the 2.4 GHz radio for BLE and is hardware-validated on the POE-ETH (#59). Confirm your board's SPI pins before flashing.
+**Boards:** any ESP32-S3. A board **with PSRAM** is recommended (e.g. ESP32-S3-WROOM-1/1U N16R8, S3-DevKitC-1) — no-PSRAM boards run but have tighter heap headroom under sustained load. The classic ESP32-WROOM (`esp32dev`) is also built and supported. A wired-Ethernet build is available for Waveshare ESP32-S3-ETH / POE-ETH (WIZnet W5500) boards — it frees the 2.4 GHz radio for BLE and is hardware-validated on the POE-ETH (#59), and releases ship an `esp32s3-eth` binary so wired gateways update from HA like the others. Its stock SPI pins fit the ESP32-S3-ETH / POE-ETH; for a board wired differently, build from a **new** PlatformIO env rather than editing the pins in place (see `platformio.ini`), so HA never offers it the stock-pin image.
 
 **Known limitation:** charger **lock/unlock** does not yet work on pre-6.11 Pulsar Plus firmware — `w_lck` is accepted but no-ops, and the exact parameter the official app uses isn't known yet (#47). Everything else (status, start/stop, current, schedules, eco-smart) works on that firmware.
 
