@@ -11,6 +11,7 @@
 #include "wb_web.h"
 #include "wb_ws.h"
 #include "wb_log.h"
+#include "wb_heapwatch.h"
 #include "wb_health.h"
 #include "wb_diag.h"
 #include "wb_charge_log.h"
@@ -326,6 +327,9 @@ void setup() {
     // ended cleanly (software / power-on) or violently (panic / WDT /
     // brownout). Persisted to NVS so we can read it later even if the
     // log buffer wraps before the user gets to /logs.
+    // Before recordBootReason(): snapshots the previous boot's heap evidence
+    // so a crash-class boot entry can carry it.
+    wb_heapwatch::begin();
     wb_health::recordBootReason();
 
     // Bump the boot counter BEFORE anything else might crash. If we've
@@ -559,6 +563,7 @@ void loop() {
     // us roughly when in the boot we crashed (high count = late, low
     // count = early). Negligible cost — single non-atomic increment.
     wb_health::bumpBreadcrumbLoop();
+    wb_heapwatch::tick();
 
     // Always run web server + OTA + telnet
     ArduinoOTA.handle();

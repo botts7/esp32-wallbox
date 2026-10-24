@@ -4,6 +4,7 @@
 #include "wb_mqtt.h"
 #include "wb_version.h"
 #include "wb_ota_history.h"
+#include "wb_heapwatch.h"
 #include <Preferences.h>
 #include <esp_ota_ops.h>
 #include <esp_system.h>
@@ -94,6 +95,9 @@ void bumpBreadcrumbLoop() {
 
 void setBreadcrumbWriteMs(uint32_t maxMs) { _bc.max_write_ms = maxMs; }
 
+const char* breadcrumbPath() { return _bc.path; }
+const char* breadcrumbBapi() { return _bc.bapi; }
+
 const char* currentBootReasonStr() {
     switch (_thisBootReason) {
         case ESP_RST_POWERON:   return "power-on";
@@ -165,6 +169,9 @@ void recordBootReason() {
         bc["bapi_phase_ms"] = _bcSnapshot.bapi_phase_ms;
         bc["last_loop_ms"]  = _bcSnapshot.last_loop_ms;
         bc["max_write_ms"]  = _bcSnapshot.max_write_ms;
+        // Heap evidence from the crashed boot (failed allocs + lowest free
+        // heap, each with what was in flight). wb_heapwatch::begin() ran first.
+        wb_heapwatch::addPreviousToBootEntry(e);
     }
     // `at` is wall-clock epoch when first observed by SNTP. NTP hasn't
     // synced yet at recordBootReason() time (very early setup), so seed
