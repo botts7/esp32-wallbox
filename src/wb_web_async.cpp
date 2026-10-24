@@ -588,7 +588,10 @@ static void _registerReadOnlyRoutes() {
         }
         String body;
         if (wallboxBLE.tryFetchResponse(reqId, body) && body.length()) {
-            req->send(200, "application/json", body);
+            // Single-copy send, same reason as the /api/command reply below:
+            // req->send(200, type, String) keeps two full copies of a sizable
+            // BAPI reply live at once on the fragmented heap.
+            _sendJson(req, std::move(body));
             return;
         }
         uint32_t nextId = wallboxBLE.peekNextReqId();
