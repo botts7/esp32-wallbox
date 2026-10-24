@@ -48,6 +48,11 @@ void bumpBreadcrumbLoop();
 //     a value near/over the 300 ms INT_WDT window is the prime suspect.
 void setBreadcrumbWriteMs(uint32_t maxMs);
 
+// Read-only views of the live breadcrumbs (no allocation), for wb_heapwatch's
+// failed-alloc hook, which runs when the heap is already out.
+const char* breadcrumbPath();
+const char* breadcrumbBapi();
+
 // Get current boot's reset reason as a short string ("power-on",
 // "panic", "task-wdt", "brownout", "external", "software", ...).
 const char* currentBootReasonStr();

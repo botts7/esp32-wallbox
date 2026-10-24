@@ -11,6 +11,7 @@
 #include "wb_web.h"  // for webServer.requestReboot()
 #include "bapi.h"     // for MET_* constants used in /api/command
 #include "wb_control.h"  // last-command-by tracking for arbitration
+#include "wb_heapwatch.h"
 #include "wb_cmd.h"      // shared /api/command action resolver (#179)
 
 #if WB_ASYNC_WEB
@@ -380,6 +381,7 @@ static void _registerReadOnlyRoutes() {
         doc["uptime"]         = (uint32_t)(millis() / 1000);
         doc["ota_proven"]     = wb_health::otaProven();
         doc["ota_min_uptime"] = wb_health::effectiveOtaMinUptimeMs() / 1000;
+        wb_heapwatch::toJson(doc.as<JsonObject>());
         String out;
         serializeJson(doc, out);
         _sendJson(req, std::move(out));
@@ -1001,7 +1003,8 @@ static void _registerBleRoutes() {
         wb_wdt::extendTo(15);
         String body = wb_runBleScan();
         wb_wdt::restore();
-        req->send(200, "application/json", body);
+        // Single-copy: the body grows with the number of devices in range.
+        _sendJson(req, std::move(body));
     });
 
     // GET /api/wifi-scan — kicks off a WiFi scan (~5 s).
@@ -1081,6 +1084,20 @@ static void _registerBleRoutes() {
             req->send(plan.statusCode, "application/json", plan.responseJson);
             return;
         }
+        // Low-heap guard. This handler blocks the async_tcp task for up to
+        // waitMs while BLE answers, so other connections queue behind it, and
+        // the reply then needs fresh allocations. The 2026-10-18 panic was one
+        // of those failing (~300 bytes, heap exhausted). When free heap is
+        // already critical, refuse fast instead: the integration treats a
+        // failed BAPI read as "keep the previous value".
+        if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < 12288) {
+            AsyncWebServerResponse* res = req->beginResponse(503,
+                "application/json", "{\"error\":\"heap_pressure\",\"retry\":true}");
+            res->addHeader("Retry-After", "3");
+            req->send(res);
+            return;
+        }
+
         const char* met = plan.met.c_str();
         String par = plan.par;
 
@@ -1531,6 +1548,14 @@ void begin() {
     // the sync server's behavior (the sync WebServer auto-404s).
     _async.onNotFound([](AsyncWebServerRequest* req) {
         req->send(404, "text/plain", "Not Found");
+    });
+    // Stamp every request's path into the crash breadcrumb, so a panic or a
+    // wb_heapwatch heap-low / failed-alloc record names the endpoint in
+    // flight, not just the last /api/command. url() is a const ref: no
+    // allocation. /api/command overwrites it with its ?action= form.
+    _async.addMiddleware([](AsyncWebServerRequest* req, ArMiddlewareNext next) {
+        wb_health::setBreadcrumbPath(req->url().c_str());
+        next();
     });
     _async.begin();
     Log.println("[Web-async] Listening on :80 (production, post port-swap)");
