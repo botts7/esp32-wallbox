@@ -31,15 +31,15 @@ jobs:
     # underneath us (Ubuntu 26 from Oct 2026).
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
       - name: Cache PlatformIO
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cache/pip
@@ -71,7 +71,7 @@ jobs:
         run: pio run -e esp32s3-eth
 
       - name: Upload ESP32-WROOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firmware-esp32dev
           path: |
@@ -81,7 +81,7 @@ jobs:
             .pio/build/esp32dev/partitions.bin
 
       - name: Upload W5500 Ethernet artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firmware-esp32s3-eth
           path: |
@@ -97,7 +97,7 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firmware-esp32s3
           path: |
@@ -168,7 +168,7 @@ jobs:
 
       - name: Attach to release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             .pio/build/esp32s3/wallbox-gateway-*-esp32s3.bin
