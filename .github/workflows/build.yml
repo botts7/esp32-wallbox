@@ -27,7 +27,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Pinned like the PlatformIO platform: ubuntu-latest moves to a new image
+    # underneath us (Ubuntu 26 from Oct 2026).
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
