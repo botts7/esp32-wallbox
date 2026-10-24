@@ -1126,7 +1126,16 @@ static void _registerBleRoutes() {
         if (got == pdTRUE) {
             String resp;
             if (wallboxBLE.tryFetchResponse(reqId, resp) && resp.length()) {
-                req->send(200, "application/json", resp);
+                // Single-copy, shared_ptr pull-based send (same as every other
+                // JSON endpoint). The direct req->send(200, type, String) path
+                // copies the body into an AsyncBasicResponse AND builds a second
+                // full copy in _respond, so a sizable reply (e.g. r_dca) needs
+                // two copies live at once on the fragmented internal heap. That
+                // transient peak panicked the async task under concurrent
+                // /api/status polls (LoadProhibited in String::move, breadcrumb
+                // bapi=q:r_dca, 2026-10-18). _sendJson never makes the second
+                // copy.
+                _sendJson(req, std::move(resp));
                 return;
             }
         }
