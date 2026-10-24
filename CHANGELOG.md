@@ -4,6 +4,24 @@ All notable changes to this project.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **W5500 Ethernet gateways can update from Home Assistant.** Releases now attach
+  `wallbox-gateway-<tag>-esp32s3-eth.bin` (plus the matching `.elf` for coredump
+  symbolisation), so the integration's Update entity finds an asset for
+  `board="esp32s3-eth"` instead of reporting "No firmware asset". CI also
+  uploads a `firmware-esp32s3-eth` artifact for testers (#65).
+  - **One manual update first:** gateways on v3.2.23 or an older Ethernet build
+    reject HA and web-UI OTA (their admission check still looks at WiFi, fixed
+    in #63). Push this release's `-esp32s3-eth.bin` once over espota
+    (`espota.py -i <gateway IP> -a <OTA password> -f wallbox-gateway-<tag>-esp32s3-eth.bin`)
+    or flash it over USB; HA OTA works from then on. Do **not** use
+    `pio run -e ota`: that env builds the WiFi `esp32s3` image, which never
+    starts the W5500 and strands a wired-only gateway.
+  - Boards with a non-stock W5500 pin map must build from their own PlatformIO
+    env (see `platformio.ini`) so HA never offers them the stock-pin image.
+
 ## [3.2.23] - 2026-09-16
 
 ### Fixed
