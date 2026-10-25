@@ -182,3 +182,31 @@ jobs:
             .pio/build/esp32dev/wallbox-gateway-*-esp32dev.elf
             .pio/build/esp32s3-eth/wallbox-gateway-*-esp32s3-eth.bin
             .pio/build/esp32s3-eth/wallbox-gateway-*-esp32s3-eth.elf
+
+      # The Pages web installer (docs/index.html) loads its manifest and .bin
+      # files from docs/firmware on the SAME site. It can't point at the release
+      # assets: GitHub serves those without a CORS header, so the browser
+      # blocks the fetch ("failed to download manifest"). Copy each stable
+      # release's files there instead, so the installer always flashes the
+      # latest release. Prereleases (rc) leave the installer alone.
+      - name: Refresh the web installer on GitHub Pages
+        if: github.event_name == 'release' && !github.event.release.prerelease
+        run: |
+          set -e
+          src="$RUNNER_TEMP/installer"
+          mkdir -p "$src"
+          cp .pio/build/esp32s3/firmware.bin .pio/build/esp32s3/bootloader.bin \
+             .pio/build/esp32s3/partitions.bin "$src/"
+          cp .pio/build/esp32s3/install.json "$src/manifest.json"
+          git fetch --depth=1 origin main
+          git checkout -B installer-refresh origin/main
+          cp "$src"/firmware.bin "$src"/bootloader.bin "$src"/partitions.bin \
+             "$src"/manifest.json docs/firmware/
+          git add docs/firmware
+          if git diff --cached --quiet; then
+            echo "installer already at ${GITHUB_REF_NAME}"; exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -m "installer: web installer at ${GITHUB_REF_NAME}"
+          git push origin HEAD:main
