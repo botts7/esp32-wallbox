@@ -2173,6 +2173,7 @@ function loadSchedules(_retry){
   if(!tzLoaded){tzReady.then(function(){loadSchedules(_retry)});return;}
   var l=document.getElementById('sch-list');if(l)l.innerHTML="<span class='spinner'></span> Loading...";
   fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(x){return x.json()}).then(function(st){
+    window._zentriRadio=!!(st&&st.zentri_radio);
     if(st&&st.zentri){window._schZentri=true;loadSchedulesZentri();}else{window._schZentri=false;loadSchedulesArr(_retry);}
   }).catch(function(){window._schZentri=false;loadSchedulesArr(_retry);});
 }
@@ -2214,6 +2215,9 @@ function loadSchedulesArr(_retry){
   fetch('/api/command?action=bapi&met=r_schs&par=null',{signal:AbortSignal.timeout(_retry?20000:15000)}).then(function(x){return x.json()}).then(function(d){
     if(d.error){
       if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+      // A Pulsar Plus on the Zentri radio (#74) may not fit the long r_schs
+      // reply through that radio; read the fixed slots instead (view-only).
+      if(window._zentriRadio){window._schZentri=true;loadSchedulesZentri();return}
       l.innerHTML='<span style="color:var(--danger)">'+d.error+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>';return
     }
     var sc=null;
@@ -2221,6 +2225,7 @@ function loadSchedulesArr(_retry){
     else if(Array.isArray(d.r))sc=d.r;
     if(sc===null){
       if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+      if(window._zentriRadio){window._schZentri=true;loadSchedulesZentri();return}
       l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return
     }
     // Charger days are Sunday-first; rotate to the GUI's Monday-first convention
@@ -2235,6 +2240,7 @@ function loadSchedulesArr(_retry){
     renderSchedules(sc);
   }).catch(function(e){
     if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+    if(window._zentriRadio){window._schZentri=true;loadSchedulesZentri();return}
     l.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>'
   });
 }

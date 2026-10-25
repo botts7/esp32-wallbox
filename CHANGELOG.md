@@ -21,6 +21,34 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     starts the W5500 and strands a wired-only gateway.
   - Boards with a non-stock W5500 pin map must build from their own PlatformIO
     env (see `platformio.ini`) so HA never offers them the stock-pin image.
+- **Pulsar chargers with the Zentri radio are detected automatically (#74).**
+  Some Pulsar Plus units (6.7.x) use the same Zentri TruConnect Bluetooth radio
+  as the original Pulsar. They used to fail with "Service UUID not found" until
+  the Zentri UUIDs were typed into Custom mode. The gateway now tries every
+  known radio when the configured one isn't there, and saves the right one.
+- **Heap evidence that survives a crash.** `/api/health` now reports
+  `alloc_fail` (failed memory allocations: size, free memory, the request and
+  BAPI command in flight) and `heap_low` (the lowest free memory, with the same
+  context). After a crash both are kept in that boot's history entry, so the
+  cause of a low-memory crash can be read without a serial console (#72).
+
+### Fixed
+- **A Pulsar Plus on the Zentri radio was treated as an original Pulsar.**
+  Car-connected used the original Pulsar's status codes (likely why a re-plug
+  wasn't detected, #74), and the dashboard and HA integration used the original
+  Pulsar's status names and schedule handling. These now follow the charger
+  itself (an original Pulsar reports no project in `fw_v_`). `/api/status`
+  `zentri` now means "original Pulsar"; the new `zentri_radio` reports the
+  Bluetooth module.
+- **Original Pulsar: stop and lock (#68).** Stop now sends `w_cha` par 0 (par 2
+  was rejected with error 5), and lock/unlock carry the charger's `usid`, which
+  it requires. Found with an HCI snoop of the Wallbox app by @stevenvanrossen-commits.
+- **`/api/command` refuses BAPI calls with a quick 503 when free memory is
+  critically low**, instead of blocking the web server on a Bluetooth wait (#72).
+- **Web installer works again.** It loaded its manifest from the GitHub
+  release, which browsers block (no CORS header), so every browser install
+  failed. It now loads from the installer site itself, refreshed on each
+  release (#75).
 
 ## [3.2.23] - 2026-09-16
 
