@@ -735,7 +735,7 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         String action = payload;
         action.toLowerCase();
         int val = (action == "1" || action == "lock" || action == "true") ? 1 : 0;
-        par = String(val);
+        par = wallboxBLE.lockPar(val == 1);   // + usid on the original Pulsar (#68)
         wallboxBLE.enqueueRequest(bapi::MET_LOCK, par.c_str());
 
     } else if (sub == "reboot") {
@@ -913,10 +913,12 @@ void WallboxMQTT::publishCarConnected(const String& statusJson, const String& re
             cs = rd["r"]["charger_status"] | -1;
     }
     bool connected;
-    if (wallboxBLE.isZentri()) {
-        // Zentri/original Pulsar uses a DIFFERENT st enum (0=ready/no-car,
-        // 1=charging, 2=connected, 3=waiting, 4=ramp) — applying the MAX 0-18
-        // set here mis-reported plug state. Anything >= 1 means a car is present.
+    if (wallboxBLE.isLegacyPulsar()) {
+        // The original Pulsar uses a DIFFERENT st enum (0=ready/no-car,
+        // 1=charging, 2=connected, 3=waiting, 4=ramp). st 6 = locked, both
+        // with and without a car (#68), so plug state is unknown while locked
+        // and reads as not connected. Keyed on the product, not the Zentri
+        // radio: a Pulsar Plus on that radio (#74) uses the MAX/Plus set below.
         connected = (st >= 1 && st <= 4);
     } else {
         // Local r_dat.st codes where a car is physically plugged in (MAX/Plus).

@@ -27,6 +27,11 @@ static const char* MAX_CHR_UUID  = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
 static const char* PLUS_SVC_UUID = "331a36f5-2459-45ea-9d95-6142f0c4b307";
 static const char* PLUS_CHR_UUID = "a9da6040-0823-4995-94ec-9ce41ca28833";
 static const char* PLUS_TXC_UUID = "a73e9a10-628f-4494-a099-12efaf72258f";
+// Zentri TruConnect (AMS002) radio: original Pulsar AND some Pulsar Plus
+// units (#68, #74). Commands go to the RX char, replies arrive on the TX char.
+static const char* ZENTRI_SVC_UUID = "175f8f23-a570-49bd-9627-815a6a27de2a";
+static const char* ZENTRI_CHR_UUID = "1cce1ea8-bd34-4813-a00a-c76e028fadcb";
+static const char* ZENTRI_TXC_UUID = "cacc07ff-ffff-4c48-8fae-a9ef71b75e26";
 
 // bleErrName() moved to wb_ble_err.h (#161) — now also decodes HCI disconnect
 // reasons and GATT reply codes, not just host errors.
@@ -486,41 +491,40 @@ void WallboxBLE::_connect() {
         // family's service UUID — if present, switch in memory AND
         // persist to NVS so subsequent boots come up clean without
         // the user having to manually fix /config.
-        bool weAreMax = _svcUUID.equalsIgnoreCase(MAX_SVC_UUID);
-        bool weArePlus = _svcUUID.equalsIgnoreCase(PLUS_SVC_UUID);
-        const char* otherSvcUUID = weAreMax ? PLUS_SVC_UUID
-                                  : weArePlus ? MAX_SVC_UUID
-                                  : nullptr;
-        NimBLERemoteService* otherSvc = otherSvcUUID
-            ? _client->getService(otherSvcUUID) : nullptr;
-        if (otherSvc) {
+        // The Zentri TruConnect radio (#74: Pulsar Plus 6.7.x; #68: original
+        // Pulsar) is probed too, so those chargers no longer need the UUIDs
+        // typed into Custom mode by hand. It's adopted as model "custom": the
+        // product behaviour then follows the charger's own fw_v_ report (see
+        // isLegacyPulsar / isPlusCommandFamily), and "plus" would wrongly
+        // trigger the BGX13P mode switch.
+        struct Family { const char* svc; const char* chr; const char* txc;
+                        const char* model; const char* label; };
+        static const Family kFamilies[] = {
+            { MAX_SVC_UUID,    MAX_CHR_UUID,    "",              "max",    "MAX (single-char)" },
+            { PLUS_SVC_UUID,   PLUS_CHR_UUID,   PLUS_TXC_UUID,   "plus",   "Plus (dual-char, BGX13P)" },
+            { ZENTRI_SVC_UUID, ZENTRI_CHR_UUID, ZENTRI_TXC_UUID, "custom", "Zentri TruConnect (dual-char)" },
+        };
+        const Family* found = nullptr;
+        NimBLERemoteService* otherSvc = nullptr;
+        for (const Family& f : kFamilies) {
+            if (_svcUUID.equalsIgnoreCase(f.svc)) continue;   // the one that just failed
+            otherSvc = _client->getService(f.svc);
+            if (otherSvc) { found = &f; break; }
+        }
+        if (found) {
             Log.println("[BLE] ===========================================================");
-            Log.printf( "[BLE] Auto-switching protocol family: configured %s,\n",
-                weAreMax ? "MAX (single-char)" : "Plus (dual-char)");
-            Log.printf( "[BLE] but charger speaks %s — adopting it and saving config.\n",
-                weAreMax ? "Plus (dual-char)" : "MAX (single-char)");
-            Log.println("[BLE] (Wallbox migrated MAX to the dual-char protocol at FW 6.11.26.)");
+            Log.printf( "[BLE] Configured service %s not on this charger;\n", _svcUUID.c_str());
+            Log.printf( "[BLE] it speaks %s. Adopting it and saving config.\n", found->label);
             Log.println("[BLE] ===========================================================");
             WBConfig& cfg = configMgr.mut();
-            if (weAreMax) {
-                cfg.chargerModel = "plus";
-                cfg.bleService   = PLUS_SVC_UUID;
-                cfg.bleChar      = PLUS_CHR_UUID;
-                cfg.bleTxChar    = PLUS_TXC_UUID;
-                _svcUUID  = PLUS_SVC_UUID;
-                _chrUUID  = PLUS_CHR_UUID;
-                _txChrUUID = PLUS_TXC_UUID;
-                _chargerModel = "plus";
-            } else {
-                cfg.chargerModel = "max";
-                cfg.bleService   = MAX_SVC_UUID;
-                cfg.bleChar      = MAX_CHR_UUID;
-                cfg.bleTxChar    = "";
-                _svcUUID  = MAX_SVC_UUID;
-                _chrUUID  = MAX_CHR_UUID;
-                _txChrUUID = "";
-                _chargerModel = "max";
-            }
+            cfg.chargerModel = found->model;
+            cfg.bleService   = found->svc;
+            cfg.bleChar      = found->chr;
+            cfg.bleTxChar    = found->txc;
+            _svcUUID   = found->svc;
+            _chrUUID   = found->chr;
+            _txChrUUID = found->txc;
+            _chargerModel = found->model;
             configMgr.save();
             // Resolve the now-correct service and fall through to the
             // characteristic lookup. The connection is still up, no
@@ -1567,8 +1571,13 @@ void WallboxBLE::_pollStatus() {
             // capture it here too so the dashboard (which reads the status object)
             // and the setpoint clamps agree regardless of which response carries it.
             JsonDocument sd;
-            if (deserializeJson(sd, resp) == DeserializationError::Ok)
+            if (deserializeJson(sd, resp) == DeserializationError::Ok) {
                 _captureMaxAvail(sd["r"]);
+                // The charger's user id, which the original Pulsar needs in
+                // w_lck (#68). Cheap to keep for every model.
+                const uint32_t u = sd["r"]["usid"] | 0u;
+                if (u) _lastUsid = u;
+            }
         }
     }
     // Energy meter on same cycle — lightweight & useful
@@ -1863,7 +1872,38 @@ void WallboxBLE::_pollSchedules() {
     SchedSlot tmp[kMaxSchedSlots];
     uint8_t n = 0;
 
-    if (_isZentri) {
+    // Per-slot reads (Path B) are the original Pulsar's only option. A Pulsar
+    // Plus on the same Zentri radio (#74) is an array model, so it tries r_schs
+    // first and only falls back to per-slot reads if that read times out (its
+    // 23-byte MTU makes the long r_schs reply the likeliest thing to fail).
+    bool perSlot = isLegacyPulsar();
+    if (!perSlot) {
+        // Path A — array models (MAX/Plus/Copper/Quasar): one r_schs read
+        // returns the whole set. A transient miss (empty/parse-fail) keeps
+        // the previous cache rather than clobbering it to "no schedules".
+        String resp = _sendCommandDirect(bapi::MET_GET_SCHEDULES, "null", 8000);
+        if (resp.isEmpty()) {
+            if (!_isZentri) return;
+            perSlot = true;              // Zentri-radio Plus: try per-slot reads
+        } else {
+            JsonDocument d;
+            if (deserializeJson(d, resp) != DeserializationError::Ok) return;
+            JsonArray arr = d["r"]["schedules"].is<JsonArray>()
+                              ? d["r"]["schedules"].as<JsonArray>()
+                              : d["r"].as<JsonArray>();
+            for (JsonObject s : arr) {
+                if (n >= kMaxSchedSlots) break;
+                tmp[n].startMin = _hhmmToMin(s["start"] | "0000");
+                tmp[n].days     = s["days"] | 0;
+                // r_schs reports enabled as integer 1/0, not a JSON bool, so use
+                // .as<bool>() (numeric->bool) — `| false` would strict-type a
+                // number to the default and read every schedule as disabled.
+                tmp[n].enabled  = s["enabled"].as<bool>();
+                n++;
+            }
+        }
+    }
+    if (perSlot) {
         // Path B — legacy Pulsar (Zentri AMS): r_schs times out on this
         // module, so read fixed slots sequentially (r_sch + bare-int sid)
         // until the charger stops returning a sid. days==0 marks an
@@ -1885,27 +1925,6 @@ void WallboxBLE::_pollSchedules() {
                 tmp[n].enabled  = true;         // days!=0 == enabled on Zentri
                 n++;
             }
-        }
-    } else {
-        // Path A — array models (MAX/Plus/Copper/Quasar): one r_schs read
-        // returns the whole set. A transient miss (empty/parse-fail) keeps
-        // the previous cache rather than clobbering it to "no schedules".
-        String resp = _sendCommandDirect(bapi::MET_GET_SCHEDULES, "null", 8000);
-        if (resp.isEmpty()) return;
-        JsonDocument d;
-        if (deserializeJson(d, resp) != DeserializationError::Ok) return;
-        JsonArray arr = d["r"]["schedules"].is<JsonArray>()
-                          ? d["r"]["schedules"].as<JsonArray>()
-                          : d["r"].as<JsonArray>();
-        for (JsonObject s : arr) {
-            if (n >= kMaxSchedSlots) break;
-            tmp[n].startMin = _hhmmToMin(s["start"] | "0000");
-            tmp[n].days     = s["days"] | 0;
-            // r_schs reports enabled as integer 1/0, not a JSON bool, so use
-            // .as<bool>() (numeric->bool) — `| false` would strict-type a
-            // number to the default and read every schedule as disabled.
-            tmp[n].enabled  = s["enabled"].as<bool>();
-            n++;
         }
     }
 
@@ -1965,7 +1984,8 @@ bool WallboxBLE::carConnected() {
     JsonDocument d;
     if (deserializeJson(d, s) != DeserializationError::Ok) return false;
     int st = d["r"]["st"] | -1;
-    // Same plugged-in r_dat.st code set as WallboxMQTT::publishCarConnected.
+    // Same rules as WallboxMQTT::publishCarConnected (see there).
+    if (isLegacyPulsar()) return st >= 1 && st <= 4;
     bool connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
                       st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
     // Locked-with-car heuristic (st==6 folds locked/no-car + locked/car):
@@ -2030,6 +2050,10 @@ bool WallboxBLE::schedulePaused() {
 }
 
 bool WallboxBLE::isPlusCommandFamily() const {
+    // Original Pulsar (Zentri radio, no fw_v_ project): the Wallbox app stops
+    // with w_cha par=0 and starts with par=1; par=2 is rejected with error 5
+    // (HCI snoop, #68).
+    if (isLegacyPulsar()) return true;
     // Product identity from the charger's own chg_project self-report — the
     // same source the HA device card uses. A Pulsar Plus reports par=0 stop
     // semantics regardless of whether it rides the Max single-char transport.
@@ -2105,4 +2129,10 @@ void WallboxBLE::copyCachedNotifications(String& out, uint32_t& seq) {
         out = _cachedNotificationsJson; seq = _seqNotifications;
         xSemaphoreGive(_cacheMutex);
     } else { out = ""; seq = 0; }
+}
+
+String WallboxBLE::lockPar(bool lock) const {
+    String par = lock ? "1" : "0";
+    if (isLegacyPulsar() && _lastUsid) par += ",\"usid\":" + String(_lastUsid);
+    return par;
 }

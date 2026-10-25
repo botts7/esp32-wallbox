@@ -769,7 +769,11 @@ String wb_buildStatusJson() {
     // thermal issues (e.g. a hot garage) rather than guessing (task #162, _Mike).
     json += ",\"chip_temp\":" + wb_chipTempJson();  // null on hw without a real sensor
     json += ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"";
-    json += ",\"zentri\":" + String(wallboxBLE.isZentri() ? "true" : "false");
+    // "zentri" drives the dashboard's per-slot, view-only schedule handling,
+    // which is an original-Pulsar trait, so it now means "original Pulsar".
+    // "zentri_radio" reports the BLE module itself (also on some Plus units, #74).
+    json += ",\"zentri\":" + String(wallboxBLE.isLegacyPulsar() ? "true" : "false");
+    json += ",\"zentri_radio\":" + String(wallboxBLE.isZentri() ? "true" : "false");
     // #129: meter capability — surfaces hide grid/solar when false (charger
     // has no Power Boost / Power Meter; e.g. the original Pulsar).
     json += ",\"meter\":" + String(wallboxBLE.meterPresent() ? "true" : "false");
