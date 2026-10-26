@@ -2,6 +2,7 @@
 #include "wb_config.h"
 #include "wb_control.h"
 #include "wb_cmd.h"
+#include "wb_bapi_caps.h"
 #include "wb_ble.h"
 #include "wb_log.h"
 #include "wb_version.h"
@@ -774,6 +775,15 @@ String wb_buildStatusJson() {
     // "zentri_radio" reports the BLE module itself (also on some Plus units, #74).
     json += ",\"zentri\":" + String(wallboxBLE.isLegacyPulsar() ? "true" : "false");
     json += ",\"zentri_radio\":" + String(wallboxBLE.isZentri() ? "true" : "false");
+    // Periodic BAPI reads this charger answers with an error, now skipped
+    // (wb_bapi_caps). Shows up in compatibility reports.
+    {
+        JsonDocument cd;
+        wb_bapi_caps::toJson(cd.to<JsonArray>());
+        String arr;
+        serializeJson(cd, arr);
+        json += ",\"bapi_unsupported\":" + arr;
+    }
     // #129: meter capability — surfaces hide grid/solar when false (charger
     // has no Power Boost / Power Meter; e.g. the original Pulsar).
     json += ",\"meter\":" + String(wallboxBLE.meterPresent() ? "true" : "false");

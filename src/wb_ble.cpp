@@ -5,6 +5,7 @@
 #include "wb_zentri_normalize.h"
 #include "wb_copper_normalize.h"
 #include "wb_ble_err.h"   // bleErrName() — decode NimBLE codes to names (#161)
+#include "wb_bapi_caps.h"  // skip periodic reads this charger doesn't support
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
@@ -569,6 +570,9 @@ void WallboxBLE::_connect() {
     NimBLERemoteCharacteristic* zentriMode = svc->getCharacteristic(ZENTRI_MODE_UUID);
     const bool zentri = (zentriMode != nullptr);
     _isZentri = zentri;  // surfaced via /api/status so the UI reads schedules per-sid (#12)
+    // New link, maybe a different charger or firmware: relearn which periodic
+    // reads it supports.
+    wb_bapi_caps::reset();
     if (zentri) {
         Log.println("[BLE] Zentri TruConnect peripheral detected (20b9794f mode char present)");
         // Relax connection params for this module. The default (latency 2,
@@ -1582,7 +1586,7 @@ void WallboxBLE::_pollStatus() {
     }
     // Energy meter on same cycle — lightweight & useful
     if (_state != State::CONNECTED) return;
-    String meter = _sendCommandDirect(bapi::MET_GET_METER);
+    String meter = _pollRead(bapi::MET_GET_METER);
     if (!meter.isEmpty()) {
         // Copper SB reports meter fields under different keys (#20). Self-
         // detecting no-op until the Copper meter mapping is implemented.
@@ -1611,7 +1615,7 @@ void WallboxBLE::_pollStatus() {
     uint32_t nowMs = millis();
     if (nowMs - _lastLsePoll < LSE_POLL_MS) return;
     _lastLsePoll = nowMs;
-    String lse = _sendCommandDirect(bapi::MET_GET_LSE);
+    String lse = _pollRead(bapi::MET_GET_LSE);
     if (!lse.isEmpty()) {
         // r_lse carries the Wallbox account user_id — strip it before
         // caching so it can never reach an MQTT topic, the WS feed, or an
@@ -1637,11 +1641,21 @@ void WallboxBLE::_pollStatus() {
 
 void WallboxBLE::_pollRealtime() {
     if (_state != State::CONNECTED) return;
-    String resp = _sendCommandDirect(bapi::MET_GET_REALTIME);
-    if (resp.isEmpty() && _state == State::CONNECTED) {
+    String resp = _pollRead(bapi::MET_GET_REALTIME);
+    if (resp.isEmpty() && _state == State::CONNECTED &&
+        !wb_bapi_caps::unsupported(bapi::MET_GET_REALTIME)) {
         // One retry on a marginal link, same rationale as _pollStatus (#20).
         delay(50);
-        resp = _sendCommandDirect(bapi::MET_GET_REALTIME);
+        resp = _pollRead(bapi::MET_GET_REALTIME);
+    }
+    if (wb_bapi_caps::unsupported(bapi::MET_GET_REALTIME)) {
+        // No r_sta on this charger (the original Pulsar, #68), so nothing
+        // refreshes the lock state after connect. Read r_lck instead, the same
+        // read the Wallbox app uses, and keep a minimal realtime record holding
+        // just lock_status, so the dashboard, the MQTT lock sensor/switch and
+        // chg_lock_state all stay live without each needing a special case.
+        _pollLockFallback();
+        return;
     }
     if (!resp.isEmpty()) {
         _storeCache(_cachedRealtimeJson, _seqRealtime, resp);
@@ -1692,7 +1706,7 @@ void WallboxBLE::_pollSettings() {
     if (_state != State::CONNECTED) return;
     JsonDocument merged;
 
-    String r1 = _sendCommandDirect(bapi::MET_GET_AUTOLOCK, "null", SETTINGS_TIMEOUT_MS);
+    String r1 = _pollRead(bapi::MET_GET_AUTOLOCK, "null", SETTINGS_TIMEOUT_MS);
     if (!r1.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r1) == DeserializationError::Ok) {
             // g_alo returns the lock timeout in seconds as a bare scalar:
@@ -1722,7 +1736,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r2 = _sendCommandDirect("g_ecos", "null", SETTINGS_TIMEOUT_MS);
+    String r2 = _pollRead("g_ecos", "null", SETTINGS_TIMEOUT_MS);
     if (!r2.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r2) == DeserializationError::Ok) {
             // Eco-Smart capability latch (#175), same shape as the meter
@@ -1758,7 +1772,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r3 = _sendCommandDirect("g_psh", "null", SETTINGS_TIMEOUT_MS);
+    String r3 = _pollRead("g_psh", "null", SETTINGS_TIMEOUT_MS);
     if (!r3.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r3) == DeserializationError::Ok) {
             // dyps may arrive as bool true/false instead of 1/0 on some
@@ -1776,7 +1790,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r4 = _sendCommandDirect("g_phsw", "null", SETTINGS_TIMEOUT_MS);
+    String r4 = _pollRead("g_phsw", "null", SETTINGS_TIMEOUT_MS);
     if (!r4.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r4) == DeserializationError::Ok) {
             merged["phase_switch"] = d["r"]["enabled"].as<bool>() ? 1 : 0;
@@ -1784,7 +1798,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r5 = _sendCommandDirect(bapi::MET_GET_TIMEZONE, "null", SETTINGS_TIMEOUT_MS);
+    String r5 = _pollRead(bapi::MET_GET_TIMEZONE, "null", SETTINGS_TIMEOUT_MS);
     if (!r5.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r5) == DeserializationError::Ok) {
             const char* tz = d["r"]["timezone"] | "UTC";
@@ -1804,7 +1818,7 @@ void WallboxBLE::_pollSettings() {
     // covers the full standby-dim config. Falls back to Medium (2) only if
     // the getter is unsupported/unreadable, preserving the old default.
     bool haloRead = false;
-    String r6 = _sendCommandDirect(bapi::MET_GET_HALO, "null", SETTINGS_TIMEOUT_MS);
+    String r6 = _pollRead(bapi::MET_GET_HALO, "null", SETTINGS_TIMEOUT_MS);
     if (!r6.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r6) == DeserializationError::Ok) {
             int bright = d["r"]["bright"] | -1;
@@ -1833,7 +1847,7 @@ void WallboxBLE::_pollSettings() {
 
 void WallboxBLE::_pollNotifications() {
     if (_state != State::CONNECTED) return;
-    String resp = _sendCommandDirect(bapi::MET_GET_NOTIFS, "null", 3000);
+    String resp = _pollRead(bapi::MET_GET_NOTIFS, "null", 3000);
     if (resp.isEmpty()) return;
     JsonDocument d;
     if (deserializeJson(d, resp) != DeserializationError::Ok) return;
@@ -2151,4 +2165,33 @@ String WallboxBLE::lockPar(bool lock) const {
     String par = lock ? "1" : "0";
     if (isLegacyPulsar() && _lastUsid) par += ",\"usid\":" + String(_lastUsid);
     return par;
+}
+
+// Periodic reads go through here: skips a read this charger has proven it
+// doesn't support, and feeds every reply to the tracker (wb_bapi_caps).
+String WallboxBLE::_pollRead(const char* met, const char* par, uint32_t timeoutMs) {
+    if (wb_bapi_caps::shouldSkip(met)) return String();
+    String r = _sendCommandDirect(met, par, timeoutMs);
+    wb_bapi_caps::record(met, r);
+    return r;
+}
+
+void WallboxBLE::_pollLockFallback() {
+    if (_state != State::CONNECTED) return;
+    String r = _pollRead(bapi::MET_GET_LOCK_STATE, "null", 2000);
+    if (r.isEmpty()) return;
+    JsonDocument d;
+    if (deserializeJson(d, r) != DeserializationError::Ok || !d["r"].is<int>()) return;
+    const int lock = d["r"].as<int>();
+    const bool changed = (lock != (int)_chgLockState);
+    _chgLockState = lock;
+    String cached; uint32_t seq;
+    copyCachedRealtime(cached, seq);
+    if (changed || cached.indexOf("lock_status") < 0) {
+        JsonDocument rt;
+        rt["r"]["lock_status"] = lock;
+        String out;
+        serializeJson(rt, out);
+        _storeCache(_cachedRealtimeJson, _seqRealtime, out);
+    }
 }

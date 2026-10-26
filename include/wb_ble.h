@@ -592,6 +592,11 @@ private:
     // identity reads, PIN auth, drain loop). External callers go
     // through the public sendCommand() wrapper which queues + waits.
     String _sendCommandDirect(const char* met, const char* par = "null", uint32_t timeoutMs = 5000);
+    // Periodic read that skips methods this charger doesn't support
+    // (wb_bapi_caps) and records every reply. Same signature as above.
+    String _pollRead(const char* met, const char* par = "null", uint32_t timeoutMs = 5000);
+    // Original Pulsar: refresh lock state from r_lck when r_sta is unsupported.
+    void _pollLockFallback();
 
     // RSSI smoothing — NimBLE's getRssi() returns per-packet instantaneous
     // values that swing wildly (issue #6). Sample on a fixed cadence and

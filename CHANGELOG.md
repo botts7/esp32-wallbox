@@ -32,6 +32,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   context). After a crash both are kept in that boot's history entry, so the
   cause of a low-memory crash can be read without a serial console (#72).
 
+- **Periodic reads a charger doesn't support are skipped.** After 3 error
+  replies in a row a read is skipped (retried every 30 minutes, relearned on
+  every reconnect). The original Pulsar rejects 8 of them every cycle, each a
+  multi-packet exchange over its small Bluetooth MTU. `/api/status`
+  `bapi_unsupported` lists what's skipped.
+
 ### Fixed
 - **A Pulsar Plus on the Zentri radio was treated as an original Pulsar.**
   Car-connected used the original Pulsar's status codes (likely why a re-plug
@@ -40,6 +46,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   itself (an original Pulsar reports no project in `fw_v_`). `/api/status`
   `zentri` now means "original Pulsar"; the new `zentri_radio` reports the
   Bluetooth module.
+- **Original Pulsar: lock state stays current (#68).** It was only read once at
+  connect, because the charger doesn't support the realtime read that refreshes
+  it everywhere else. It's now polled with `r_lck`, so the dashboard, the MQTT
+  lock sensor and switch, and the HA integration all follow lock and unlock.
+- **A plugged-in car no longer shows as unplugged when an OCPP backend changes
+  the schedule (#74).** Status 15 (OCPP Finishing: session over, cable still
+  in) now counts as plugged in.
+- **The boot log no longer prints the OTA password** (which is the web login
+  password when one is set). It now says how the password is formed.
+- **Original Pulsar: status 4 shows as "Paused"** (a paused session), not
+  "Starting".
 - **Original Pulsar: stop and lock (#68).** Stop now sends `w_cha` par 0 (par 2
   was rejected with error 5), and lock/unlock carry the charger's `usid`, which
   it requires. Found with an HCI snoop of the Wallbox app by @stevenvanrossen-commits.
