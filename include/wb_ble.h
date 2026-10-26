@@ -150,6 +150,10 @@ public:
     // buildCmd splices par verbatim, so appending the key yields that frame.
     String lockPar(bool lock) const;
 
+    // Is a car plugged in, from r_dat.st and r_sta.charger_status? The single
+    // rule behind carConnected() and the MQTT car_connected topic.
+    static bool carConnectedFromCodes(int st, int chargerStatus, bool legacyPulsar);
+
     // Power-meter capability (#129). False once the charger reports the
     // power-meter read (r_dca) as unsupported — BAPI error code 4 — i.e.
     // no Power Boost / Power Meter accessory fitted (e.g. the original

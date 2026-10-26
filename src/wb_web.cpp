@@ -1340,9 +1340,9 @@ static const char* DASH_BODY_SOURCE = R"HTML(
 // model-aware split was incorrect.
 var SN={0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',4:'Paused',5:'Charge Complete',6:'Locked',7:'Error',8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)',19:'Connected (No Current)'};
 // Original/Zentri Pulsar (#12) reports a small status enum that doesn't line
-// up with the MAX 0-18 codes (esp. st4 = charge ramp, not "Paused"). Used in
+// up with the MAX 0-18 codes. st4 is a paused/open session after w_cha 0 (#68). Used in
 // place of SN when /api/status reports zentri:true.
-var ZN={0:'Ready',1:'Charging',2:'Connected',3:'Waiting for Schedule',4:'Starting'};
+var ZN={0:'Ready',1:'Charging',2:'Connected',3:'Waiting for Schedule',4:'Paused'};
 var CHARGER_TZ='UTC';try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
 fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function _setText(id,txt){var el=document.getElementById(id);if(el)el.textContent=txt}
@@ -1355,7 +1355,7 @@ function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;
 // green (solar USED) vs grid energy split — the app's "green" number.
 var _pfState={cp:null,en:null,house:null,conn:null,surplus:null,green:null,grid:null};
 // Car-connected from the r_dat status code — mirrors firmware carConnected().
-function _carConn(st){return st===1||st===2||st===3||st===4||st===5||st===8||st===10||st===11||st===12||st===13||st===18}
+function _carConn(st){if(window._zentri)return st>=1&&st<=4;return st===1||st===2||st===3||st===4||st===5||st===8||st===10||st===11||st===12||st===13||st===15||st===18}
 // Flowing-dash animation: scrolls the stroke-dashoffset negatively so
 // dashes appear to march Grid->Charger->Vehicle. Speed scales with
 // the actual charging power so visually-faster = more kW. Capped so

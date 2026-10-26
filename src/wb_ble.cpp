@@ -1984,20 +1984,36 @@ bool WallboxBLE::carConnected() {
     JsonDocument d;
     if (deserializeJson(d, s) != DeserializationError::Ok) return false;
     int st = d["r"]["st"] | -1;
-    // Same rules as WallboxMQTT::publishCarConnected (see there).
-    if (isLegacyPulsar()) return st >= 1 && st <= 4;
-    bool connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
-                      st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
-    // Locked-with-car heuristic (st==6 folds locked/no-car + locked/car):
-    // r_sta.charger_status==19 has been observed as locked-with-car.
-    if (st == 6) {
-        String rt; copyCachedRealtime(rt, seq);
-        if (!rt.isEmpty()) {
-            JsonDocument rd;
-            if (deserializeJson(rd, rt) == DeserializationError::Ok &&
-                (rd["r"]["charger_status"] | -1) == 19) connected = true;
-        }
+    int cs = -1;
+    String rt; copyCachedRealtime(rt, seq);
+    if (!rt.isEmpty()) {
+        JsonDocument rd;
+        if (deserializeJson(rd, rt) == DeserializationError::Ok)
+            cs = rd["r"]["charger_status"] | -1;
     }
+    return carConnectedFromCodes(st, cs, isLegacyPulsar());
+}
+
+bool WallboxBLE::carConnectedFromCodes(int st, int cs, bool legacyPulsar) {
+    if (legacyPulsar) {
+        // The original Pulsar uses its own st enum (0 ready/no car, 1 charging,
+        // 2 connected, 3 waiting, 4 paused session). st 6 = locked, both with
+        // and without a car (#68), so plug state is unknown while locked and
+        // reads as not connected. Keyed on the product, not the Zentri radio:
+        // a Pulsar Plus on that radio (#74) uses the MAX/Plus set below.
+        return st >= 1 && st <= 4;
+    }
+    // MAX/Plus r_dat.st codes where a car is physically plugged in. 15 is OCPP
+    // "Finishing": the session ended but the cable is still in (OCPP 1.6
+    // connector state); a backend schedule change showed a plugged-in car as
+    // unplugged until it was added (#74).
+    bool connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
+                      st == 8 || st == 10 || st == 11 || st == 12 || st == 13 ||
+                      st == 15 || st == 18);
+    // Locked (st 6) carries no plug info: Wallbox folds locked/no-car and
+    // locked/car into the same code. STOPGAP: r_sta.charger_status 19 has been
+    // observed when locked WITH a car (unverified for locked without one).
+    if (st == 6 && cs == 19) connected = true;
     return connected;
 }
 

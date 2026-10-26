@@ -912,25 +912,7 @@ void WallboxMQTT::publishCarConnected(const String& statusJson, const String& re
         if (deserializeJson(rd, realtimeJson) == DeserializationError::Ok)
             cs = rd["r"]["charger_status"] | -1;
     }
-    bool connected;
-    if (wallboxBLE.isLegacyPulsar()) {
-        // The original Pulsar uses a DIFFERENT st enum (0=ready/no-car,
-        // 1=charging, 2=connected, 3=waiting, 4=ramp). st 6 = locked, both
-        // with and without a car (#68), so plug state is unknown while locked
-        // and reads as not connected. Keyed on the product, not the Zentri
-        // radio: a Pulsar Plus on that radio (#74) uses the MAX/Plus set below.
-        connected = (st >= 1 && st <= 4);
-    } else {
-        // Local r_dat.st codes where a car is physically plugged in (MAX/Plus).
-        connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
-                     st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
-        // Locked (st==6) carries no plug info in the local BLE protocol — Wallbox
-        // folds locked/no-car and locked/car-connected into the same code 6.
-        // STOPGAP: observed r_sta.charger_status == 19 when locked WITH a car.
-        // This is an unverified, firmware-specific heuristic pending a
-        // locked-with-NO-car measurement to confirm 19 is plug-specific.
-        if (st == 6 && cs == 19) connected = true;
-    }
+    bool connected = WallboxBLE::carConnectedFromCodes(st, cs, wallboxBLE.isLegacyPulsar());
     String topic = baseTopic() + "/car_connected";
     _client->publish(topic.c_str(), connected ? "ON" : "OFF", true);  // retain
 }
