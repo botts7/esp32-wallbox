@@ -372,6 +372,7 @@ private:
     // via isConnected(). Without this the compiler may cache the read.
     volatile State _state = State::DISCONNECTED;
     bool _pinRequired = false;
+    uint32_t _lastStopSentMs = 0;  // millis() of the last w_cha stop put on the wire (wb_stop_guard)
     bool _isZentri = false;  // set in _connect() when TruConnect module detected (#12)
     bool _meterPresent = true;  // #129: false once r_dca reports error code 4 (no meter)
     // #175: Eco-Smart (solar/green) capability. Default false — treat as

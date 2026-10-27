@@ -35,17 +35,18 @@ Plan buildCommand(const String& action, const String& value,
 
     p.outcome = Plan::ENQUEUE;
     if (action == "start") {
-        // If the charger is schedule/Eco-Smart paused, a bare w_cha start is
-        // re-paused by the charger within ~10 s (ollitaipale #47) — the override
-        // flag is still set. Clear it too, so "start charging" actually charges:
-        // the same start-then-Resume pairing users do by hand. Only when paused
-        // (schedulePaused() == control_mode 1); a normal start is unchanged. We
-        // are not charging while paused, so no defensive Stop is needed (that
-        // Stop is what can fault the charger, error 114 — see resume below).
+        // If the charger is schedule/Eco-Smart paused, a bare w_cha start can be
+        // re-paused within ~10 s (ollitaipale #47): the override flag is still
+        // set. Clear it FIRST, then start. The order matters: s_cmode mode 0
+        // hands control to Eco-Smart, so sent AFTER the start it re-queues the
+        // charge at night (Pulsar MAX, measured 2026-10-27: every overnight start
+        // since at least 19 Oct). Cleared first, the w_cha 1 that follows puts it
+        // in manual and it holds. Only when paused; a normal start is unchanged.
+        // No defensive Stop (that can fault the charger, error 114).
         if (wallboxBLE.schedulePaused()) {
-            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, "1");  // w_cha 1 first
-            p.met = "s_cmode";                                     // then clear the pause
-            p.par = "{\"mode\":0}";
+            wallboxBLE.enqueueRequest("s_cmode", "{\"mode\":0}");  // clear the pause first
+            p.met = bapi::MET_START_STOP;                            // then start (manual)
+            p.par = "1";
         } else {
             p.met = bapi::MET_START_STOP;
             p.par = "1";

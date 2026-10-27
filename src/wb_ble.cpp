@@ -5,6 +5,7 @@
 #include "wb_zentri_normalize.h"
 #include "wb_copper_normalize.h"
 #include "wb_ble_err.h"   // bleErrName() — decode NimBLE codes to names (#161)
+#include "wb_stop_guard.h"  // never send a stop to a non-charging session
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
@@ -259,7 +260,38 @@ void WallboxBLE::loop() {
                 // panic. If a method genuinely needs a longer wait it
                 // can override via bapiTimeoutMs from the caller.
                 uint32_t to = req.bapiTimeoutMs ? req.bapiTimeoutMs : 5000;
-                String resp = _sendCommandDirect(req.met, req.par, to);
+                String resp;
+                if (wb_stop_guard::isStopFrame(req.met, req.par)) {
+                    // A stop must only reach a charger that is delivering:
+                    // on a MAX a stop to a Paused session RESUMES it (toggle).
+                    // The charger takes seconds to report a stop, so a second
+                    // stop right after one still reads "charging": skip any stop
+                    // within the guard window of the last one sent. After that,
+                    // check a fresh r_dat, not the up-to-10 s old cache.
+                    String fresh;
+                    const bool recentStop = _lastStopSentMs != 0 &&
+                        (millis() - _lastStopSentMs) < wb_stop_guard::kRecentStopMs;
+                    if (!recentStop) fresh = _sendCommandDirect(bapi::MET_GET_STATUS, "null", 3000);
+                    if (recentStop) {
+                        Log.printf("[BLE] %s %s skipped: a stop was sent %lu ms ago (a second one would toggle it on)\n",
+                                   req.met, req.par, (unsigned long)(millis() - _lastStopSentMs));
+                        resp = wb_stop_guard::skippedReply();
+                    } else if (fresh.isEmpty()) {
+                        Log.printf("[BLE] %s %s not sent: couldn't read charger state\n", req.met, req.par);
+                        resp = wb_stop_guard::unreadableReply();
+                    } else if (!wb_stop_guard::delivering(fresh)) {
+                        Log.printf("[BLE] %s %s skipped: charger isn't charging (a stop would toggle it on)\n",
+                                   req.met, req.par);
+                        resp = wb_stop_guard::skippedReply();
+                    } else {
+                        resp = _sendCommandDirect(req.met, req.par, to);
+                        _lastStopSentMs = millis();
+                    }
+                } else {
+                    resp = _sendCommandDirect(req.met, req.par, to);
+                    // A start ends the stop window: a stop after it is a new one.
+                    if (strcmp(req.met, "w_cha") == 0) _lastStopSentMs = 0;
+                }
                 // Phase 3: hoist the response body into a shared_ptr so
                 // the response map and the MQTT pending-pub ring share
                 // ONE heap allocation instead of two copies. make_shared
