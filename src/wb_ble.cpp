@@ -910,6 +910,23 @@ void WallboxBLE::_connect() {
             if (_chgAppFw.length()) _discoveryStale = true;
         }
 
+        // Original Pulsar: no max_available_current anywhere, so every current
+        // setter fell back to 32 A. The Wallbox app reads the charger's limit
+        // with r_fsI on connect (16 on a 16 A unit, #68 snoop); use it as the
+        // ceiling so the firmware clamps, HA discovery and the integration /
+        // add-on (via the realtime record, see _pollLockFallback) all follow it.
+        if (isLegacyPulsar()) {
+            String fs = _sendCommandDirect("r_fsI", "null", 2000);
+            JsonDocument fd;
+            if (!fs.isEmpty() && deserializeJson(fd, fs) == DeserializationError::Ok &&
+                fd["r"].is<int>()) {
+                JsonDocument cap;
+                cap["max_available_current"] = fd["r"].as<int>();
+                _captureMaxAvail(cap.as<JsonVariantConst>());
+                Log.printf("[BLE] Current limit (r_fsI): %d A\n", fd["r"].as<int>());
+            }
+        }
+
         // Total session count from r_ses. peter-mcc 2.4.1 follow-up:
         // 2.4.1 used `size` which is actually the log buffer CAPACITY
         // sentinel (99999 on MAX, missing on Plus) — not lifetime count.
@@ -2230,9 +2247,13 @@ void WallboxBLE::_pollLockFallback() {
     _chgLockState = lock;
     String cached; uint32_t seq;
     copyCachedRealtime(cached, seq);
-    if (changed || cached.indexOf("lock_status") < 0) {
+    const bool needCeiling = _maxAvailCurrent >= 6 && cached.indexOf("max_available_current") < 0;
+    if (changed || needCeiling || cached.indexOf("lock_status") < 0) {
         JsonDocument rt;
         rt["r"]["lock_status"] = lock;
+        // The r_fsI current limit read at connect, in the field the
+        // integration, add-on and dashboard already take the ceiling from.
+        if (_maxAvailCurrent >= 6) rt["r"]["max_available_current"] = _maxAvailCurrent;
         String out;
         serializeJson(rt, out);
         _storeCache(_cachedRealtimeJson, _seqRealtime, out);

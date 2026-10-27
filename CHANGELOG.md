@@ -85,6 +85,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   in) now counts as plugged in.
 - **The boot log no longer prints the OTA password** (which is the web login
   password when one is set). It now says how the password is formed.
+- **Original Pulsar: current controls use the charger's real limit.** It
+  reports no `max_available_current`, so everything assumed 32 A (a 16 A
+  original Pulsar included). The gateway now reads its limit with `r_fsI` on
+  connect, as the Wallbox app does, and reports it in the usual field, so the
+  HA slider, the Charge Assistant and the dashboard follow it.
 - **Original Pulsar: status 4 shows as "Paused"** (a paused session), not
   "Starting".
 - **Original Pulsar: stop and lock (#68).** Stop now sends `w_cha` par 0 (par 2
