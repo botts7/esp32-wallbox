@@ -48,6 +48,18 @@ static void _setupMdns() {
 // All single-word volatile types — atomic on Xtensa LX7. Event handlers
 // only touch these; mDNS refresh and the actual WiFi.reconnect() call
 // are deferred to tick() on main.
+// Join the STRONGEST access point for the SSID, not the first one found. The
+// framework default is WIFI_FAST_SCAN, which stops at the first match, so on a
+// mesh network a gateway could sit on a far node (-92 dBm instead of -51 dBm
+// one metre away, #68). WiFi.reconnect() reuses this config, so it covers
+// reconnects too. Costs a full-channel scan (~1-2 s) per connect.
+static void _beginSta(const WBConfig& cfg) {
+    WiFi.mode(WIFI_STA);
+    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+    WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+    WiFi.begin(cfg.wifiSSID.c_str(), cfg.wifiPass.c_str());
+}
+
 static volatile bool     _connected            = false;
 static volatile uint32_t _lastConnectedAt      = 0;
 static volatile uint32_t _lastDisconnectedAt   = 0;
@@ -168,8 +180,7 @@ bool begin() {
         cfg.wifiSSID.c_str(),
         (unsigned)cfg.wifiSSID.length(),
         (unsigned)cfg.wifiPass.length());
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(cfg.wifiSSID.c_str(), cfg.wifiPass.c_str());
+    _beginSta(cfg);
 
     // Initial blocking connect — keeps the existing setup() contract.
     // tries × 500 ms = 20 s; matches the legacy connectWiFi() bound.
@@ -347,8 +358,7 @@ void tick() {
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_OFF);
         delay(100);
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(cfg.wifiSSID.c_str(), cfg.wifiPass.c_str());
+        _beginSta(cfg);
         _backoffMs       = _nextBackoff(_backoffMs);
         _nextAttemptAtMs = now + _backoffMs;
         return;
