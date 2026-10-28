@@ -83,10 +83,14 @@ Plan buildCommand(const String& action, const String& value,
             p.responseJson = "{\"status\":\"ok\",\"skipped\":\"not-paused\"}";
             return p;
         }
-        if (wallboxBLE.isCharging()) {
-            const char* stopPar = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
-            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
-        }
+        // End a started session first (s_cmode is rejected while charging AND
+        // while waiting for the car, st 2). Always queued: the BLE-side guard
+        // (wb_stop_guard) sends it only if a FRESH read shows a started
+        // session, so it can never land on a paused one and toggle it back on.
+        // After a stop it actually sends, it lets the session settle before
+        // this s_cmode.
+        const char* stopPar = wallboxBLE.isPlusCommandFamily() ? "0" : "2";
+        wallboxBLE.enqueueRequest(bapi::MET_START_STOP, stopPar);
         p.met = "s_cmode";
         p.par = "{\"mode\":0}";
     }

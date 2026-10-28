@@ -6,6 +6,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (charge control on a Pulsar MAX, measured 27-28 Oct)
+- **Starts and stops can no longer toggle the session.** On a Pulsar MAX a stop
+  sent to a paused session restarts it, and a start sent while it's waiting for
+  the car pauses it. Every start/stop (HTTP, MQTT, raw BAPI) is now checked
+  against a fresh charger status first: a stop only goes to a started session,
+  a start never to one that's already started, and a repeat within 15 s (stop)
+  or 20 s (start) is dropped. The original Pulsar, whose status codes differ,
+  keeps only the time windows.
+- **Resume / hand-back ends a waiting session first.** The charger rejects the
+  hand-back while waiting for the car, so a guarded stop goes first, with a
+  short settle before the hand-back.
+- **Start while paused clears the pause first, then starts.** The old order
+  handed control to Eco-Smart after the start, which re-queued it at night.
+
 ### Added
 - **W5500 Ethernet gateways can update from Home Assistant.** Releases now attach
   `wallbox-gateway-<tag>-esp32s3-eth.bin` (plus the matching `.elf` for coredump

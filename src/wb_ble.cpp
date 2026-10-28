@@ -261,36 +261,47 @@ void WallboxBLE::loop() {
                 // can override via bapiTimeoutMs from the caller.
                 uint32_t to = req.bapiTimeoutMs ? req.bapiTimeoutMs : 5000;
                 String resp;
-                if (wb_stop_guard::isStopFrame(req.met, req.par)) {
-                    // A stop must only reach a charger that is delivering:
-                    // on a MAX a stop to a Paused session RESUMES it (toggle).
-                    // The charger takes seconds to report a stop, so a second
-                    // stop right after one still reads "charging": skip any stop
-                    // within the guard window of the last one sent. After that,
-                    // check a fresh r_dat, not the up-to-10 s old cache.
+                const wb_stop_guard::Kind kind = wb_stop_guard::kindOf(req.met, req.par);
+                if (kind != wb_stop_guard::Kind::None) {
+                    // Every w_cha is checked against a FRESH r_dat (the cache can
+                    // be 10 s old): on a MAX both start and stop toggle an existing
+                    // session (see wb_stop_guard.h).
+                    const uint32_t last = (kind == wb_stop_guard::Kind::Stop) ? _lastStopSentMs
+                                                                              : _lastStartSentMs;
+                    const uint32_t win  = (kind == wb_stop_guard::Kind::Stop) ? wb_stop_guard::kRecentMs
+                                                                              : wb_stop_guard::kRecentStartMs;
+                    const bool recent = last != 0 && (millis() - last) < win;
+                    // Original Pulsar (Zentri radio, no fw_v_ project): its st
+                    // enum differs, so only the time windows apply there.
+                    const bool legacy = _isZentri && _chgProject.length() == 0;
                     String fresh;
-                    const bool recentStop = _lastStopSentMs != 0 &&
-                        (millis() - _lastStopSentMs) < wb_stop_guard::kRecentStopMs;
-                    if (!recentStop) fresh = _sendCommandDirect(bapi::MET_GET_STATUS, "null", 3000);
-                    if (recentStop) {
-                        Log.printf("[BLE] %s %s skipped: a stop was sent %lu ms ago (a second one would toggle it on)\n",
-                                   req.met, req.par, (unsigned long)(millis() - _lastStopSentMs));
-                        resp = wb_stop_guard::skippedReply();
-                    } else if (fresh.isEmpty()) {
-                        Log.printf("[BLE] %s %s not sent: couldn't read charger state\n", req.met, req.par);
-                        resp = wb_stop_guard::unreadableReply();
-                    } else if (!wb_stop_guard::delivering(fresh)) {
-                        Log.printf("[BLE] %s %s skipped: charger isn't charging (a stop would toggle it on)\n",
-                                   req.met, req.par);
-                        resp = wb_stop_guard::skippedReply();
-                    } else {
+                    if (!recent && !legacy) fresh = _sendCommandDirect(bapi::MET_GET_STATUS, "null", 3000);
+                    const wb_stop_guard::Verdict v = wb_stop_guard::decide(kind, recent, fresh, legacy);
+                    if (v == wb_stop_guard::Verdict::Send) {
                         resp = _sendCommandDirect(req.met, req.par, to);
-                        _lastStopSentMs = millis();
+                        if (kind == wb_stop_guard::Kind::Stop) {
+                            _lastStopSentMs = millis();
+                            _lastStartSentMs = 0;   // a start after this stop is a new one
+                        } else {
+                            _lastStartSentMs = millis();
+                            _lastStopSentMs = 0;    // a stop after this start is a new one
+                        }
+                    } else {
+                        Log.printf("[BLE] %s %s %s: %s\n", req.met, req.par,
+                                   v == wb_stop_guard::Verdict::Skip ? "skipped" : "not sent",
+                                   wb_stop_guard::reason(kind, recent, v));
+                        resp = (v == wb_stop_guard::Verdict::Skip) ? wb_stop_guard::skippedReply(kind)
+                                                                   : wb_stop_guard::unreadableReply();
                     }
                 } else {
+                    // s_cmode is rejected while the session is still in st 2, so
+                    // right after a stop we actually sent, let it settle first.
+                    if (strcmp(req.met, "s_cmode") == 0 && _lastStopSentMs != 0) {
+                        const uint32_t since = millis() - _lastStopSentMs;
+                        if (since < wb_stop_guard::kSettleBeforeCmodeMs)
+                            vTaskDelay(pdMS_TO_TICKS(wb_stop_guard::kSettleBeforeCmodeMs - since));
+                    }
                     resp = _sendCommandDirect(req.met, req.par, to);
-                    // A start ends the stop window: a stop after it is a new one.
-                    if (strcmp(req.met, "w_cha") == 0) _lastStopSentMs = 0;
                 }
                 // Phase 3: hoist the response body into a shared_ptr so
                 // the response map and the MQTT pending-pub ring share
