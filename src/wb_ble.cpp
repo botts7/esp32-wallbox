@@ -6,6 +6,7 @@
 #include "wb_copper_normalize.h"
 #include "wb_ble_err.h"   // bleErrName() — decode NimBLE codes to names (#161)
 #include "wb_stop_guard.h"  // never send a stop to a non-charging session
+#include "wb_bapi_caps.h"  // skip periodic reads this charger doesn't support
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
@@ -28,6 +29,11 @@ static const char* MAX_CHR_UUID  = "2456e1b9-26e2-8f83-e744-f34f01e9d703";
 static const char* PLUS_SVC_UUID = "331a36f5-2459-45ea-9d95-6142f0c4b307";
 static const char* PLUS_CHR_UUID = "a9da6040-0823-4995-94ec-9ce41ca28833";
 static const char* PLUS_TXC_UUID = "a73e9a10-628f-4494-a099-12efaf72258f";
+// Zentri TruConnect (AMS002) radio: original Pulsar AND some Pulsar Plus
+// units (#68, #74). Commands go to the RX char, replies arrive on the TX char.
+static const char* ZENTRI_SVC_UUID = "175f8f23-a570-49bd-9627-815a6a27de2a";
+static const char* ZENTRI_CHR_UUID = "1cce1ea8-bd34-4813-a00a-c76e028fadcb";
+static const char* ZENTRI_TXC_UUID = "cacc07ff-ffff-4c48-8fae-a9ef71b75e26";
 
 // bleErrName() moved to wb_ble_err.h (#161) — now also decodes HCI disconnect
 // reasons and GATT reply codes, not just host errors.
@@ -273,7 +279,7 @@ void WallboxBLE::loop() {
                     const bool recent = last != 0 && (millis() - last) < win;
                     // Original Pulsar (Zentri radio, no fw_v_ project): its st
                     // enum differs, so only the time windows apply there.
-                    const bool legacy = _isZentri && _chgProject.length() == 0;
+                    const bool legacy = isLegacyPulsar();
                     String fresh;
                     if (!recent && !legacy) fresh = _sendCommandDirect(bapi::MET_GET_STATUS, "null", 3000);
                     const wb_stop_guard::Verdict v = wb_stop_guard::decide(kind, recent, fresh, legacy);
@@ -529,41 +535,40 @@ void WallboxBLE::_connect() {
         // family's service UUID — if present, switch in memory AND
         // persist to NVS so subsequent boots come up clean without
         // the user having to manually fix /config.
-        bool weAreMax = _svcUUID.equalsIgnoreCase(MAX_SVC_UUID);
-        bool weArePlus = _svcUUID.equalsIgnoreCase(PLUS_SVC_UUID);
-        const char* otherSvcUUID = weAreMax ? PLUS_SVC_UUID
-                                  : weArePlus ? MAX_SVC_UUID
-                                  : nullptr;
-        NimBLERemoteService* otherSvc = otherSvcUUID
-            ? _client->getService(otherSvcUUID) : nullptr;
-        if (otherSvc) {
+        // The Zentri TruConnect radio (#74: Pulsar Plus 6.7.x; #68: original
+        // Pulsar) is probed too, so those chargers no longer need the UUIDs
+        // typed into Custom mode by hand. It's adopted as model "custom": the
+        // product behaviour then follows the charger's own fw_v_ report (see
+        // isLegacyPulsar / isPlusCommandFamily), and "plus" would wrongly
+        // trigger the BGX13P mode switch.
+        struct Family { const char* svc; const char* chr; const char* txc;
+                        const char* model; const char* label; };
+        static const Family kFamilies[] = {
+            { MAX_SVC_UUID,    MAX_CHR_UUID,    "",              "max",    "MAX (single-char)" },
+            { PLUS_SVC_UUID,   PLUS_CHR_UUID,   PLUS_TXC_UUID,   "plus",   "Plus (dual-char, BGX13P)" },
+            { ZENTRI_SVC_UUID, ZENTRI_CHR_UUID, ZENTRI_TXC_UUID, "custom", "Zentri TruConnect (dual-char)" },
+        };
+        const Family* found = nullptr;
+        NimBLERemoteService* otherSvc = nullptr;
+        for (const Family& f : kFamilies) {
+            if (_svcUUID.equalsIgnoreCase(f.svc)) continue;   // the one that just failed
+            otherSvc = _client->getService(f.svc);
+            if (otherSvc) { found = &f; break; }
+        }
+        if (found) {
             Log.println("[BLE] ===========================================================");
-            Log.printf( "[BLE] Auto-switching protocol family: configured %s,\n",
-                weAreMax ? "MAX (single-char)" : "Plus (dual-char)");
-            Log.printf( "[BLE] but charger speaks %s — adopting it and saving config.\n",
-                weAreMax ? "Plus (dual-char)" : "MAX (single-char)");
-            Log.println("[BLE] (Wallbox migrated MAX to the dual-char protocol at FW 6.11.26.)");
+            Log.printf( "[BLE] Configured service %s not on this charger;\n", _svcUUID.c_str());
+            Log.printf( "[BLE] it speaks %s. Adopting it and saving config.\n", found->label);
             Log.println("[BLE] ===========================================================");
             WBConfig& cfg = configMgr.mut();
-            if (weAreMax) {
-                cfg.chargerModel = "plus";
-                cfg.bleService   = PLUS_SVC_UUID;
-                cfg.bleChar      = PLUS_CHR_UUID;
-                cfg.bleTxChar    = PLUS_TXC_UUID;
-                _svcUUID  = PLUS_SVC_UUID;
-                _chrUUID  = PLUS_CHR_UUID;
-                _txChrUUID = PLUS_TXC_UUID;
-                _chargerModel = "plus";
-            } else {
-                cfg.chargerModel = "max";
-                cfg.bleService   = MAX_SVC_UUID;
-                cfg.bleChar      = MAX_CHR_UUID;
-                cfg.bleTxChar    = "";
-                _svcUUID  = MAX_SVC_UUID;
-                _chrUUID  = MAX_CHR_UUID;
-                _txChrUUID = "";
-                _chargerModel = "max";
-            }
+            cfg.chargerModel = found->model;
+            cfg.bleService   = found->svc;
+            cfg.bleChar      = found->chr;
+            cfg.bleTxChar    = found->txc;
+            _svcUUID   = found->svc;
+            _chrUUID   = found->chr;
+            _txChrUUID = found->txc;
+            _chargerModel = found->model;
             configMgr.save();
             // Resolve the now-correct service and fall through to the
             // characteristic lookup. The connection is still up, no
@@ -608,6 +613,9 @@ void WallboxBLE::_connect() {
     NimBLERemoteCharacteristic* zentriMode = svc->getCharacteristic(ZENTRI_MODE_UUID);
     const bool zentri = (zentriMode != nullptr);
     _isZentri = zentri;  // surfaced via /api/status so the UI reads schedules per-sid (#12)
+    // New link, maybe a different charger or firmware: relearn which periodic
+    // reads it supports.
+    wb_bapi_caps::reset();
     if (zentri) {
         Log.println("[BLE] Zentri TruConnect peripheral detected (20b9794f mode char present)");
         // Relax connection params for this module. The default (latency 2,
@@ -900,6 +908,23 @@ void WallboxBLE::_connect() {
             // something — no point re-publishing the fallback as the
             // fallback.
             if (_chgAppFw.length()) _discoveryStale = true;
+        }
+
+        // Original Pulsar: no max_available_current anywhere, so every current
+        // setter fell back to 32 A. The Wallbox app reads the charger's limit
+        // with r_fsI on connect (16 on a 16 A unit, #68 snoop); use it as the
+        // ceiling so the firmware clamps, HA discovery and the integration /
+        // add-on (via the realtime record, see _pollLockFallback) all follow it.
+        if (isLegacyPulsar()) {
+            String fs = _sendCommandDirect("r_fsI", "null", 2000);
+            JsonDocument fd;
+            if (!fs.isEmpty() && deserializeJson(fd, fs) == DeserializationError::Ok &&
+                fd["r"].is<int>()) {
+                JsonDocument cap;
+                cap["max_available_current"] = fd["r"].as<int>();
+                _captureMaxAvail(cap.as<JsonVariantConst>());
+                Log.printf("[BLE] Current limit (r_fsI): %d A\n", fd["r"].as<int>());
+            }
         }
 
         // Total session count from r_ses. peter-mcc 2.4.1 follow-up:
@@ -1610,13 +1635,18 @@ void WallboxBLE::_pollStatus() {
             // capture it here too so the dashboard (which reads the status object)
             // and the setpoint clamps agree regardless of which response carries it.
             JsonDocument sd;
-            if (deserializeJson(sd, resp) == DeserializationError::Ok)
+            if (deserializeJson(sd, resp) == DeserializationError::Ok) {
                 _captureMaxAvail(sd["r"]);
+                // The charger's user id, which the original Pulsar needs in
+                // w_lck (#68). Cheap to keep for every model.
+                const uint32_t u = sd["r"]["usid"] | 0u;
+                if (u) _lastUsid = u;
+            }
         }
     }
     // Energy meter on same cycle — lightweight & useful
     if (_state != State::CONNECTED) return;
-    String meter = _sendCommandDirect(bapi::MET_GET_METER);
+    String meter = _pollRead(bapi::MET_GET_METER);
     if (!meter.isEmpty()) {
         // Copper SB reports meter fields under different keys (#20). Self-
         // detecting no-op until the Copper meter mapping is implemented.
@@ -1645,7 +1675,7 @@ void WallboxBLE::_pollStatus() {
     uint32_t nowMs = millis();
     if (nowMs - _lastLsePoll < LSE_POLL_MS) return;
     _lastLsePoll = nowMs;
-    String lse = _sendCommandDirect(bapi::MET_GET_LSE);
+    String lse = _pollRead(bapi::MET_GET_LSE);
     if (!lse.isEmpty()) {
         // r_lse carries the Wallbox account user_id — strip it before
         // caching so it can never reach an MQTT topic, the WS feed, or an
@@ -1671,11 +1701,21 @@ void WallboxBLE::_pollStatus() {
 
 void WallboxBLE::_pollRealtime() {
     if (_state != State::CONNECTED) return;
-    String resp = _sendCommandDirect(bapi::MET_GET_REALTIME);
-    if (resp.isEmpty() && _state == State::CONNECTED) {
+    String resp = _pollRead(bapi::MET_GET_REALTIME);
+    if (resp.isEmpty() && _state == State::CONNECTED &&
+        !wb_bapi_caps::unsupported(bapi::MET_GET_REALTIME)) {
         // One retry on a marginal link, same rationale as _pollStatus (#20).
         delay(50);
-        resp = _sendCommandDirect(bapi::MET_GET_REALTIME);
+        resp = _pollRead(bapi::MET_GET_REALTIME);
+    }
+    if (wb_bapi_caps::unsupported(bapi::MET_GET_REALTIME)) {
+        // No r_sta on this charger (the original Pulsar, #68), so nothing
+        // refreshes the lock state after connect. Read r_lck instead, the same
+        // read the Wallbox app uses, and keep a minimal realtime record holding
+        // just lock_status, so the dashboard, the MQTT lock sensor/switch and
+        // chg_lock_state all stay live without each needing a special case.
+        _pollLockFallback();
+        return;
     }
     if (!resp.isEmpty()) {
         _storeCache(_cachedRealtimeJson, _seqRealtime, resp);
@@ -1726,7 +1766,7 @@ void WallboxBLE::_pollSettings() {
     if (_state != State::CONNECTED) return;
     JsonDocument merged;
 
-    String r1 = _sendCommandDirect(bapi::MET_GET_AUTOLOCK, "null", SETTINGS_TIMEOUT_MS);
+    String r1 = _pollRead(bapi::MET_GET_AUTOLOCK, "null", SETTINGS_TIMEOUT_MS);
     if (!r1.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r1) == DeserializationError::Ok) {
             // g_alo returns the lock timeout in seconds as a bare scalar:
@@ -1756,7 +1796,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r2 = _sendCommandDirect("g_ecos", "null", SETTINGS_TIMEOUT_MS);
+    String r2 = _pollRead("g_ecos", "null", SETTINGS_TIMEOUT_MS);
     if (!r2.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r2) == DeserializationError::Ok) {
             // Eco-Smart capability latch (#175), same shape as the meter
@@ -1792,7 +1832,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r3 = _sendCommandDirect("g_psh", "null", SETTINGS_TIMEOUT_MS);
+    String r3 = _pollRead("g_psh", "null", SETTINGS_TIMEOUT_MS);
     if (!r3.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r3) == DeserializationError::Ok) {
             // dyps may arrive as bool true/false instead of 1/0 on some
@@ -1810,7 +1850,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r4 = _sendCommandDirect("g_phsw", "null", SETTINGS_TIMEOUT_MS);
+    String r4 = _pollRead("g_phsw", "null", SETTINGS_TIMEOUT_MS);
     if (!r4.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r4) == DeserializationError::Ok) {
             merged["phase_switch"] = d["r"]["enabled"].as<bool>() ? 1 : 0;
@@ -1818,7 +1858,7 @@ void WallboxBLE::_pollSettings() {
     }
     if (_state != State::CONNECTED) return;
 
-    String r5 = _sendCommandDirect(bapi::MET_GET_TIMEZONE, "null", SETTINGS_TIMEOUT_MS);
+    String r5 = _pollRead(bapi::MET_GET_TIMEZONE, "null", SETTINGS_TIMEOUT_MS);
     if (!r5.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r5) == DeserializationError::Ok) {
             const char* tz = d["r"]["timezone"] | "UTC";
@@ -1838,7 +1878,7 @@ void WallboxBLE::_pollSettings() {
     // covers the full standby-dim config. Falls back to Medium (2) only if
     // the getter is unsupported/unreadable, preserving the old default.
     bool haloRead = false;
-    String r6 = _sendCommandDirect(bapi::MET_GET_HALO, "null", SETTINGS_TIMEOUT_MS);
+    String r6 = _pollRead(bapi::MET_GET_HALO, "null", SETTINGS_TIMEOUT_MS);
     if (!r6.isEmpty()) {
         JsonDocument d; if (deserializeJson(d, r6) == DeserializationError::Ok) {
             int bright = d["r"]["bright"] | -1;
@@ -1867,7 +1907,7 @@ void WallboxBLE::_pollSettings() {
 
 void WallboxBLE::_pollNotifications() {
     if (_state != State::CONNECTED) return;
-    String resp = _sendCommandDirect(bapi::MET_GET_NOTIFS, "null", 3000);
+    String resp = _pollRead(bapi::MET_GET_NOTIFS, "null", 3000);
     if (resp.isEmpty()) return;
     JsonDocument d;
     if (deserializeJson(d, resp) != DeserializationError::Ok) return;
@@ -1906,7 +1946,38 @@ void WallboxBLE::_pollSchedules() {
     SchedSlot tmp[kMaxSchedSlots];
     uint8_t n = 0;
 
-    if (_isZentri) {
+    // Per-slot reads (Path B) are the original Pulsar's only option. A Pulsar
+    // Plus on the same Zentri radio (#74) is an array model, so it tries r_schs
+    // first and only falls back to per-slot reads if that read times out (its
+    // 23-byte MTU makes the long r_schs reply the likeliest thing to fail).
+    bool perSlot = isLegacyPulsar();
+    if (!perSlot) {
+        // Path A — array models (MAX/Plus/Copper/Quasar): one r_schs read
+        // returns the whole set. A transient miss (empty/parse-fail) keeps
+        // the previous cache rather than clobbering it to "no schedules".
+        String resp = _sendCommandDirect(bapi::MET_GET_SCHEDULES, "null", 8000);
+        if (resp.isEmpty()) {
+            if (!_isZentri) return;
+            perSlot = true;              // Zentri-radio Plus: try per-slot reads
+        } else {
+            JsonDocument d;
+            if (deserializeJson(d, resp) != DeserializationError::Ok) return;
+            JsonArray arr = d["r"]["schedules"].is<JsonArray>()
+                              ? d["r"]["schedules"].as<JsonArray>()
+                              : d["r"].as<JsonArray>();
+            for (JsonObject s : arr) {
+                if (n >= kMaxSchedSlots) break;
+                tmp[n].startMin = _hhmmToMin(s["start"] | "0000");
+                tmp[n].days     = s["days"] | 0;
+                // r_schs reports enabled as integer 1/0, not a JSON bool, so use
+                // .as<bool>() (numeric->bool) — `| false` would strict-type a
+                // number to the default and read every schedule as disabled.
+                tmp[n].enabled  = s["enabled"].as<bool>();
+                n++;
+            }
+        }
+    }
+    if (perSlot) {
         // Path B — legacy Pulsar (Zentri AMS): r_schs times out on this
         // module, so read fixed slots sequentially (r_sch + bare-int sid)
         // until the charger stops returning a sid. days==0 marks an
@@ -1928,27 +1999,6 @@ void WallboxBLE::_pollSchedules() {
                 tmp[n].enabled  = true;         // days!=0 == enabled on Zentri
                 n++;
             }
-        }
-    } else {
-        // Path A — array models (MAX/Plus/Copper/Quasar): one r_schs read
-        // returns the whole set. A transient miss (empty/parse-fail) keeps
-        // the previous cache rather than clobbering it to "no schedules".
-        String resp = _sendCommandDirect(bapi::MET_GET_SCHEDULES, "null", 8000);
-        if (resp.isEmpty()) return;
-        JsonDocument d;
-        if (deserializeJson(d, resp) != DeserializationError::Ok) return;
-        JsonArray arr = d["r"]["schedules"].is<JsonArray>()
-                          ? d["r"]["schedules"].as<JsonArray>()
-                          : d["r"].as<JsonArray>();
-        for (JsonObject s : arr) {
-            if (n >= kMaxSchedSlots) break;
-            tmp[n].startMin = _hhmmToMin(s["start"] | "0000");
-            tmp[n].days     = s["days"] | 0;
-            // r_schs reports enabled as integer 1/0, not a JSON bool, so use
-            // .as<bool>() (numeric->bool) — `| false` would strict-type a
-            // number to the default and read every schedule as disabled.
-            tmp[n].enabled  = s["enabled"].as<bool>();
-            n++;
         }
     }
 
@@ -2008,19 +2058,36 @@ bool WallboxBLE::carConnected() {
     JsonDocument d;
     if (deserializeJson(d, s) != DeserializationError::Ok) return false;
     int st = d["r"]["st"] | -1;
-    // Same plugged-in r_dat.st code set as WallboxMQTT::publishCarConnected.
-    bool connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
-                      st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
-    // Locked-with-car heuristic (st==6 folds locked/no-car + locked/car):
-    // r_sta.charger_status==19 has been observed as locked-with-car.
-    if (st == 6) {
-        String rt; copyCachedRealtime(rt, seq);
-        if (!rt.isEmpty()) {
-            JsonDocument rd;
-            if (deserializeJson(rd, rt) == DeserializationError::Ok &&
-                (rd["r"]["charger_status"] | -1) == 19) connected = true;
-        }
+    int cs = -1;
+    String rt; copyCachedRealtime(rt, seq);
+    if (!rt.isEmpty()) {
+        JsonDocument rd;
+        if (deserializeJson(rd, rt) == DeserializationError::Ok)
+            cs = rd["r"]["charger_status"] | -1;
     }
+    return carConnectedFromCodes(st, cs, isLegacyPulsar());
+}
+
+bool WallboxBLE::carConnectedFromCodes(int st, int cs, bool legacyPulsar) {
+    if (legacyPulsar) {
+        // The original Pulsar uses its own st enum (0 ready/no car, 1 charging,
+        // 2 connected, 3 waiting, 4 paused session). st 6 = locked, both with
+        // and without a car (#68), so plug state is unknown while locked and
+        // reads as not connected. Keyed on the product, not the Zentri radio:
+        // a Pulsar Plus on that radio (#74) uses the MAX/Plus set below.
+        return st >= 1 && st <= 4;
+    }
+    // MAX/Plus r_dat.st codes where a car is physically plugged in. 15 is OCPP
+    // "Finishing": the session ended but the cable is still in (OCPP 1.6
+    // connector state); a backend schedule change showed a plugged-in car as
+    // unplugged until it was added (#74).
+    bool connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
+                      st == 8 || st == 10 || st == 11 || st == 12 || st == 13 ||
+                      st == 15 || st == 18);
+    // Locked (st 6) carries no plug info: Wallbox folds locked/no-car and
+    // locked/car into the same code. STOPGAP: r_sta.charger_status 19 has been
+    // observed when locked WITH a car (unverified for locked without one).
+    if (st == 6 && cs == 19) connected = true;
     return connected;
 }
 
@@ -2073,6 +2140,10 @@ bool WallboxBLE::schedulePaused() {
 }
 
 bool WallboxBLE::isPlusCommandFamily() const {
+    // Original Pulsar (Zentri radio, no fw_v_ project): the Wallbox app stops
+    // with w_cha par=0 and starts with par=1; par=2 is rejected with error 5
+    // (HCI snoop, #68).
+    if (isLegacyPulsar()) return true;
     // Product identity from the charger's own chg_project self-report — the
     // same source the HA device card uses. A Pulsar Plus reports par=0 stop
     // semantics regardless of whether it rides the Max single-char transport.
@@ -2148,4 +2219,43 @@ void WallboxBLE::copyCachedNotifications(String& out, uint32_t& seq) {
         out = _cachedNotificationsJson; seq = _seqNotifications;
         xSemaphoreGive(_cacheMutex);
     } else { out = ""; seq = 0; }
+}
+
+String WallboxBLE::lockPar(bool lock) const {
+    String par = lock ? "1" : "0";
+    if (isLegacyPulsar() && _lastUsid) par += ",\"usid\":" + String(_lastUsid);
+    return par;
+}
+
+// Periodic reads go through here: skips a read this charger has proven it
+// doesn't support, and feeds every reply to the tracker (wb_bapi_caps).
+String WallboxBLE::_pollRead(const char* met, const char* par, uint32_t timeoutMs) {
+    if (wb_bapi_caps::shouldSkip(met)) return String();
+    String r = _sendCommandDirect(met, par, timeoutMs);
+    wb_bapi_caps::record(met, r);
+    return r;
+}
+
+void WallboxBLE::_pollLockFallback() {
+    if (_state != State::CONNECTED) return;
+    String r = _pollRead(bapi::MET_GET_LOCK_STATE, "null", 2000);
+    if (r.isEmpty()) return;
+    JsonDocument d;
+    if (deserializeJson(d, r) != DeserializationError::Ok || !d["r"].is<int>()) return;
+    const int lock = d["r"].as<int>();
+    const bool changed = (lock != (int)_chgLockState);
+    _chgLockState = lock;
+    String cached; uint32_t seq;
+    copyCachedRealtime(cached, seq);
+    const bool needCeiling = _maxAvailCurrent >= 6 && cached.indexOf("max_available_current") < 0;
+    if (changed || needCeiling || cached.indexOf("lock_status") < 0) {
+        JsonDocument rt;
+        rt["r"]["lock_status"] = lock;
+        // The r_fsI current limit read at connect, in the field the
+        // integration, add-on and dashboard already take the ceiling from.
+        if (_maxAvailCurrent >= 6) rt["r"]["max_available_current"] = _maxAvailCurrent;
+        String out;
+        serializeJson(rt, out);
+        _storeCache(_cachedRealtimeJson, _seqRealtime, out);
+    }
 }

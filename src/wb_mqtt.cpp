@@ -737,7 +737,7 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         String action = payload;
         action.toLowerCase();
         int val = (action == "1" || action == "lock" || action == "true") ? 1 : 0;
-        par = String(val);
+        par = wallboxBLE.lockPar(val == 1);   // + usid on the original Pulsar (#68)
         wallboxBLE.enqueueRequest(bapi::MET_LOCK, par.c_str());
 
     } else if (sub == "reboot") {
@@ -914,23 +914,7 @@ void WallboxMQTT::publishCarConnected(const String& statusJson, const String& re
         if (deserializeJson(rd, realtimeJson) == DeserializationError::Ok)
             cs = rd["r"]["charger_status"] | -1;
     }
-    bool connected;
-    if (wallboxBLE.isZentri()) {
-        // Zentri/original Pulsar uses a DIFFERENT st enum (0=ready/no-car,
-        // 1=charging, 2=connected, 3=waiting, 4=ramp) — applying the MAX 0-18
-        // set here mis-reported plug state. Anything >= 1 means a car is present.
-        connected = (st >= 1 && st <= 4);
-    } else {
-        // Local r_dat.st codes where a car is physically plugged in (MAX/Plus).
-        connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
-                     st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
-        // Locked (st==6) carries no plug info in the local BLE protocol — Wallbox
-        // folds locked/no-car and locked/car-connected into the same code 6.
-        // STOPGAP: observed r_sta.charger_status == 19 when locked WITH a car.
-        // This is an unverified, firmware-specific heuristic pending a
-        // locked-with-NO-car measurement to confirm 19 is plug-specific.
-        if (st == 6 && cs == 19) connected = true;
-    }
+    bool connected = WallboxBLE::carConnectedFromCodes(st, cs, wallboxBLE.isLegacyPulsar());
     String topic = baseTopic() + "/car_connected";
     _client->publish(topic.c_str(), connected ? "ON" : "OFF", true);  // retain
 }

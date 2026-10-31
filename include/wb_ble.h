@@ -133,6 +133,27 @@ public:
     // view-only.
     bool isZentri() const { return _isZentri; }
 
+    // The Zentri radio is a transport, not a product: original (no-WiFi)
+    // Pulsars use it, and so do some Pulsar Plus units (prj08-pulsar-plus on
+    // 6.7.x, #74). Product behaviour (status codes, stop parameter, lock usid,
+    // per-slot schedules) must follow the charger, not the radio. An original
+    // Pulsar answers fw_v_ with a bare number and no project ("p"); a Plus
+    // reports its project. So: Zentri radio + no project = original Pulsar.
+    // Until fw_v_ has been read this reads true on any Zentri radio, which is
+    // the pre-#74 behaviour.
+    bool isLegacyPulsar() const { return _isZentri && _chgProject.length() == 0; }
+
+    // w_lck parameter for this charger. The original Pulsar ignores w_lck
+    // (ACKs {"r":null}, no change) unless it carries the user id the charger
+    // reports as r_dat.usid; the Wallbox app sends
+    //   {"met":"w_lck","par":0,"usid":<user id>,"id":n}   (HCI snoop, #68).
+    // buildCmd splices par verbatim, so appending the key yields that frame.
+    String lockPar(bool lock) const;
+
+    // Is a car plugged in, from r_dat.st and r_sta.charger_status? The single
+    // rule behind carConnected() and the MQTT car_connected topic.
+    static bool carConnectedFromCodes(int st, int chargerStatus, bool legacyPulsar);
+
     // Power-meter capability (#129). False once the charger reports the
     // power-meter read (r_dca) as unsupported — BAPI error code 4 — i.e.
     // no Power Boost / Power Meter accessory fitted (e.g. the original
@@ -375,6 +396,7 @@ private:
     uint32_t _lastStopSentMs = 0;  // millis() of the last w_cha stop put on the wire (wb_stop_guard)
     uint32_t _lastStartSentMs = 0; // millis() of the last w_cha start put on the wire (wb_stop_guard)
     bool _isZentri = false;  // set in _connect() when TruConnect module detected (#12)
+    uint32_t _lastUsid = 0;  // r_dat.usid, needed by the original Pulsar's w_lck (#68)
     bool _meterPresent = true;  // #129: false once r_dca reports error code 4 (no meter)
     // #175: Eco-Smart (solar/green) capability. Default false — treat as
     // unsupported until g_ecos returns a valid object, so the Add-on greys
@@ -572,6 +594,11 @@ private:
     // identity reads, PIN auth, drain loop). External callers go
     // through the public sendCommand() wrapper which queues + waits.
     String _sendCommandDirect(const char* met, const char* par = "null", uint32_t timeoutMs = 5000);
+    // Periodic read that skips methods this charger doesn't support
+    // (wb_bapi_caps) and records every reply. Same signature as above.
+    String _pollRead(const char* met, const char* par = "null", uint32_t timeoutMs = 5000);
+    // Original Pulsar: refresh lock state from r_lck when r_sta is unsupported.
+    void _pollLockFallback();
 
     // RSSI smoothing — NimBLE's getRssi() returns per-packet instantaneous
     // values that swing wildly (issue #6). Sample on a fixed cadence and

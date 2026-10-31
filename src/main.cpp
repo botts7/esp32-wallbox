@@ -460,7 +460,11 @@ void setup() {
         otaPass = "wb-" + String(buf).substring(6);  // device-unique default
     }
     ArduinoOTA.setPassword(otaPass.c_str());
-    Log.printf("[OTA] Password: %s (use web auth pass, or shown here for espota)\n", otaPass.c_str());
+    // Never print the password itself: people paste boot logs into issues (#68).
+    if (cfg.authPass.length() > 0)
+        Log.println("[OTA] Password: same as the web login password (masked)");
+    else
+        Log.println("[OTA] Password: wb- followed by the last 6 hex digits of the WiFi MAC (masked)");
     ArduinoOTA.onStart([]() {
         Log.println("[OTA] Update starting...");
     });

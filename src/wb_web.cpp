@@ -2,6 +2,7 @@
 #include "wb_config.h"
 #include "wb_control.h"
 #include "wb_cmd.h"
+#include "wb_bapi_caps.h"
 #include "wb_ble.h"
 #include "wb_log.h"
 #include "wb_version.h"
@@ -769,7 +770,20 @@ String wb_buildStatusJson() {
     // thermal issues (e.g. a hot garage) rather than guessing (task #162, _Mike).
     json += ",\"chip_temp\":" + wb_chipTempJson();  // null on hw without a real sensor
     json += ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"";
-    json += ",\"zentri\":" + String(wallboxBLE.isZentri() ? "true" : "false");
+    // "zentri" drives the dashboard's per-slot, view-only schedule handling,
+    // which is an original-Pulsar trait, so it now means "original Pulsar".
+    // "zentri_radio" reports the BLE module itself (also on some Plus units, #74).
+    json += ",\"zentri\":" + String(wallboxBLE.isLegacyPulsar() ? "true" : "false");
+    json += ",\"zentri_radio\":" + String(wallboxBLE.isZentri() ? "true" : "false");
+    // Periodic BAPI reads this charger answers with an error, now skipped
+    // (wb_bapi_caps). Shows up in compatibility reports.
+    {
+        JsonDocument cd;
+        wb_bapi_caps::toJson(cd.to<JsonArray>());
+        String arr;
+        serializeJson(cd, arr);
+        json += ",\"bapi_unsupported\":" + arr;
+    }
     // #129: meter capability — surfaces hide grid/solar when false (charger
     // has no Power Boost / Power Meter; e.g. the original Pulsar).
     json += ",\"meter\":" + String(wallboxBLE.meterPresent() ? "true" : "false");
@@ -1336,9 +1350,9 @@ static const char* DASH_BODY_SOURCE = R"HTML(
 // model-aware split was incorrect.
 var SN={0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',4:'Paused',5:'Charge Complete',6:'Locked',7:'Error',8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)',19:'Connected (No Current)'};
 // Original/Zentri Pulsar (#12) reports a small status enum that doesn't line
-// up with the MAX 0-18 codes (esp. st4 = charge ramp, not "Paused"). Used in
+// up with the MAX 0-18 codes. st4 is a paused/open session after w_cha 0 (#68). Used in
 // place of SN when /api/status reports zentri:true.
-var ZN={0:'Ready',1:'Charging',2:'Connected',3:'Waiting for Schedule',4:'Starting'};
+var ZN={0:'Ready',1:'Charging',2:'Connected',3:'Waiting for Schedule',4:'Paused'};
 var CHARGER_TZ='UTC';try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
 fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function _setText(id,txt){var el=document.getElementById(id);if(el)el.textContent=txt}
@@ -1351,7 +1365,7 @@ function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;
 // green (solar USED) vs grid energy split — the app's "green" number.
 var _pfState={cp:null,en:null,house:null,conn:null,surplus:null,green:null,grid:null};
 // Car-connected from the r_dat status code — mirrors firmware carConnected().
-function _carConn(st){return st===1||st===2||st===3||st===4||st===5||st===8||st===10||st===11||st===12||st===13||st===18}
+function _carConn(st){if(window._zentri)return st>=1&&st<=4;return st===1||st===2||st===3||st===4||st===5||st===8||st===10||st===11||st===12||st===13||st===15||st===18}
 // Flowing-dash animation: scrolls the stroke-dashoffset negatively so
 // dashes appear to march Grid->Charger->Vehicle. Speed scales with
 // the actual charging power so visually-faster = more kW. Capped so
@@ -2169,6 +2183,7 @@ function loadSchedules(_retry){
   if(!tzLoaded){tzReady.then(function(){loadSchedules(_retry)});return;}
   var l=document.getElementById('sch-list');if(l)l.innerHTML="<span class='spinner'></span> Loading...";
   fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(x){return x.json()}).then(function(st){
+    window._zentriRadio=!!(st&&st.zentri_radio);
     if(st&&st.zentri){window._schZentri=true;loadSchedulesZentri();}else{window._schZentri=false;loadSchedulesArr(_retry);}
   }).catch(function(){window._schZentri=false;loadSchedulesArr(_retry);});
 }
@@ -2210,6 +2225,9 @@ function loadSchedulesArr(_retry){
   fetch('/api/command?action=bapi&met=r_schs&par=null',{signal:AbortSignal.timeout(_retry?20000:15000)}).then(function(x){return x.json()}).then(function(d){
     if(d.error){
       if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+      // A Pulsar Plus on the Zentri radio (#74) may not fit the long r_schs
+      // reply through that radio; read the fixed slots instead (view-only).
+      if(window._zentriRadio){window._schZentri=true;loadSchedulesZentri();return}
       l.innerHTML='<span style="color:var(--danger)">'+d.error+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>';return
     }
     var sc=null;
@@ -2217,6 +2235,7 @@ function loadSchedulesArr(_retry){
     else if(Array.isArray(d.r))sc=d.r;
     if(sc===null){
       if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+      if(window._zentriRadio){window._schZentri=true;loadSchedulesZentri();return}
       l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return
     }
     // Charger days are Sunday-first; rotate to the GUI's Monday-first convention
@@ -2231,6 +2250,7 @@ function loadSchedulesArr(_retry){
     renderSchedules(sc);
   }).catch(function(e){
     if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+    if(window._zentriRadio){window._schZentri=true;loadSchedulesZentri();return}
     l.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>'
   });
 }

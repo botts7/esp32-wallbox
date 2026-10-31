@@ -99,11 +99,11 @@ Plan buildCommand(const String& action, const String& value,
     }
     else if (action == "lock") {
         p.met = bapi::MET_LOCK;
-        p.par = "1";
+        p.par = wallboxBLE.lockPar(true);    // + usid on the original Pulsar (#68)
     }
     else if (action == "unlock") {
         p.met = bapi::MET_LOCK;
-        p.par = "0";
+        p.par = wallboxBLE.lockPar(false);
     }
     // Clamp to the charger's own envelope (6 A .. charger-reported ceiling, #39).
     // Hard-coding 32 A capped 40 A USA Pulsar Plus units; maxCurrentCeiling()
