@@ -1132,20 +1132,32 @@ static void _registerBleRoutes() {
         // default) — a single waitMs up to 8000ms would trip it.
         // esp_task_wdt_reset() is a no-op if this task isn't
         // subscribed, so the call is safe either way.
+        //
+        // A wake is only a hint: AsyncTCP (3.5+) wakes its own service task,
+        // which is this one, with xTaskNotifyGive whenever it queues a
+        // network event, so a notify can arrive before our reply does
+        // (30 Oct: /api/command answered "pending" in 0.36 s). After every
+        // wake, check whether our reply is really there and otherwise keep
+        // waiting until the deadline. AsyncTCP loses nothing: its loop
+        // drains its queue before it sleeps again.
         uint32_t notified = 0;
         BaseType_t got = pdFALSE;
-        uint32_t remaining = (uint32_t)waitMs;
-        while (remaining > 0) {
-            uint32_t slice = remaining > 2000 ? 2000 : remaining;
-            got = xTaskNotifyWait(0, ULONG_MAX, &notified,
-                                  pdMS_TO_TICKS(slice));
-            if (got == pdTRUE) break;
-            remaining -= slice;
+        String resp;
+        const uint32_t deadline = millis() + (uint32_t)waitMs;
+        for (;;) {
+            int32_t left = (int32_t)(deadline - millis());
+            if (left <= 0) break;
+            uint32_t slice = left > 2000 ? 2000 : (uint32_t)left;
+            if (xTaskNotifyWait(0, ULONG_MAX, &notified, pdMS_TO_TICKS(slice)) == pdTRUE &&
+                wallboxBLE.tryFetchResponse(reqId, resp)) {
+                got = pdTRUE;
+                break;
+            }
             esp_task_wdt_reset();
         }
+        if (got != pdTRUE && wallboxBLE.tryFetchResponse(reqId, resp)) got = pdTRUE;
         if (got == pdTRUE) {
-            String resp;
-            if (wallboxBLE.tryFetchResponse(reqId, resp) && resp.length()) {
+            if (resp.length()) {
                 // Single-copy, shared_ptr pull-based send (same as every other
                 // JSON endpoint). The direct req->send(200, type, String) path
                 // copies the body into an AsyncBasicResponse AND builds a second

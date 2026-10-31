@@ -5,6 +5,7 @@
 #include "wb_zentri_normalize.h"
 #include "wb_copper_normalize.h"
 #include "wb_ble_err.h"   // bleErrName() — decode NimBLE codes to names (#161)
+#include "wb_stop_guard.h"  // never send a stop to a non-charging session
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
@@ -259,7 +260,49 @@ void WallboxBLE::loop() {
                 // panic. If a method genuinely needs a longer wait it
                 // can override via bapiTimeoutMs from the caller.
                 uint32_t to = req.bapiTimeoutMs ? req.bapiTimeoutMs : 5000;
-                String resp = _sendCommandDirect(req.met, req.par, to);
+                String resp;
+                const wb_stop_guard::Kind kind = wb_stop_guard::kindOf(req.met, req.par);
+                if (kind != wb_stop_guard::Kind::None) {
+                    // Every w_cha is checked against a FRESH r_dat (the cache can
+                    // be 10 s old): on a MAX both start and stop toggle an existing
+                    // session (see wb_stop_guard.h).
+                    const uint32_t last = (kind == wb_stop_guard::Kind::Stop) ? _lastStopSentMs
+                                                                              : _lastStartSentMs;
+                    const uint32_t win  = (kind == wb_stop_guard::Kind::Stop) ? wb_stop_guard::kRecentMs
+                                                                              : wb_stop_guard::kRecentStartMs;
+                    const bool recent = last != 0 && (millis() - last) < win;
+                    // Original Pulsar (Zentri radio, no fw_v_ project): its st
+                    // enum differs, so only the time windows apply there.
+                    const bool legacy = _isZentri && _chgProject.length() == 0;
+                    String fresh;
+                    if (!recent && !legacy) fresh = _sendCommandDirect(bapi::MET_GET_STATUS, "null", 3000);
+                    const wb_stop_guard::Verdict v = wb_stop_guard::decide(kind, recent, fresh, legacy);
+                    if (v == wb_stop_guard::Verdict::Send) {
+                        resp = _sendCommandDirect(req.met, req.par, to);
+                        if (kind == wb_stop_guard::Kind::Stop) {
+                            _lastStopSentMs = millis();
+                            _lastStartSentMs = 0;   // a start after this stop is a new one
+                        } else {
+                            _lastStartSentMs = millis();
+                            _lastStopSentMs = 0;    // a stop after this start is a new one
+                        }
+                    } else {
+                        Log.printf("[BLE] %s %s %s: %s\n", req.met, req.par,
+                                   v == wb_stop_guard::Verdict::Skip ? "skipped" : "not sent",
+                                   wb_stop_guard::reason(kind, recent, v));
+                        resp = (v == wb_stop_guard::Verdict::Skip) ? wb_stop_guard::skippedReply(kind)
+                                                                   : wb_stop_guard::unreadableReply();
+                    }
+                } else {
+                    // s_cmode is rejected while the session is still in st 2, so
+                    // right after a stop we actually sent, let it settle first.
+                    if (strcmp(req.met, "s_cmode") == 0 && _lastStopSentMs != 0) {
+                        const uint32_t since = millis() - _lastStopSentMs;
+                        if (since < wb_stop_guard::kSettleBeforeCmodeMs)
+                            vTaskDelay(pdMS_TO_TICKS(wb_stop_guard::kSettleBeforeCmodeMs - since));
+                    }
+                    resp = _sendCommandDirect(req.met, req.par, to);
+                }
                 // Phase 3: hoist the response body into a shared_ptr so
                 // the response map and the MQTT pending-pub ring share
                 // ONE heap allocation instead of two copies. make_shared
