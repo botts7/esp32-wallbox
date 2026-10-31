@@ -9,7 +9,7 @@
 //  - A start (w_cha 1) sent to a session that is already started and waiting
 //    for the car (st 2) PAUSES it. The Charge Assistant's start re-assert did
 //    that at the moment the car began to draw; after an interrupted handshake
-//    the car (a BYD) stopped requesting charge until it was replugged.
+//    the car stopped requesting charge until it was replugged.
 //  - s_cmode {"mode":0} (hand back) is rejected in st 2.
 // Some Pulsar Plus firmware treats w_cha as a toggle too (#23).
 //
