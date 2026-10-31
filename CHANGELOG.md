@@ -6,6 +6,36 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (charge control on a Pulsar MAX, measured 27-28 Oct)
+- **Starts and stops can no longer toggle the session.** On a Pulsar MAX a stop
+  sent to a paused session restarts it, and a start sent while it's waiting for
+  the car pauses it. Every start/stop (HTTP, MQTT, raw BAPI) is now checked
+  against a fresh charger status first: a stop only goes to a started session,
+  a start never to one that's already started, and a repeat within 15 s (stop)
+  or 20 s (start) is dropped. The original Pulsar, whose status codes differ,
+  keeps only the time windows.
+- **Resume / hand-back ends a waiting session first.** The charger rejects the
+  hand-back while waiting for the car, so a guarded stop goes first, with a
+  short settle before the hand-back.
+- **Start while paused clears the pause first, then starts.** The old order
+  handed control to Eco-Smart after the start, which re-queued it at night.
+
+### Fixed (stability)
+- **No more crash when a dashboard tab drops its live connection.** The web
+  server library (ESPAsyncWebServer 3.6.0) freed the same network connection
+  twice when a `/ws` client disconnected, corrupting memory; the gateway then
+  panicked, sometimes hours later and somewhere unrelated. Reproduced on demand
+  (three crashes in 40 s while opening and dropping `/ws` connections) and
+  fixed by moving to ESPAsyncWebServer 3.12.1 and AsyncTCP 3.5.0. The same
+  test then ran 40 minutes (over 5,000 connections) with no reboot.
+- **`/api/command` waits for its own reply.** With the newer library the BAPI
+  wait could wake early and answer `202 pending` instead of the charger's
+  reply; it now keeps waiting until the reply is in or the timeout passes.
+- **Changing the charging current no longer counts as a manual override.**
+  Only start, stop and resume are recorded as `last_command_by` now, so a
+  current change from Home Assistant or an automation doesn't make the Charge
+  Assistant stand down for 30 minutes.
+
 ### Added
 - **W5500 Ethernet gateways can update from Home Assistant.** Releases now attach
   `wallbox-gateway-<tag>-esp32s3-eth.bin` (plus the matching `.elf` for coredump

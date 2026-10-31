@@ -690,8 +690,10 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         // charges. Only when paused; a normal start is unchanged. Mirrors
         // wb_cmd.cpp's action=start.
         if (val == 1 && wallboxBLE.schedulePaused()) {
-            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, "1");
+            // Clear the pause FIRST, then start: s_cmode after the start hands
+            // control to Eco-Smart and re-queues it (measured on a MAX).
             wallboxBLE.enqueueRequest("s_cmode", "{\"mode\":0}");
+            wallboxBLE.enqueueRequest(bapi::MET_START_STOP, "1");
         } else {
             par = String(val);
             wallboxBLE.enqueueRequest(bapi::MET_START_STOP, par.c_str());

@@ -393,6 +393,8 @@ private:
     // via isConnected(). Without this the compiler may cache the read.
     volatile State _state = State::DISCONNECTED;
     bool _pinRequired = false;
+    uint32_t _lastStopSentMs = 0;  // millis() of the last w_cha stop put on the wire (wb_stop_guard)
+    uint32_t _lastStartSentMs = 0; // millis() of the last w_cha start put on the wire (wb_stop_guard)
     bool _isZentri = false;  // set in _connect() when TruConnect module detected (#12)
     uint32_t _lastUsid = 0;  // r_dat.usid, needed by the original Pulsar's w_lck (#68)
     bool _meterPresent = true;  // #129: false once r_dca reports error code 4 (no meter)
