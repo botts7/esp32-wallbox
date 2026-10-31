@@ -279,7 +279,7 @@ void WallboxBLE::loop() {
                     const bool recent = last != 0 && (millis() - last) < win;
                     // Original Pulsar (Zentri radio, no fw_v_ project): its st
                     // enum differs, so only the time windows apply there.
-                    const bool legacy = _isZentri && _chgProject.length() == 0;
+                    const bool legacy = isLegacyPulsar();
                     String fresh;
                     if (!recent && !legacy) fresh = _sendCommandDirect(bapi::MET_GET_STATUS, "null", 3000);
                     const wb_stop_guard::Verdict v = wb_stop_guard::decide(kind, recent, fresh, legacy);
