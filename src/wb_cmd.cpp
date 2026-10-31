@@ -28,8 +28,11 @@ Plan buildCommand(const String& action, const String& value,
     // Tag the commander for arbitration (advisory; see docs/control-owner.md).
     // Charge-affecting actions record who issued them (empty owner -> "manual")
     // so controllers can detect a recent manual/other override.
-    if (action == "start" || action == "stop" ||
-        action == "resume" || action == "current") {
+    // A current-limit change is not taking over charging: it doesn't start,
+    // stop or pause anything, so it doesn't count (30 Oct: setting 6 A from
+    // HA held the Charge Assistant off for 30 min, and a load-balancing
+    // automation that trims the current would do the same every time).
+    if (action == "start" || action == "stop" || action == "resume") {
         wb_control::recordCommand(owner);
     }
 

@@ -98,5 +98,6 @@ manual except by the tag).
 
 - `/api/status` gains `control_owner` (string) + `last_command_by` (string)
   + `last_command_age_s` (int).
-- `/api/command` accepts optional `&owner=<id>` on start/stop/current, records
-  it as `last_command_by`. Advisory only — never rejects.
+- `/api/command` accepts optional `&owner=<id>` on start/stop/resume, records
+  it as `last_command_by`. Advisory only — never rejects. A current-limit
+  change (`action=current`) is not recorded: it doesn't take over charging.
