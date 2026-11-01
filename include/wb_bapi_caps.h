@@ -38,4 +38,15 @@ bool unsupported(const char* met);
 // /api/status: array of the methods currently marked unsupported.
 void toJson(JsonArray out);
 
+// True for a read method (r_*, g_*, read_*) asked without a parameter: the
+// only kind tracked and skipped. A write is always sent, and so is a read with
+// a parameter (r_sch <slot>: an empty slot errors, a valid one doesn't, and the
+// tracker counts per method).
+bool isRead(const char* met, const char* par);
+
+// Reply given instead of sending a skipped read (requests from /api/command,
+// MQTT bapi or the dashboard go through the same tracker as periodic reads,
+// so a client that keeps asking doesn't keep the radio busy, #68).
+const char* unsupportedReply();
+
 }  // namespace wb_bapi_caps

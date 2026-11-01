@@ -299,6 +299,11 @@ void WallboxBLE::loop() {
                         resp = (v == wb_stop_guard::Verdict::Skip) ? wb_stop_guard::skippedReply(kind)
                                                                    : wb_stop_guard::unreadableReply();
                     }
+                } else if (wb_bapi_caps::isRead(req.met, req.par) && wb_bapi_caps::shouldSkip(req.met)) {
+                    // A read this charger has proven it doesn't support, asked
+                    // for by a client (HA integration, dashboard, MQTT bapi):
+                    // answer from the tracker instead of the radio (#68).
+                    resp = wb_bapi_caps::unsupportedReply();
                 } else {
                     // s_cmode is rejected while the session is still in st 2, so
                     // right after a stop we actually sent, let it settle first.
@@ -308,6 +313,7 @@ void WallboxBLE::loop() {
                             vTaskDelay(pdMS_TO_TICKS(wb_stop_guard::kSettleBeforeCmodeMs - since));
                     }
                     resp = _sendCommandDirect(req.met, req.par, to);
+                    if (wb_bapi_caps::isRead(req.met, req.par)) wb_bapi_caps::record(req.met, resp);
                 }
                 // Phase 3: hoist the response body into a shared_ptr so
                 // the response map and the MQTT pending-pub ring share
@@ -1984,7 +1990,10 @@ void WallboxBLE::_pollSchedules() {
         // empty/disabled slot — skipped, but we keep scanning past it.
         // Mirrors loadSchedulesZentri() in the dashboard JS. The days
         // bitmask is already Sunday-first (bit0=Sun), as the engine wants.
-        for (uint8_t i = 0; i < kMaxSchedSlots; i++) {
+        // The original Pulsar has exactly four slots (0-3, #68 snoop); asking
+        // for a fifth only earns an error reply every refresh.
+        const uint8_t slots = isLegacyPulsar() ? 4 : kMaxSchedSlots;
+        for (uint8_t i = 0; i < slots; i++) {
             if (_state != State::CONNECTED) break;
             String resp = _sendCommandDirect(bapi::MET_GET_SCHEDULE, String(i).c_str(), 3000);
             if (resp.isEmpty()) break;

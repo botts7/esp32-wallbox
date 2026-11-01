@@ -76,4 +76,16 @@ void toJson(JsonArray out) {
         if (_entries[i].unsupported) out.add(_entries[i].met);
 }
 
+bool isRead(const char* met, const char* par) {
+    if (!met) return false;
+    if (par && *par && strcmp(par, "null") != 0) return false;
+    return strncmp(met, "r_", 2) == 0 || strncmp(met, "g_", 2) == 0 ||
+           strncmp(met, "read_", 5) == 0;
+}
+
+const char* unsupportedReply() {
+    return "{\"error\":{\"code\":-2,\"message\":\"not supported by this charger\"},"
+           "\"r\":null,\"unsupported\":true}";
+}
+
 }  // namespace wb_bapi_caps

@@ -737,6 +737,7 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         String action = payload;
         action.toLowerCase();
         int val = (action == "1" || action == "lock" || action == "true") ? 1 : 0;
+        Log.printf("[MQTT] %s via MQTT (payload '%s')\n", val ? "lock" : "unlock", payload);
         par = wallboxBLE.lockPar(val == 1);   // + usid on the original Pulsar (#68)
         wallboxBLE.enqueueRequest(bapi::MET_LOCK, par.c_str());
 
