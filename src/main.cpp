@@ -730,9 +730,9 @@ void loop() {
         // 2.7.0 step 5: drain any pending MQTT-publish responses that
         // the BLE task queued. We can publish from here because the
         // main task owns PubSubClient. Drain to empty per iteration —
-        // each publish is bounded by the 2.6.0 1s wifiClient socket
-        // timeout, and the ring caps at kPendingPubSize entries, so
-        // the loop bound is ~4 × 1 s worst case (unlikely).
+        // the ring caps at kPendingPubSize entries, and on a stalled
+        // broker the first stalled write closes the socket
+        // (WbMqttNetClient), so the rest fail at once.
         {
             String pubMet, pubJson;
             while (wallboxBLE.drainPendingResponsePub(pubMet, pubJson)) {
