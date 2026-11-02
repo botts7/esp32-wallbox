@@ -173,8 +173,18 @@ static bool checkAuth() {
         http.send(429, "text/plain", "Too many attempts. Try again in 30 seconds.");
         return false;
     }
-    if (millis() >= authLockoutUntil) authFailCount = 0;
+    // Reset only when a lockout has actually run out (see wb_web_async.cpp).
+    if (authLockoutUntil != 0 && millis() >= authLockoutUntil) {
+        authFailCount = 0;
+        authLockoutUntil = 0;
+    }
 
+    // No credentials at all = the browser's first login step, not a wrong
+    // password: prompt without counting it (see wb_web_async.cpp _checkAuth).
+    if (!http.hasHeader("Authorization")) {
+        http.requestAuthentication();
+        return false;
+    }
     if (!http.authenticate(cfg.authUser.c_str(), cfg.authPass.c_str())) {
         authFailCount++;
         if (authFailCount >= 5) {
