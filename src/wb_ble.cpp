@@ -7,6 +7,7 @@
 #include "wb_ble_err.h"   // bleErrName() — decode NimBLE codes to names (#161)
 #include "wb_stop_guard.h"  // never send a stop to a non-charging session
 #include "wb_bapi_caps.h"  // skip periodic reads this charger doesn't support
+#include "wb_ceiling.h"    // the current ceiling, kept across reboots
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
@@ -77,6 +78,9 @@ static WBClientCallbacks _secCallbacks;
 void WallboxBLE::begin(const char* addr) {
     _instance = this;
     _addr = addr;
+    // The charger's current ceiling from the last session, so current
+    // commands and the pages don't fall back to 32 A until the first poll.
+    _maxAvailCurrent = wb_ceiling::load();
     _pin = "";
     _svcUUID = DEF_SVC;
     _chrUUID = DEF_CHR;
@@ -1755,6 +1759,7 @@ void WallboxBLE::_captureMaxAvail(JsonVariantConst r) {
     int v = mac.as<int>();
     if (v >= 6 && v <= 80 && v != _maxAvailCurrent) {
         _maxAvailCurrent = v;
+        wb_ceiling::save(v);
         // Re-arm HA discovery so the Max Charging Current number republishes
         // with the real ceiling as its max. Same one-shot as the fw_v_ refresh.
         _discoveryStale = true;
