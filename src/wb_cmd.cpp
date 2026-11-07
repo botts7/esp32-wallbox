@@ -97,13 +97,11 @@ Plan buildCommand(const String& action, const String& value,
         p.met = "s_cmode";
         p.par = "{\"mode\":0}";
     }
-    else if (action == "lock") {
+    else if (action == "lock" || action == "unlock") {
+        // Logged with its sender so repeated w_lck frames can be traced (#68).
+        Log.printf("[CMD] %s via HTTP (owner='%s')\n", action.c_str(), owner.c_str());
         p.met = bapi::MET_LOCK;
-        p.par = "1";
-    }
-    else if (action == "unlock") {
-        p.met = bapi::MET_LOCK;
-        p.par = "0";
+        p.par = wallboxBLE.lockPar(action == "lock");   // + usid on the original Pulsar (#68)
     }
     // Clamp to the charger's own envelope (6 A .. charger-reported ceiling, #39).
     // Hard-coding 32 A capped 40 A USA Pulsar Plus units; maxCurrentCeiling()

@@ -2,6 +2,7 @@
 #include "wb_config.h"
 #include "wb_control.h"
 #include "wb_cmd.h"
+#include "wb_bapi_caps.h"
 #include "wb_ble.h"
 #include "wb_log.h"
 #include "wb_version.h"
@@ -172,8 +173,18 @@ static bool checkAuth() {
         http.send(429, "text/plain", "Too many attempts. Try again in 30 seconds.");
         return false;
     }
-    if (millis() >= authLockoutUntil) authFailCount = 0;
+    // Reset only when a lockout has actually run out (see wb_web_async.cpp).
+    if (authLockoutUntil != 0 && millis() >= authLockoutUntil) {
+        authFailCount = 0;
+        authLockoutUntil = 0;
+    }
 
+    // No credentials at all = the browser's first login step, not a wrong
+    // password: prompt without counting it (see wb_web_async.cpp _checkAuth).
+    if (!http.hasHeader("Authorization")) {
+        http.requestAuthentication();
+        return false;
+    }
     if (!http.authenticate(cfg.authUser.c_str(), cfg.authPass.c_str())) {
         authFailCount++;
         if (authFailCount >= 5) {
@@ -769,7 +780,20 @@ String wb_buildStatusJson() {
     // thermal issues (e.g. a hot garage) rather than guessing (task #162, _Mike).
     json += ",\"chip_temp\":" + wb_chipTempJson();  // null on hw without a real sensor
     json += ",\"ble\":\"" + String(wallboxBLE.stateStr()) + "\"";
-    json += ",\"zentri\":" + String(wallboxBLE.isZentri() ? "true" : "false");
+    // "zentri" drives the dashboard's per-slot, view-only schedule handling,
+    // which is an original-Pulsar trait, so it now means "original Pulsar".
+    // "zentri_radio" reports the BLE module itself (also on some Plus units, #74).
+    json += ",\"zentri\":" + String(wallboxBLE.isLegacyPulsar() ? "true" : "false");
+    json += ",\"zentri_radio\":" + String(wallboxBLE.isZentri() ? "true" : "false");
+    // Periodic BAPI reads this charger answers with an error, now skipped
+    // (wb_bapi_caps). Shows up in compatibility reports.
+    {
+        JsonDocument cd;
+        wb_bapi_caps::toJson(cd.to<JsonArray>());
+        String arr;
+        serializeJson(cd, arr);
+        json += ",\"bapi_unsupported\":" + arr;
+    }
     // #129: meter capability — surfaces hide grid/solar when false (charger
     // has no Power Boost / Power Meter; e.g. the original Pulsar).
     json += ",\"meter\":" + String(wallboxBLE.meterPresent() ? "true" : "false");
@@ -829,6 +853,9 @@ String wb_buildStatusJson() {
     // chg_project — canonical model identifier (e.g. "prj15-pulsar-max").
     json += ",\"chg_app_fw\":\"" + wb_jsonEsc(wallboxBLE.chargerAppFirmware()) + "\"";
     json += ",\"chg_project\":\"" + wb_jsonEsc(wallboxBLE.chargerProject()) + "\"";
+    // The charger's own current ceiling (A), saved across reboots, or -1 if
+    // not known yet. Pages and HA use it before the first charger poll.
+    json += ",\"max_current_ceiling\":" + String((int)wallboxBLE.maxAvailableCurrent());
     // Emit null instead of -1 when r_ses doesn't expose a usable count
     // (Plus and some MAX firmwares don't fill in `last`). HA's
     // `value_json.chg_sessions` template renders null as unavailable.
@@ -1336,9 +1363,9 @@ static const char* DASH_BODY_SOURCE = R"HTML(
 // model-aware split was incorrect.
 var SN={0:'Ready',1:'Charging',2:'Waiting for Car',3:'Waiting for Schedule',4:'Paused',5:'Charge Complete',6:'Locked',7:'Error',8:'Waiting for Current Allocation',9:'Power Sharing Not Configured',10:'Queued (Power Boost)',11:'Discharging',12:'Waiting for MID Auth',13:'MID Safety Margin Exceeded',14:'OCPP Unavailable',15:'OCPP Finishing',16:'OCPP Reserved',17:'Updating',18:'Queued (Eco-Smart)',19:'Connected (No Current)'};
 // Original/Zentri Pulsar (#12) reports a small status enum that doesn't line
-// up with the MAX 0-18 codes (esp. st4 = charge ramp, not "Paused"). Used in
+// up with the MAX 0-18 codes. st4 is a paused/open session after w_cha 0 (#68). Used in
 // place of SN when /api/status reports zentri:true.
-var ZN={0:'Ready',1:'Charging',2:'Connected',3:'Waiting for Schedule',4:'Starting'};
+var ZN={0:'Ready',1:'Charging',2:'Connected',3:'Waiting for Schedule',4:'Paused'};
 var CHARGER_TZ='UTC';try{CHARGER_TZ=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'}catch(e){}
 fetch('/api/command?action=bapi&met=g_tzn&par=null',{signal:AbortSignal.timeout(8000)}).then(function(r){return r.json()}).then(function(d){if(d.r&&d.r.timezone)CHARGER_TZ=d.r.timezone}).catch(function(){});
 function _setText(id,txt){var el=document.getElementById(id);if(el)el.textContent=txt}
@@ -1351,7 +1378,7 @@ function _setNum(id,val,suffix,fmt){if(typeof val!=='number'||isNaN(val))return;
 // green (solar USED) vs grid energy split — the app's "green" number.
 var _pfState={cp:null,en:null,house:null,conn:null,surplus:null,green:null,grid:null};
 // Car-connected from the r_dat status code — mirrors firmware carConnected().
-function _carConn(st){return st===1||st===2||st===3||st===4||st===5||st===8||st===10||st===11||st===12||st===13||st===18}
+function _carConn(st){if(window._zentri)return st>=1&&st<=4;return st===1||st===2||st===3||st===4||st===5||st===8||st===10||st===11||st===12||st===13||st===15||st===18}
 // Flowing-dash animation: scrolls the stroke-dashoffset negatively so
 // dashes appear to march Grid->Charger->Vehicle. Speed scales with
 // the actual charging power so visually-faster = more kW. Capped so
@@ -1431,16 +1458,17 @@ function _clearLive(){
   var cr=document.getElementById('charge-reminder');if(cr)cr.style.display='none';
   try{localStorage.removeItem('wb-last-status');localStorage.removeItem('wb-last-meter')}catch(e){}
 }
-function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(typeof s.st==='number'){var n=(window._zentri&&ZN[s.st]!==undefined)?ZN[s.st]:SN[s.st];if(s.st===4&&!window._zentri&&!(typeof s.gen==='number'&&s.gen!==0))n='Connected — not charging';_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var mac=(typeof s.max_available_current==='number')?s.max_available_current:((rt&&typeof rt.max_available_current==='number')?rt.max_available_current:NaN);var mx=(mac>=6&&mac<=80)?mac:32;var sl=document.getElementById('sl');if(sl){sl.max=mx;sl.value=s.cur}var scEl=document.getElementById('sc');if(scEl)scEl.max=mx;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object')applyRT(rt);window._lastUpdate=Date.now()}
+function applyStatusData(s,rt){if(!s||typeof s!=='object')return;if(!rt&&window._lastRT)rt=window._lastRT;if(typeof s.st==='number'){var n=(window._zentri&&ZN[s.st]!==undefined)?ZN[s.st]:SN[s.st];if(s.st===4&&!window._zentri&&!(typeof s.gen==='number'&&s.gen!==0))n='Connected — not charging';_setText('v-st',n||'Code '+s.st)}_setNum('v-pw',s.cp,' kW',function(v){return v.toFixed(2)});if(typeof s.cp==='number')_pfState.cp=s.cp;if(typeof s.en==='number')_pfState.en=s.en;if(typeof s.st==='number')_pfState.conn=_carConn(s.st);_pfRender();var threePhase=(s.L2>0||s.L3>0||(rt&&rt.phases_connection>=2));if(typeof s.L1==='number'){var l1=(s.L1/10).toFixed(1);if(threePhase&&typeof s.L2==='number'&&typeof s.L3==='number'){_setText('l-cr','L1 / L2 / L3');_setText('v-cr',l1+' / '+(s.L2/10).toFixed(1)+' / '+(s.L3/10).toFixed(1)+' A')}else{_setText('l-cr','Charging Current');_setText('v-cr',l1+' A')}}_setNum('v-en',s.en,' kWh',function(v){return (v/100).toFixed(2)});if(typeof s.cur==='number'){_setText('v-mc',s.cur+' A');var mac=(typeof s.max_available_current==='number')?s.max_available_current:((rt&&typeof rt.max_available_current==='number')?rt.max_available_current:NaN);var mx=(mac>=6&&mac<=80)?mac:(window._gwCeil||32);if(typeof s.cur==='number'&&s.cur>mx&&s.cur<=80)mx=s.cur;window._chgCeil=mx;var sl=document.getElementById('sl');if(sl){sl.max=mx;sl.value=s.cur}var scEl=document.getElementById('sc');if(scEl)scEl.max=mx;_setText('sv',s.cur+'A')}try{localStorage.setItem('wb-last-status',JSON.stringify({s:s,rt:rt,t:Date.now()}))}catch(e){}if(rt&&typeof rt==='object')applyRT(rt);window._lastUpdate=Date.now()}
 // Realtime (r_sta) fields — lock + OCPP. Shared by the polled path (rt arg) and
 // the 'realtime' WS push, so lock state updates live even when WS-driven.
-function applyRT(rt){if(!rt||typeof rt!=='object')return;if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}
+function applyRT(rt){if(!rt||typeof rt!=='object')return;window._lastRT=Object.assign(window._lastRT||{},rt);if(typeof rt.lock_status==='number')_setText('v-lk',rt.lock_status==0?'Unlocked':'Locked');if(typeof rt.ocpp_status==='number'){var os={0:'Not Available',1:'Not Configured',2:'Connected',3:'Charging'};_setText('v-oc',os[rt.ocpp_status]||'Code '+rt.ocpp_status)}}
 function applyMeterData(d){if(!d||typeof d!=='object')return;if(typeof d.v1==='number'){var vt=document.getElementById('v-vt');if(vt)vt.textContent=d.v1+' V'}var house=(d.p1||0)+(d.p2||0)+(d.p3||0);if(typeof d.p1==='number'){var gp=document.getElementById('v-gp');if(gp)gp.textContent=house+' W'}var ph=document.getElementById('v-gp-phases');if(ph){if((d.v2||0)>0||(d.v3||0)>0){ph.textContent='L1 '+(d.p1||0)+' · L2 '+(d.p2||0)+' · L3 '+(d.p3||0)+' W'}else{ph.textContent=''}}/* House Power = sum of all phases (p1+p2+p3), not just p1 — the cell was showing phase 1 only on 3-phase meters (#51). Per-phase L1/L2/L3 shown only when the meter reports L2/L3 voltage, i.e. a genuine 3-phase meter — data-driven, not charger-model-specific (#51 follow-up). */_pfState.house=house;_pfRender();try{localStorage.setItem('wb-last-meter',JSON.stringify({d:d,t:Date.now()}))}catch(e){}}
-function P(){if(window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null'){/* BLE not delivering charger status — reset power flow + session cache so the animation can't outlive a BLE drop on stale localStorage values */_pfState.cp=null;_pfState.en=null;_pfRender();return}var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(!d||!d.r){_pfState.house=null;_pfRender();return}applyMeterData(d.r)}).catch(function(){_pfState.house=null;_pfRender()})}
+function P(force){if(!force&&window.wbws&&window.wbws.isOpen())return;fetch('/api/charger').then(function(r){return r.json()}).then(function(d){if(!d.status||d.status==='null'){/* BLE not delivering charger status — reset power flow + session cache so the animation can't outlive a BLE drop on stale localStorage values */_pfState.cp=null;_pfState.en=null;_pfRender();return}var s=d.status?d.status.r:null,rt=d.realtime?d.realtime.r:null;applyStatusData(s,rt)}).catch(function(){});fetch('/api/command?action=bapi&met=r_dca&par=null').then(function(r){return r.json()}).then(function(d){if(!d||!d.r){_pfState.house=null;_pfRender();return}applyMeterData(d.r)}).catch(function(){_pfState.house=null;_pfRender()})}
 // Hook WS push handlers
 if(window.wbws){window.wbws.subscribe('status',function(d){var s=d&&d.r?d.r:d;applyStatusData(s,null);if(window.wbCheckStatus)window.wbCheckStatus(s)});window.wbws.subscribe('meter',function(d){applyMeterData(d&&d.r?d.r:d)});window.wbws.subscribe('realtime',function(d){applyRT(d&&d.r?d.r:d)});window.wbws.subscribe('ble',function(d){if(d&&d.state&&d.state!=='connected')_clearLive()});}
 // Render cached values immediately (no spinners)
 try{var c=JSON.parse(localStorage.getItem('wb-last-status')||'null');if(c)applyStatusData(c.s,c.rt)}catch(e){}
+setTimeout(function(){P(1)},800);
 try{var cm=JSON.parse(localStorage.getItem('wb-last-meter')||'null');if(cm)applyMeterData(cm.d)}catch(e){}
 function C(a){toast('Sending '+a.split('&')[0]+'...','info');fetch('/api/command?action='+a).then(function(x){return x.json()}).then(function(d){if(d.error)toast(d.error,'error');else toast('Command sent','success');setTimeout(P,1000)}).catch(function(e){toast('Error: '+e,'error')})}
 var _curTimer=null;
@@ -1458,7 +1486,7 @@ fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return 
 var _notifs=[];
 function loadNotifs(){fetch('/api/status',{signal:AbortSignal.timeout(4000)}).then(function(r){return r.json()}).then(function(s){if(s.ble!=='connected')return;return fetch('/api/command?action=bapi&met=r_not&par=null',{signal:AbortSignal.timeout(10000)}).then(function(r){return r.json()}).then(function(d){var v=d.r;if(!Array.isArray(v))return;_notifs=v;var bar=document.getElementById('notif-bar');if(!bar)return;if(v.length>0){document.getElementById('notif-count').textContent=v.length;bar.style.display='block'}else{bar.style.display='none'}})}).catch(function(){})}
 function showNotifs(){var m=document.getElementById('notif-modal');var inner=document.getElementById('notif-modal-inner');var html="<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0'>&#x1F514; Notifications</h3><button onclick='document.getElementById(\"notif-modal\").style.display=\"none\"' style='background:transparent;border:none;color:var(--text2);font-size:1.6em;cursor:pointer;line-height:1'>×</button></div>";if(!_notifs.length){html+="<div style='color:var(--text3)'>No notifications</div>"}else{_notifs.forEach(function(n,i){var msg=n.message||n.msg||n.text||JSON.stringify(n);var ts=(n.timestamp||n.ts)?new Date((n.timestamp||n.ts)*1000).toLocaleString(undefined,{timeZone:CHARGER_TZ}):'';html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:6px 0'><div style='font-weight:500;font-size:.9em'>#"+(i+1)+" "+msg+"</div>"+(ts?"<div style='font-size:.78em;color:var(--text3);margin-top:4px'>"+ts+"</div>":'')+"</div>"})}inner.innerHTML=html;m.style.display='flex'}
-function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){window._zentri=!!s.zentri;updateChargeReminder(s);applyMeterCapability(s.meter);var _pb=document.getElementById('paused-banner');if(_pb)_pb.style.display=s.schedule_paused?'flex':'none';var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
+function updateBleHealth(){fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(r){return r.json()}).then(function(s){window._zentri=!!s.zentri;window._legacyPulsar=!!s.zentri&&!s.chg_project;if(s.max_current_ceiling>=6&&s.max_current_ceiling<=80)window._gwCeil=s.max_current_ceiling;updateChargeReminder(s);applyMeterCapability(s.meter);var _pb=document.getElementById('paused-banner');if(_pb)_pb.style.display=s.schedule_paused?'flex':'none';var bar=document.getElementById('ble-health');if(!bar)return;var st=s.ble,rssi=s.rssi,age=s.ble_last_activity_s||0;var html='',bg='',bd='',col='';/* 3.0: when BLE isn't connected, blank the live-value spans so the dashboard doesn't show last-known stale numbers (Status, kW, V, A, etc.) as if they were current. */if(typeof _clearLive==='function'&&st!=='connected')_clearLive();if(st!=='connected'){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE '+(st||'disconnected')+' — gateway can’t reach the charger. Try moving the ESP32 closer.'}else if(rssi<-90){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE signal very weak ('+rssi+' dBm) — move the ESP32 closer to the charger for reliable control.'}else if(age>120){bg='rgba(239,68,68,.08)';bd='rgba(239,68,68,.3)';col='#ef4444';html='&#x26A0; BLE link unresponsive ('+age+'s since last reply at '+rssi+' dBm) — commands likely failing, move ESP32 closer or power-cycle.'}else if(rssi<-80){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE signal weak ('+rssi+' dBm) — commands may be slow. Consider moving the ESP32 closer.'}else if(age>60){bg='rgba(245,158,11,.08)';bd='rgba(245,158,11,.3)';col='#f59e0b';html='&#x26A0; BLE struggling ('+age+'s since last reply, '+rssi+' dBm) — performance degraded.'}else{bar.style.display='none';return}bar.style.background=bg;bar.style.border='1px solid '+bd;bar.style.color=col;bar.innerHTML=html;bar.style.display='block'}).catch(function(){})}
 // Charge-reminder banner (#127). Reads next_scheduled_charge (UTC epoch)
 // + plug_reminder from /api/status — both gateway-computed, no BAPI hop.
 // Piggybacks on updateBleHealth's existing /api/status fetch (no extra
@@ -1770,7 +1798,7 @@ function localToUtc(hhmm){
   return ('0'+uh).slice(-2)+('0'+um).slice(-2);
 }
 function Q(m,l){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)r=document.getElementById('qr');if(!r){toast('No result panel found','error');return}r.style.display='block';r.innerHTML="<span class='spinner'></span>"+l+"...";var doFetch=function(){fetch('/api/command?action=bapi&met='+m+'&par=null',{signal:AbortSignal.timeout(15000)}).then(function(x){return x.json()}).then(function(d){if(d.error){r.innerHTML='<span style="color:var(--danger)">'+d.error+'</span>';return}r.innerHTML=F(m,l,d.r||d)}).catch(function(e){r.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'})};if(m==='r_schs'&&tzReady){tzReady.then(doFetch)}else{doFetch()}}
-function F(m,l,r){var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var s={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi',s[r]||'Code '+r)}else if(m==='r_ses'){h+=row('Last Session',r.last);h+=row('Total Sessions',r.size)}else if(m==='r_schs'){var sc=r.schedules||r;if(!Array.isArray(sc)){h+=row('Schedules','None');return h}sc.forEach(function(s,i){var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS[b]+' ';h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'><div style='display:flex;justify-content:space-between'><b>Schedule "+(i+1)+"</b><span class='badge "+(s.enabled?'badge-success':'badge-warning')+"'>"+(s.enabled?'Active':'Off')+"</span></div>";h+=row('Time',utcToLocal(s.start)+' - '+utcToLocal(s.stop));h+=row('Days',ds.trim()||'None');h+=row('Power Limit',(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A');if(s.target&&s.target.type==1)h+=row('Energy Limit',(s.target.value/1000)+' kWh');else h+=row('Energy Limit','No limit');h+="</div>"});if(!sc.length)h+=row('Schedules','None')}else if(m==='r_dca'){if(typeof r==='object'){h+=row('Voltage L1',r.v1+' V');if(r.v2)h+=row('Voltage L2',r.v2+' V');if(r.v3)h+=row('Voltage L3',r.v3+' V');h+=row('Power L1',r.p1+' W');if(r.p2)h+=row('Power L2',r.p2+' W');if(r.p3)h+=row('Power L3',r.p3+' W');h+=row('Current L1',(r.c1/10).toFixed(1)+' A');if(r.c2)h+=row('Current L2',(r.c2/10).toFixed(1)+' A');if(r.c3)h+=row('Current L3',(r.c3/10).toFixed(1)+' A');h+=row('Total Energy',(r.e/1000).toFixed(1)+' kWh')}else{h+=row('Energy Meter',''+r)}}else if(m==='g_alo'){if(typeof r==='object'){h+=row('Auto Lock',r.enabled?'Enabled':'Disabled');if(r.time)h+=row('Lock After',r.time+' seconds')}else{h+=row('Auto Lock',r?'Enabled':'Disabled')}}else if(m==='g_ecos'){var em={0:'Eco (Solar + Grid)',1:'Full Green (Solar Only)'};if(typeof r==='object'){h+=row('Status',r.ese?'Active':'Inactive');h+=row('Mode',r.ese?(em[r.esm]||'Mode '+r.esm):'Off');h+=row('Solar Power Target',r.esp+'%')}else{h+=row('Eco Smart',em[r]||''+r)}}else if(m==='g_phsw'){if(typeof r==='object'){h+=row('Phase Switch',r.enabled?'Enabled':'Disabled')}else{h+=row('Phase Switch',r?'Enabled':'Disabled')}}else if(m==='read_pin'){if(typeof r==='object'){h+=row('BLE PIN',r.pin||'Not set');h+=row('PIN Version',r.version||'None')}else{h+=row('BLE PIN',''+r)}}else if(m==='r_hsh'){h+=row('ICP Max Current',r+'A')}else if(m==='g_psh'){if(typeof r==='object'){h+=row('Dynamic Power Sharing',r.dyps?'Enabled':'Disabled');h+=row('Max Power Per Charger',r.mcpp?r.mcpp+'W':'Unlimited');h+=row('Min Current',r.minI+'A');h+=row('Chargers in Group',r.nchg)}else{var ps={0:'Disabled',1:'Enabled',2:'Active'};h+=row('Power Sharing',ps[r]||''+r)}}else if(m==='g_tzn'){h+=row('Timezone',r.timezone||r)}else{h+="<pre style='margin:0;white-space:pre-wrap;font-size:.82em'>"+JSON.stringify(r,null,2)+"</pre>"}return h}
+function F(m,l,r){var h="<div style='font-weight:600;color:var(--accent);margin-bottom:6px'>"+l+"</div>";if(m==='gwsta'){var s={0:'Disconnected',1:'Connected',2:'Connecting'};h+=row('WiFi',s[r]||'Code '+r)}else if(m==='r_ses'){h+=row('Last Session',r.last);h+=row('Total Sessions',r.size)}else if(m==='r_schs'){var sc=r.schedules||r;if(!Array.isArray(sc)){h+=row('Schedules','None');return h}sc.forEach(function(s,i){var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS[b]+' ';h+="<div style='background:var(--bg);border-radius:8px;padding:8px;margin:4px 0'><div style='display:flex;justify-content:space-between'><b>Schedule "+(i+1)+"</b><span class='badge "+(s.enabled?'badge-success':'badge-warning')+"'>"+(s.enabled?'Active':'Off')+"</span></div>";h+=row('Time',utcToLocal(s.start)+' - '+utcToLocal(s.stop));h+=row('Days',ds.trim()||'None');h+=row('Power Limit',(s.mcr<=1||s.mcr>=(window._chgCeil||32))?'No limit':s.mcr+' A');if(s.target&&s.target.type==1)h+=row('Energy Limit',(s.target.value/1000)+' kWh');else h+=row('Energy Limit','No limit');h+="</div>"});if(!sc.length)h+=row('Schedules','None')}else if(m==='r_dca'){if(typeof r==='object'){h+=row('Voltage L1',r.v1+' V');if(r.v2)h+=row('Voltage L2',r.v2+' V');if(r.v3)h+=row('Voltage L3',r.v3+' V');h+=row('Power L1',r.p1+' W');if(r.p2)h+=row('Power L2',r.p2+' W');if(r.p3)h+=row('Power L3',r.p3+' W');h+=row('Current L1',(r.c1/10).toFixed(1)+' A');if(r.c2)h+=row('Current L2',(r.c2/10).toFixed(1)+' A');if(r.c3)h+=row('Current L3',(r.c3/10).toFixed(1)+' A');h+=row('Total Energy',(r.e/1000).toFixed(1)+' kWh')}else{h+=row('Energy Meter',''+r)}}else if(m==='g_alo'){if(typeof r==='object'){h+=row('Auto Lock',r.enabled?'Enabled':'Disabled');if(r.time)h+=row('Lock After',r.time+' seconds')}else{h+=row('Auto Lock',r?'Enabled':'Disabled')}}else if(m==='g_ecos'){var em={0:'Eco (Solar + Grid)',1:'Full Green (Solar Only)'};if(typeof r==='object'){h+=row('Status',r.ese?'Active':'Inactive');h+=row('Mode',r.ese?(em[r.esm]||'Mode '+r.esm):'Off');h+=row('Solar Power Target',r.esp+'%')}else{h+=row('Eco Smart',em[r]||''+r)}}else if(m==='g_phsw'){if(typeof r==='object'){h+=row('Phase Switch',r.enabled?'Enabled':'Disabled')}else{h+=row('Phase Switch',r?'Enabled':'Disabled')}}else if(m==='read_pin'){if(typeof r==='object'){h+=row('BLE PIN',r.pin||'Not set');h+=row('PIN Version',r.version||'None')}else{h+=row('BLE PIN',''+r)}}else if(m==='r_hsh'){h+=row('ICP Max Current',r+'A')}else if(m==='g_psh'){if(typeof r==='object'){h+=row('Dynamic Power Sharing',r.dyps?'Enabled':'Disabled');h+=row('Max Power Per Charger',r.mcpp?r.mcpp+'W':'Unlimited');h+=row('Min Current',r.minI+'A');h+=row('Chargers in Group',r.nchg)}else{var ps={0:'Disabled',1:'Enabled',2:'Active'};h+=row('Power Sharing',ps[r]||''+r)}}else if(m==='g_tzn'){h+=row('Timezone',r.timezone||r)}else{h+="<pre style='margin:0;white-space:pre-wrap;font-size:.82em'>"+JSON.stringify(r,null,2)+"</pre>"}return h}
 function showTimezone(){E('tz')}
 function saveTz(){var tz=document.getElementById('tz-select').value;var p=JSON.stringify({timezone:tz});toast('Saving timezone...','info');fetch('/api/command?action=bapi&met=s_tzn&par='+encodeURIComponent(p),{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){if(d.error){toast(d.error,'error')}else{CHARGER_TZ=tz;toast('Timezone set to '+tz,'success')}}).catch(function(e){toast('Error: '+e.message,'error')})}
 function E(type){var ap=document.querySelector('.tab-panel.active');var r=ap?ap.querySelector('[id^=qr]'):null;if(!r)return;r.style.display='block';var h='';if(type==='autolock'){h="<h2>&#x1F510; Auto Lock</h2><div style='text-align:center'><span class='spinner'></span> Loading...</div>";r.innerHTML=h;fetch('/api/command?action=bapi&met=g_alo&par=null',{signal:AbortSignal.timeout(10000)}).then(function(x){return x.json()}).then(function(d){
@@ -2150,7 +2178,7 @@ function renderSchedules(sc,readonly){
   sc.forEach(function(s){
     var ds='';for(var b=0;b<7;b++)if(s.days&(1<<b))ds+=DAYS_M[b]+' ';
     var t1=utcToLocal(s.start),t2=utcToLocal(s.stop);
-    var lim=(s.mcr<=1||s.mcr>=32)?'No limit':s.mcr+' A';
+    var lim=(s.mcr<=1||s.mcr>=_schCeil())?'No limit':s.mcr+' A';
     var ek=(s.target&&s.target.type==1)?(s.target.value/1000)+' kWh':'';
     var badge=s.enabled?'<span class=\"badge badge-success\">On</span>':'<span class=\"badge badge-warning\">Off</span>';
     var togIcon=s.enabled?'⏸':'▶';
@@ -2163,13 +2191,20 @@ function renderSchedules(sc,readonly){
 // #12: the original (Zentri) Pulsar's r_schs times out — it reads schedules
 // one slot at a time via r_sch (bare-int sid). Detect via /api/status and
 // dispatch: Zentri -> per-sid reader (view-only); everyone else -> r_schs array.
+// The charger's own current ceiling for the schedule editor (#39 follow-up:
+// a 40/48 A charger was held to 32 A here). Read once from /api/charger, the
+// same max_available_current the dashboard uses; 32 A until it's known.
+function _schCeil(){return window._chgCeil||32}
+function _schLoadCeil(n){n=n||0;var again=function(){if(n<30)setTimeout(function(){_schLoadCeil(n+1)},10000)};Promise.all([fetch('/api/status').then(function(x){return x.json()}).catch(function(){return{}}),fetch('/api/charger').then(function(x){return x.json()}).catch(function(){return{}})]).then(function(r){var g=r[0]||{},d=r[1]||{};var s=(d.status&&d.status.r)||{},rt=(d.realtime&&d.realtime.r)||{};var m=(g.max_current_ceiling>=6&&g.max_current_ceiling<=80)?g.max_current_ceiling:((typeof s.max_available_current==='number')?s.max_available_current:rt.max_available_current);if(!(m>=6&&m<=80)){again();return;}var old=_schCeil();window._chgCeil=m;var sc=document.getElementById('sc');if(sc){sc.max=m;sc.placeholder=m+' = no limit';if(+sc.value===old)sc.value=m}}).catch(function(){again()})}
+_schLoadCeil();
 function loadSchedules(_retry){
   // Wait for the charger timezone before rendering, so utcToLocal uses the right
   // offset and times don't flash wrong then correct (#50).
   if(!tzLoaded){tzReady.then(function(){loadSchedules(_retry)});return;}
   var l=document.getElementById('sch-list');if(l)l.innerHTML="<span class='spinner'></span> Loading...";
   fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(function(x){return x.json()}).then(function(st){
-    if(st&&st.zentri){window._schZentri=true;loadSchedulesZentri();}else{window._schZentri=false;loadSchedulesArr(_retry);}
+    window._zentriRadio=!!(st&&st.zentri_radio);
+    if(st&&st.zentri){window._schZentri=true;window._legacyPulsar=!st.chg_project;loadSchedulesZentri();}else{window._schZentri=false;loadSchedulesArr(_retry);}
   }).catch(function(){window._schZentri=false;loadSchedulesArr(_retry);});
 }
 // Read the 4 fixed schedule slots (r_sch + bare-int sid 0..3) and normalize the
@@ -2183,7 +2218,7 @@ function loadSchedulesZentri(){
   // assuming 4. MAXSLOTS is just a safety backstop for a charger that returns
   // empty (instead of erroring) past its last slot. Empty-but-valid slots
   // (days 0, 00:00-00:00) are skipped but we keep reading past them.
-  var out=[],i=0,MAXSLOTS=16;
+  var out=[],i=0,MAXSLOTS=window._legacyPulsar?4:16;
   (function next(){
     if(i>=MAXSLOTS){renderSchedules(out);return;}
     fetch('/api/command?action=bapi&met=r_sch&par='+i,{signal:AbortSignal.timeout(12000)}).then(function(x){return x.json()}).then(function(d){
@@ -2210,6 +2245,9 @@ function loadSchedulesArr(_retry){
   fetch('/api/command?action=bapi&met=r_schs&par=null',{signal:AbortSignal.timeout(_retry?20000:15000)}).then(function(x){return x.json()}).then(function(d){
     if(d.error){
       if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+      // A Pulsar Plus on the Zentri radio (#74) may not fit the long r_schs
+      // reply through that radio; read the fixed slots instead (view-only).
+      if(window._zentriRadio){window._schZentri=true;loadSchedulesZentri();return}
       l.innerHTML='<span style="color:var(--danger)">'+d.error+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>';return
     }
     var sc=null;
@@ -2217,6 +2255,7 @@ function loadSchedulesArr(_retry){
     else if(Array.isArray(d.r))sc=d.r;
     if(sc===null){
       if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+      if(window._zentriRadio){window._schZentri=true;loadSchedulesZentri();return}
       l.innerHTML='<div style="color:var(--text3);text-align:center;padding:8px">Couldn\u2019t load schedules (BLE may be reconnecting). <button class=\'btn btn-outline\' style=\'padding:4px 10px;margin-top:6px\' onclick=\'loadSchedules()\'>Retry</button></div>';return
     }
     // Charger days are Sunday-first; rotate to the GUI's Monday-first convention
@@ -2231,6 +2270,7 @@ function loadSchedulesArr(_retry){
     renderSchedules(sc);
   }).catch(function(e){
     if(!_retry){setTimeout(function(){loadSchedules(true)},1500);return}
+    if(window._zentriRadio){window._schZentri=true;loadSchedulesZentri();return}
     l.innerHTML='<span style="color:var(--danger)">'+(e.message||e)+' <button class=\'btn btn-outline\' style=\'padding:4px 8px;margin-left:8px\' onclick=\'loadSchedules()\'>Retry</button></span>'
   });
 }
@@ -2253,7 +2293,7 @@ function newSchedule(){
   document.getElementById('ss').value='14:00';
   document.getElementById('se').value='20:00';
   document.querySelectorAll('#sd input').forEach(function(c){c.checked=false});
-  document.getElementById('sc').value='32';
+  document.getElementById('sc').value=String(_schCeil());
   document.getElementById('se2').value='0';
   document.getElementById('sn').value='1';
   document.getElementById('sched-edit').style.display='block';
@@ -2294,7 +2334,7 @@ function editSchedule(sid){
   document.getElementById('ss').value=utcToLocal(s.start);
   document.getElementById('se').value=utcToLocal(s.stop);
   document.querySelectorAll('#sd input').forEach(function(c){c.checked=(s.days&parseInt(c.value))!==0});
-  document.getElementById('sc').value=s.mcr||32;
+  document.getElementById('sc').value=s.mcr||_schCeil();
   document.getElementById('se2').value=(s.target&&s.target.type==1)?Math.round(s.target.value/1000):0;
   document.getElementById('sn').value=s.enabled?'1':'0';
   document.getElementById('sched-edit').style.display='block';
