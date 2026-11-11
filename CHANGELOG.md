@@ -35,6 +35,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Only start, stop and resume are recorded as `last_command_by` now, so a
   current change from Home Assistant or an automation doesn't make the Charge
   Assistant stand down for 30 minutes.
+- **A stalled connection to the MQTT broker no longer freezes the gateway for
+  80 to 190 seconds (#74).** Each publish into a stalled socket blocked for
+  about 10 s, and one pass sends 8 or more, so the web UI, WebSocket and OTA
+  froze with it. The first write that can't get out now closes the
+  connection, the rest of the pass fails at once, and MQTT reconnects within
+  seconds. The log shows `[MQTT] write stalled ...` each time.
+- **The login lockout works.** After 5 wrong passwords the web UI should lock
+  for 30 s, but the counter was reset on every request, so it never locked.
+  A request with no credentials (a browser's first try, before it asks) no
+  longer counts as a failure either. Start, stop and resume over HTTP now log
+  who sent them.
 
 ### Added
 - **W5500 Ethernet gateways can update from Home Assistant.** Releases now attach
@@ -69,6 +80,24 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `bapi_unsupported` lists what's skipped.
 
 ### Fixed
+- **Schedules and current controls follow 40 A and 48 A chargers (#80).** The
+  schedule editor capped at 32 A, and the dashboard's slider started at 32 A,
+  until the charger's own limit had been read. The gateway now saves the
+  charger's ceiling and loads it at boot, reports it as `max_current_ceiling`
+  in `/api/status`, and the schedule editor and dashboard use it.
+- **WiFi joins the strongest access point for your network name**, not the
+  first one it finds. On a mesh network a gateway could sit on a far node
+  (-92 dBm with another at -51 dBm a metre away). Applies at boot and whenever
+  the gateway restarts its WiFi; connecting takes about 1 to 2 s longer.
+- **Original Pulsar: schedules are read from slots 0 to 3 only**, the four it
+  has, instead of asking for more and getting an error reply every refresh.
+- **Reads the charger doesn't support are answered without Bluetooth.** Reads
+  from the dashboard or the HA integration (through `/api/command`) bypassed
+  the unsupported-read tracker. A read rejected three times is now answered
+  "not supported by this charger" straight away, retried every 30 minutes.
+- **Dashboard after a reload:** the lock card showed "--" and the current
+  slider allowed 32 A on a 16 A charger until the charger next changed. The
+  page now keeps the last realtime record and fetches it once on load.
 - **A Pulsar Plus on the Zentri radio was treated as an original Pulsar.**
   Car-connected used the original Pulsar's status codes (likely why a re-plug
   wasn't detected, #74), and the dashboard and HA integration used the original
