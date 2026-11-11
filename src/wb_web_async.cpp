@@ -312,8 +312,22 @@ static bool _checkAuth(AsyncWebServerRequest* req) {
             "Too many attempts. Try again in 30 seconds.");
         return false;
     }
-    if (millis() >= authLockoutUntil) authFailCount = 0;
+    // Reset only when a lockout has actually run out. (It used to run on every
+    // request: before any lockout authLockoutUntil is 0, so the count went back
+    // to 0 each time, never passed 1/5, and the lockout never triggered.)
+    if (authLockoutUntil != 0 && millis() >= authLockoutUntil) {
+        authFailCount = 0;
+        authLockoutUntil = 0;
+    }
 
+    // A request with no credentials at all is the normal first step of a
+    // browser login (it asks, gets the prompt, then sends them), and a page
+    // load fires several at once. Only a wrong password counts towards the
+    // lockout; otherwise opening the page could lock everyone out for 30 s.
+    if (!req->hasHeader("Authorization")) {
+        req->requestAuthentication();
+        return false;
+    }
     if (!req->authenticate(cfg.authUser.c_str(), cfg.authPass.c_str())) {
         authFailCount++;
         if (authFailCount >= 5) {
@@ -1065,6 +1079,14 @@ static void _registerBleRoutes() {
         }
         String value = req->hasParam("value")
             ? req->getParam("value")->value() : String("");
+        // Who sent it: charge-control actions log the client IP and owner tag,
+        // so a repeated command can be traced to a browser, the HA integration
+        // or an automation (#68: one tap on Stop arrived as three stops).
+        if (action == "start" || action == "stop" || action == "resume") {
+            Log.printf("[CMD] %s from %s owner='%s'\n", action.c_str(),
+                       req->client()->remoteIP().toString().c_str(),
+                       req->hasParam("owner") ? req->getParam("owner")->value().c_str() : "");
+        }
         // Idempotent start/stop (#23): skip a start that's already charging, or
         // a stop that's already stopped. Some chargers (e.g. Pulsar Plus USA fw)
         // treat w_cha as a TOGGLE, so a redundant write flips the state the wrong

@@ -460,7 +460,11 @@ void setup() {
         otaPass = "wb-" + String(buf).substring(6);  // device-unique default
     }
     ArduinoOTA.setPassword(otaPass.c_str());
-    Log.printf("[OTA] Password: %s (use web auth pass, or shown here for espota)\n", otaPass.c_str());
+    // Never print the password itself: people paste boot logs into issues (#68).
+    if (cfg.authPass.length() > 0)
+        Log.println("[OTA] Password: same as the web login password (masked)");
+    else
+        Log.println("[OTA] Password: wb- followed by the last 6 hex digits of the WiFi MAC (masked)");
     ArduinoOTA.onStart([]() {
         Log.println("[OTA] Update starting...");
     });
@@ -726,9 +730,9 @@ void loop() {
         // 2.7.0 step 5: drain any pending MQTT-publish responses that
         // the BLE task queued. We can publish from here because the
         // main task owns PubSubClient. Drain to empty per iteration —
-        // each publish is bounded by the 2.6.0 1s wifiClient socket
-        // timeout, and the ring caps at kPendingPubSize entries, so
-        // the loop bound is ~4 × 1 s worst case (unlikely).
+        // the ring caps at kPendingPubSize entries, and on a stalled
+        // broker the first stalled write closes the socket
+        // (WbMqttNetClient), so the rest fail at once.
         {
             String pubMet, pubJson;
             while (wallboxBLE.drainPendingResponsePub(pubMet, pubJson)) {

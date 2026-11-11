@@ -4,6 +4,7 @@
 #include "wb_log.h"
 #include "wb_diag.h"
 #include "wb_net.h"
+#include "wb_mqtt_net.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
 
@@ -24,7 +25,7 @@ static String availTopic()     { return baseTopic() + "/availability"; }
 static String cmdPrefix()      { return baseTopic() + "/cmd/"; }
 
 WallboxMQTT wallboxMQTT;
-static WiFiClient wifiClient;
+static WbMqttNetClient wifiClient;   // closes on a stalled write (wb_mqtt_net.h)
 static PubSubClient mqttClient(wifiClient);
 
 // Static option arrays for the HA discovery `select` entities. Lifted
@@ -444,19 +445,17 @@ static void publishDiscoverySelect(PubSubClient& mqtt, const char* objectId,
 
 void WallboxMQTT::begin() {
     const WBConfig& cfg = configMgr.get();
-    // Bound per-publish socket blocking. PubSubClient writes are sync
-    // and lwIP's TCP write timeout defaults to whatever the kernel
-    // says (frequently 5-30 s). On a wedged broker each publish ends
-    // up consuming the full timeout, and the ~60-entity discovery
-    // burst compounds to a multi-tens-of-seconds main-loop wedge
-    // (peter-mcc 2.5.1 saw 80 s). Tightening to 1 s bounds the
-    // per-publish worst case at the cost of failing a few publishes
-    // that would otherwise have succeeded on a marginal link. The
-    // tickDiscovery() state machine retries on the next arm; cached
-    // state publishes re-fire on the next BLE seq advance — both
-    // self-healing.
-    // Arduino-ESP32 WiFiClient::setTimeout takes milliseconds.
-    wifiClient.setTimeout(1000);
+    // PubSubClient writes are sync. A write into a stalled socket blocks
+    // ~10 s whatever the timeout (WiFiClient retries select() 10 x 1 s), so
+    // the per-publish bound comes from WbMqttNetClient, which closes the
+    // socket on the first stalled write so the rest of the pass fails fast
+    // (#74: 80-90 s loop freezes). The discovery state machine retries on the
+    // next arm and cached state publishes re-fire on the next BLE seq
+    // advance, so a dropped publish heals itself.
+    // Arduino-ESP32 2.0.x WiFiClient::setTimeout takes SECONDS (it was given
+    // 1000, i.e. 16 min; harmless only because the bounded connect below
+    // overwrites it with 4 s).
+    wifiClient.setTimeout(1);
     mqttClient.setServer(cfg.mqttHost.c_str(), cfg.mqttPort);
     mqttClient.setCallback(_mqttCallback);
     mqttClient.setBufferSize(1024);
@@ -737,7 +736,8 @@ void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
         String action = payload;
         action.toLowerCase();
         int val = (action == "1" || action == "lock" || action == "true") ? 1 : 0;
-        par = String(val);
+        Log.printf("[MQTT] %s via MQTT (payload '%s')\n", val ? "lock" : "unlock", payload);
+        par = wallboxBLE.lockPar(val == 1);   // + usid on the original Pulsar (#68)
         wallboxBLE.enqueueRequest(bapi::MET_LOCK, par.c_str());
 
     } else if (sub == "reboot") {
@@ -914,23 +914,7 @@ void WallboxMQTT::publishCarConnected(const String& statusJson, const String& re
         if (deserializeJson(rd, realtimeJson) == DeserializationError::Ok)
             cs = rd["r"]["charger_status"] | -1;
     }
-    bool connected;
-    if (wallboxBLE.isZentri()) {
-        // Zentri/original Pulsar uses a DIFFERENT st enum (0=ready/no-car,
-        // 1=charging, 2=connected, 3=waiting, 4=ramp) — applying the MAX 0-18
-        // set here mis-reported plug state. Anything >= 1 means a car is present.
-        connected = (st >= 1 && st <= 4);
-    } else {
-        // Local r_dat.st codes where a car is physically plugged in (MAX/Plus).
-        connected = (st == 1 || st == 2 || st == 3 || st == 4 || st == 5 ||
-                     st == 8 || st == 10 || st == 11 || st == 12 || st == 13 || st == 18);
-        // Locked (st==6) carries no plug info in the local BLE protocol — Wallbox
-        // folds locked/no-car and locked/car-connected into the same code 6.
-        // STOPGAP: observed r_sta.charger_status == 19 when locked WITH a car.
-        // This is an unverified, firmware-specific heuristic pending a
-        // locked-with-NO-car measurement to confirm 19 is plug-specific.
-        if (st == 6 && cs == 19) connected = true;
-    }
+    bool connected = WallboxBLE::carConnectedFromCodes(st, cs, wallboxBLE.isLegacyPulsar());
     String topic = baseTopic() + "/car_connected";
     _client->publish(topic.c_str(), connected ? "ON" : "OFF", true);  // retain
 }
@@ -978,8 +962,8 @@ void WallboxMQTT::publishResponse(const char* method, const String& json) {
 // publish hits the TCP write timeout in series — peter-mcc saw
 // loop_max_ms = 80,000 ms overnight with 2.5.1. Per-tick publishing
 // bounds the per-iteration cost to ONE publish, so the worst-case
-// loop_max_ms during a broker outage is ~1 socket timeout
-// (wifiClient.setTimeout(1000) is set in begin()).
+// loop_max_ms during a broker outage is about one stalled write (~10 s),
+// after which WbMqttNetClient closes the socket (wb_mqtt_net.h).
 //
 // On HA's side, autodiscovery is per-message — entities are merged
 // by `identifiers` from each payload's device block, so partial bursts

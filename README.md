@@ -367,6 +367,10 @@ Optional username/password authentication (Config → Web Security):
 - Check `http://wallbox-gw.local/` — if BLE bar is red, charger is out of range
 - Restart HA MQTT integration if entities don't reappear within 2 minutes
 
+### MQTT drops every minute or so, slow pings, web UI sometimes not answering
+
+Check the power supply first. With Bluetooth and WiFi both running, the ESP32 draws more current, in short bursts. A cheap 12 V to 5 V converter or a weak supply can sag just enough to make WiFi transmits unreliable without resetting the board. Signs: high WiFi retry rates on your router, pings in the hundreds of ms, and many short MQTT reconnects in `/api/diag/disconnects`. A decent 5 V USB supply fixed it for one tester (#74).
+
 ### Can't reach `wallbox-gw.local`
 
 - mDNS doesn't work on all devices (especially Android Chrome without DNS-SD)
