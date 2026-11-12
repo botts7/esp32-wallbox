@@ -4210,7 +4210,7 @@ function loadSessions2(){
     .then(function(x){return x.json()}).then(function(d){
       if(!d.r||!d.r.last){loadFromChargeLog(cache,cachedList);return}
       var last=d.r.last;
-      // A real ring size (the MAX reports 99999 as a "no limit" marker).
+      // Ring size for slot addressing (the MAX's 99999 never wraps in practice).
       var ring=(d.r.size>0)?d.r.size:0;
       SES_LAST=last;cache.last=last;
       var cachedSids=Object.keys(cache.s).map(Number);
@@ -4245,13 +4245,17 @@ function loadSessions2(){
             advance();
           }).catch(function(){clearTimeout(hardTimer);advance()});
       }
-      // Probe the newest session once, by number. If that fails and the
-      // charger reports a ring size (the original Pulsar, #79), probe its slot.
-      // Only if both fail, skip the slow 60-sid loop and use the gateway's
-      // local charge log instead.
+      // Probe the newest session to learn the addressing. By number first: on a
+      // slot charger r_log <last> is empty (the slot after the newest, or out
+      // of the ring), so a hit means the charger takes the number. A slot hit
+      // alone can't tell (on a number charger slot last-1 is session last-1),
+      // so the record's uid decides when it ends in a session number (the MAX:
+      // ...00350 for session 350). If both fail, skip the slow 60-sid loop and
+      // use the gateway's local charge log instead.
+      function isNewest(r){var u=String(r.uid||'');return !/^\d+$/.test(u)||u.slice(-String(last).length)===String(last)}
       function probe(par,ok,fail){
         fetch('/api/command?action=bapi&met=r_log&par='+par,{signal:AbortSignal.timeout(8000)})
-          .then(function(x){return x.json()}).then(function(pd){if(pd.r&&pd.r.start)ok();else fail()})
+          .then(function(x){return x.json()}).then(function(pd){if(pd.r&&pd.r.start&&isNewest(pd.r))ok();else fail()})
           .catch(fail);
       }
       var noLog=function(){loadFromChargeLog(cache,cachedList)};
@@ -4263,10 +4267,9 @@ function loadSessions2(){
           fetchNext();
         },fail);
       };
-      // Slot first (the MAX and the original Pulsar both use it), unless this
-      // charger was already seen taking the session number.
-      if(cache.slot===false)byNumber(function(){bySlot(noLog)});
-      else bySlot(function(){byNumber(noLog)});
+      // A charger already seen using slots skips the number probe.
+      if(cache.slot===true)bySlot(function(){byNumber(noLog)});
+      else byNumber(function(){bySlot(noLog)});
     }).catch(function(e){
       if(!cachedList.length){document.getElementById('slist').innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'}
     });
