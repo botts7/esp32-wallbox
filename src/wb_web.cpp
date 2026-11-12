@@ -4249,19 +4249,23 @@ function loadSessions2(){
       // slot charger r_log <last> is empty (the slot after the newest, or out
       // of the ring), so a hit means the charger takes the number. A slot hit
       // alone can't tell (on a number charger slot last-1 is session last-1),
-      // so the record's uid decides when it ends in a session number (the MAX:
-      // ...00350 for session 350). If both fail, skip the slow 60-sid loop and
-      // use the gateway's local charge log instead.
-      function isNewest(r){var u=String(r.uid||'');return !/^\d+$/.test(u)||u.slice(-String(last).length)===String(last)}
-      function probe(par,ok,fail){
+      // so a hit is refused when its uid names the neighbouring session the
+      // wrong addressing would return (the MAX's uid ends in the session
+      // number: ...00350 for 350). A uid in any other form doesn't refuse.
+      // If both fail, skip the slow 60-sid loop and use the gateway's local
+      // charge log instead.
+      function uidIs(r,n){var u=String(r.uid||'');return /^\d+$/.test(u)&&u.slice(-String(n).length)===String(n)}
+      function probe(par,wrong,ok,fail){
         fetch('/api/command?action=bapi&met=r_log&par='+par,{signal:AbortSignal.timeout(8000)})
-          .then(function(x){return x.json()}).then(function(pd){if(pd.r&&pd.r.start&&isNewest(pd.r))ok();else fail()})
-          .catch(fail);
+          .then(function(x){return x.json()}).then(function(pd){
+            var r=pd.r;
+            if(r&&r.start&&(uidIs(r,last)||!uidIs(r,wrong)))ok();else fail();
+          }).catch(fail);
       }
       var noLog=function(){loadFromChargeLog(cache,cachedList)};
-      var byNumber=function(fail){probe(last,function(){SES_SLOT=false;cache.slot=false;fetchNext()},fail)};
+      var byNumber=function(fail){probe(last,last+1,function(){SES_SLOT=false;cache.slot=false;fetchNext()},fail)};
       var bySlot=function(fail){
-        probe(ring?(last-1)%ring:last-1,function(){
+        probe(ring?(last-1)%ring:last-1,last-1,function(){
           SES_SLOT=true;SES_RING=ring;cache.slot=true;cache.ring=ring;
           startSid=Math.max(startSid,oldestSid());total=last-startSid+1;sid=startSid;
           fetchNext();
