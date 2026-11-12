@@ -814,9 +814,9 @@ String wb_buildStatusJson() {
                     : String(",\"next_scheduled_charge\":null");
         json += ",\"plug_reminder\":" +
                 String(wallboxBLE.plugReminderActive(configMgr.get().reminderLeadMin) ? "true" : "false");
-        // Lead window (min) so hosts can recompute the reminder against a
-        // timezone-correct next charge — the firmware's next_scheduled_charge is
-        // UTC-only (mislands a local-midnight schedule a day off). 0 = disabled.
+        // Lead window (min) so hosts can recompute the reminder themselves.
+        // next_scheduled_charge matches schedule days in the charger's own
+        // timezone since #81 (UTC if the zone isn't in the table). 0 = disabled.
         json += ",\"rem_lead\":" + String((unsigned)configMgr.get().reminderLeadMin);
     }
     // Charge-interval capture (#141): live summary of the real charge-burst
