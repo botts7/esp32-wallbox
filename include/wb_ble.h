@@ -181,7 +181,8 @@ public:
     //
     // nextScheduledChargeEpoch(): UTC epoch of the soonest *enabled*
     // schedule start, or 0 when there are no enabled schedules or NTP
-    // hasn't synced yet. Cheap + thread-safe (snapshots the slot cache
+    // hasn't synced yet. Schedule days are matched against the charger's
+    // local weekday (wb_tz, #81). Cheap + thread-safe (snapshots the slot cache
     // under _cacheMutex, then computes lock-free).
     uint32_t nextScheduledChargeEpoch();
     // carConnected(): reflects the cached r_dat status code using the

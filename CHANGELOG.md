@@ -6,6 +6,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (schedules)
+- **`Next Scheduled Charge` and `plug_reminder` no longer land a day out near
+  local midnight (#81).** A schedule's `start` is stored in UTC but its `days`
+  are the charger's local weekday, and the gateway matched them against the
+  UTC weekday: a "Wednesday 00:01" schedule in CET (23:01 UTC on Tuesday)
+  showed as Thursday, a day early west of UTC. The gateway now maps the
+  charger's timezone (`g_tzn`) to a POSIX TZ string from a bundled table (486
+  zones and aliases, generated from tzdata by `scripts/gen_tz_table.py`, about
+  13 KB of flash) and checks the weekday in local time, DST included. A zone
+  missing from the table keeps the old UTC behaviour.
 ### Fixed (after 3.2.24-rc.1)
 - **The Sessions page shows the charger's own history (#79).** `r_log` takes a
   slot, not the session number: session n is in slot `(n - 1) % size`, where

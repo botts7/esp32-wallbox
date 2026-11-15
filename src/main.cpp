@@ -6,6 +6,7 @@
 #include <ESPmDNS.h>
 #include <esp_ota_ops.h>
 #include "wb_config.h"
+#include "wb_tz.h"
 #include "wb_ble.h"
 #include "wb_mqtt.h"
 #include "wb_web.h"
@@ -309,6 +310,8 @@ void setup() {
     Log.println("\n============================");
     Log.printf("  Wallbox BLE Gateway %s\n", WB_VERSION);
     Log.println("============================\n");
+
+    wb_tz::begin();  // charger timezone for schedule weekdays (#81)
 
     // Initialise the WiFi boot-fail retry counter on a cold boot (RTC NOINIT is
     // garbage until tagged); a warm reboot from the retry path preserves it (#182).

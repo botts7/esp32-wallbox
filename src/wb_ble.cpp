@@ -8,6 +8,7 @@
 #include "wb_stop_guard.h"  // never send a stop to a non-charging session
 #include "wb_bapi_caps.h"  // skip periodic reads this charger doesn't support
 #include "wb_ceiling.h"    // the current ceiling, kept across reboots
+#include "wb_tz.h"         // charger-local weekday for schedules (#81)
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
 #include <utility>  // std::move
@@ -1874,6 +1875,7 @@ void WallboxBLE::_pollSettings() {
         JsonDocument d; if (deserializeJson(d, r5) == DeserializationError::Ok) {
             const char* tz = d["r"]["timezone"] | "UTC";
             merged["timezone"] = tz;
+            wb_tz::setZone(tz);  // schedule days are in this zone (#81)
         }
     }
     if (_state != State::CONNECTED) return;
@@ -2045,24 +2047,30 @@ uint32_t WallboxBLE::nextScheduledChargeEpoch() {
     }
     if (n == 0) return 0;
 
-    struct tm tmNow;
-    gmtime_r(&now, &tmNow);
-    // Minute-of-week, Sunday=0 — matches the slot days bitmask (bit0=Sun).
-    int32_t nowMow = tmNow.tm_wday * 1440 + tmNow.tm_hour * 60 + tmNow.tm_min;
-    int32_t best = INT32_MAX;
+    // A slot fires at its `start` (UTC time of day) on every instant whose
+    // charger-LOCAL weekday is set in `days` (bit0=Sun) — e.g. "Wed 00:01"
+    // in CET is stored as start 23:01 UTC with the Wednesday bit, and fires
+    // on Tuesday 23:01 UTC (#81). So walk the UTC days ahead, place `start`
+    // on each, and test the local weekday of that instant. wb_tz falls back
+    // to UTC when the charger's zone is unknown (the pre-#81 behaviour).
+    // Look two weeks ahead, not one: when the UTC offset grows (spring DST),
+    // `start` can miss one local weekday for a week, so a single-day slot's
+    // next occurrence can be up to 13 days away.
+    const time_t minuteNow = now - (now % 60);  // a slot this minute counts
+    const time_t utcDay = now - (now % 86400);
+    time_t best = 0;
     for (uint8_t i = 0; i < n; i++) {
-        if (!slots[i].enabled) continue;
-        for (uint8_t d = 0; d < 7; d++) {
-            if (!(slots[i].days & (1 << d))) continue;
-            int32_t slotMow = d * 1440 + slots[i].startMin;
-            int32_t delta = slotMow - nowMow;
-            if (delta < 0) delta += 7 * 1440;  // soonest future occurrence
-            if (delta < best) best = delta;
+        if (!slots[i].enabled || !slots[i].days) continue;
+        for (int k = 0; k < 14; k++) {
+            time_t t = utcDay + (time_t)k * 86400 + (time_t)slots[i].startMin * 60;
+            if (t < minuteNow) continue;
+            if (best && t >= best) break;  // later days can't beat it
+            struct tm lt;
+            wb_tz::localTime(t, &lt);
+            if (slots[i].days & (1 << lt.tm_wday)) { best = t; break; }
         }
     }
-    if (best == INT32_MAX) return 0;
-    // Align to the minute boundary: drop current seconds, add delta.
-    return (uint32_t)((int64_t)now - tmNow.tm_sec + (int64_t)best * 60);
+    return (uint32_t)best;
 }
 
 bool WallboxBLE::carConnected() {
