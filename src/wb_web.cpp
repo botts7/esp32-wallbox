@@ -4084,20 +4084,30 @@ function renderDays(sessions){
   });
   var ids=sessions.map(function(s){return s.id||0}).filter(function(n){return n>0});
   var minId=ids.length?Math.min.apply(null,ids):0;
-  if(minId>1){html+="<div style='text-align:center;margin-top:10px'><button id='load-older-btn' class='btn btn-outline' onclick='loadOlder()'>Load older sessions</button></div>";}
+  if(minId>oldestSid()){html+="<div style='text-align:center;margin-top:10px'><button id='load-older-btn' class='btn btn-outline' onclick='loadOlder()'>Load older sessions</button></div>";}
   document.getElementById('slist').innerHTML=html||'<span style="color:var(--text3)">No data yet</span>';
 }
+// r_log takes a SLOT, not the session number: session n lives in slot
+// (n-1)%size, where size is r_ses.size (#79, original Pulsar: 512, so only the
+// newest 512 can be read; the MAX reports 99999, no wrap in practice, and its
+// r_log <last> is empty). SES_SLOT is set by the probe; a charger that does take
+// the session number keeps SES_SLOT false. Cache v2: v1 keyed by session number
+// could hold the next session's record under each number.
+var SES_KEY='wb-sessions-v2',SES_SLOT=false,SES_RING=0,SES_LAST=0;
+function logPar(n){return SES_SLOT?(SES_RING?(n-1)%SES_RING:n-1):n}
+function oldestSid(){return SES_SLOT&&SES_RING&&SES_LAST?Math.max(1,SES_LAST-SES_RING+1):1}
+(function(){try{localStorage.removeItem('wb-sessions-v1');var c=JSON.parse(localStorage.getItem(SES_KEY)||'{}');SES_SLOT=!!c.slot;SES_RING=c.ring||0;SES_LAST=c.last||0}catch(e){}})();
 function loadOlder(){
-  var cache;try{cache=JSON.parse(localStorage.getItem('wb-sessions-v1')||'{}')}catch(e){cache={}}
+  var cache;try{cache=JSON.parse(localStorage.getItem(SES_KEY)||'{}')}catch(e){cache={}}
   if(!cache.s)cache.s={};
   var sids=Object.keys(cache.s).map(Number);
   var minCached=sids.length?Math.min.apply(null,sids):0;
-  if(minCached<=1){toast('No older sessions','info');return}
-  var startSid=Math.max(1,minCached-60),endSid=minCached-1;
+  if(minCached<=oldestSid()){toast('No older sessions','info');return}
+  var startSid=Math.max(oldestSid(),minCached-60),endSid=minCached-1;
   var total=endSid-startSid+1,fetched=0,sid=startSid;
   var btn=document.getElementById('load-older-btn');
   function fetchNext(){
-    if(sid>endSid){try{localStorage.setItem('wb-sessions-v1',JSON.stringify(cache))}catch(e){}
+    if(sid>endSid){try{localStorage.setItem(SES_KEY,JSON.stringify(cache))}catch(e){}
       var allList=Object.keys(cache.s).map(function(k){return cache.s[k]});
       renderAll(allList,cache.lifetimeKwh);return}
     if(btn){btn.textContent='Loading '+(fetched+1)+' / '+total+'...';btn.disabled=true}
@@ -4105,7 +4115,7 @@ function loadOlder(){
     var advance=function(){if(advanced)return;advanced=true;sid++;fetched++;fetchNext()};
     var hardTimer=setTimeout(advance,9000);
     var thisSid=sid;
-    fetch('/api/command?action=bapi&met=r_log&par='+thisSid,{signal:AbortSignal.timeout(8000)})
+    fetch('/api/command?action=bapi&met=r_log&par='+logPar(thisSid),{signal:AbortSignal.timeout(8000)})
       .then(function(x){return x.json()}).then(function(sd){
         clearTimeout(hardTimer);
         if(sd.r&&sd.r.start){cache.s[thisSid]={id:thisSid,ts:sd.r.start,dur:sd.r.sec||sd.r.dur||sd.r.duration||0,en:sd.r.en||sd.r.energy||0,gen:sd.r.gen||0}}
@@ -4146,7 +4156,7 @@ function showHour(day,hr){
   document.body.appendChild(modal);
 }
 function exportCsv(){
-  var cache;try{cache=JSON.parse(localStorage.getItem('wb-sessions-v1')||'{}')}catch(e){cache={}}
+  var cache;try{cache=JSON.parse(localStorage.getItem(SES_KEY)||'{}')}catch(e){cache={}}
   var arr=Object.keys(cache.s||{}).map(function(k){return cache.s[k]});
   if(!arr.length){toast('No sessions to export','info');return}
   arr.sort(function(a,c){return (a.ts||0)-(c.ts||0)});
@@ -4185,7 +4195,7 @@ function loadFromChargeLog(cache,cachedList){
 }
 function loadSessions2(){
   var cache;
-  try{cache=JSON.parse(localStorage.getItem('wb-sessions-v1')||'{}')}catch(e){cache={}}
+  try{cache=JSON.parse(localStorage.getItem(SES_KEY)||'{}')}catch(e){cache={}}
   if(!cache.s)cache.s={};
   var cachedList=Object.keys(cache.s).map(function(k){return cache.s[k]});
   if(cachedList.length){renderAll(cachedList,cache.lifetimeKwh)}
@@ -4200,9 +4210,12 @@ function loadSessions2(){
     .then(function(x){return x.json()}).then(function(d){
       if(!d.r||!d.r.last){loadFromChargeLog(cache,cachedList);return}
       var last=d.r.last;
+      // Ring size for slot addressing (the MAX's 99999 never wraps in practice).
+      var ring=(d.r.size>0)?d.r.size:0;
+      SES_LAST=last;cache.last=last;
       var cachedSids=Object.keys(cache.s).map(Number);
       var maxCached=cachedSids.length?Math.max.apply(null,cachedSids):0;
-      if(maxCached>=last){try{localStorage.setItem('wb-sessions-v1',JSON.stringify(cache))}catch(e){}return}
+      if(maxCached>=last){try{localStorage.setItem(SES_KEY,JSON.stringify(cache))}catch(e){}return}
       var startSid=maxCached===0?Math.max(1,last-59):maxCached+1;
       var total=last-startSid+1;
       var fetched=0,sid=startSid;
@@ -4212,7 +4225,7 @@ function loadSessions2(){
           // Nothing came back from r_log (charger doesn't serve per-session
           // records) — fall back to the gateway's local charge log.
           if(!allList.length){loadFromChargeLog(cache,cachedList);return}
-          try{localStorage.setItem('wb-sessions-v1',JSON.stringify(cache))}catch(e){}
+          try{localStorage.setItem(SES_KEY,JSON.stringify(cache))}catch(e){}
           renderAll(allList,cache.lifetimeKwh);
           return;
         }
@@ -4223,7 +4236,7 @@ function loadSessions2(){
         var advance=function(){if(advanced)return;advanced=true;sid++;fetched++;fetchNext()};
         var hardTimer=setTimeout(advance,9000);
         var thisSid=sid;
-        fetch('/api/command?action=bapi&met=r_log&par='+thisSid,{signal:AbortSignal.timeout(8000)})
+        fetch('/api/command?action=bapi&met=r_log&par='+logPar(thisSid),{signal:AbortSignal.timeout(8000)})
           .then(function(x){return x.json()}).then(function(sd){
             clearTimeout(hardTimer);
             if(sd.r&&sd.r.start){
@@ -4232,13 +4245,35 @@ function loadSessions2(){
             advance();
           }).catch(function(){clearTimeout(hardTimer);advance()});
       }
-      // Probe the newest session once. If the charger doesn't serve r_log
-      // (original/Zentri Pulsar), skip the slow 60-sid loop entirely and use
-      // the gateway's local charge log instead.
-      fetch('/api/command?action=bapi&met=r_log&par='+last,{signal:AbortSignal.timeout(8000)})
-        .then(function(x){return x.json()}).then(function(pd){
-          if(pd.r&&pd.r.start){fetchNext();}else{loadFromChargeLog(cache,cachedList);}
-        }).catch(function(){loadFromChargeLog(cache,cachedList);});
+      // Probe the newest session to learn the addressing. By number first: on a
+      // slot charger r_log <last> is empty (the slot after the newest, or out
+      // of the ring), so a hit means the charger takes the number. A slot hit
+      // alone can't tell (on a number charger slot last-1 is session last-1),
+      // so a hit is refused when its uid names the neighbouring session the
+      // wrong addressing would return (the MAX's uid ends in the session
+      // number: ...00350 for 350). A uid in any other form doesn't refuse.
+      // If both fail, skip the slow 60-sid loop and use the gateway's local
+      // charge log instead.
+      function uidIs(r,n){var u=String(r.uid||'');return /^\d+$/.test(u)&&u.slice(-String(n).length)===String(n)}
+      function probe(par,wrong,ok,fail){
+        fetch('/api/command?action=bapi&met=r_log&par='+par,{signal:AbortSignal.timeout(8000)})
+          .then(function(x){return x.json()}).then(function(pd){
+            var r=pd.r;
+            if(r&&r.start&&(uidIs(r,last)||!uidIs(r,wrong)))ok();else fail();
+          }).catch(fail);
+      }
+      var noLog=function(){loadFromChargeLog(cache,cachedList)};
+      var byNumber=function(fail){probe(last,last+1,function(){SES_SLOT=false;cache.slot=false;fetchNext()},fail)};
+      var bySlot=function(fail){
+        probe(ring?(last-1)%ring:last-1,last-1,function(){
+          SES_SLOT=true;SES_RING=ring;cache.slot=true;cache.ring=ring;
+          startSid=Math.max(startSid,oldestSid());total=last-startSid+1;sid=startSid;
+          fetchNext();
+        },fail);
+      };
+      // A charger already seen using slots skips the number probe.
+      if(cache.slot===true)bySlot(function(){byNumber(noLog)});
+      else byNumber(function(){bySlot(noLog)});
     }).catch(function(e){
       if(!cachedList.length){document.getElementById('slist').innerHTML='<span style="color:var(--danger)">'+(e.message||e)+'</span>'}
     });

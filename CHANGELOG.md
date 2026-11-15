@@ -16,6 +16,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   zones and aliases, generated from tzdata by `scripts/gen_tz_table.py`, about
   13 KB of flash) and checks the weekday in local time, DST included. A zone
   missing from the table keeps the old UTC behaviour.
+### Fixed (after 3.2.24-rc.1)
+- **The Sessions page shows the charger's own history (#79).** `r_log` takes a
+  slot, not the session number: session n is in slot `(n - 1) % size`, where
+  size comes from `r_ses`. The page asked by session number, which on a Pulsar
+  MAX returns the next session's record (and an empty one for the newest), so
+  the newest probe failed and the page fell back to the gateway's own charge
+  log. On the original Pulsar (a ring of 512 slots) it failed the same way. The
+  page now reads by slot, falls back to the session number for a charger that
+  takes it, and stops "Load older sessions" at the oldest slot the charger
+  keeps. The CSV export covers all of it. Found by @stevenvanrossen-commits.
+  Sessions cached by the old page are dropped once.
 
 ### Fixed (charge control on a Pulsar MAX, measured 27-28 Oct)
 - **Starts and stops can no longer toggle the session.** On a Pulsar MAX a stop
