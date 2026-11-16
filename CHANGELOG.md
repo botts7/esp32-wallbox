@@ -6,6 +6,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (lock)
+- **Unlock from HA, MQTT or the web UI works on chargers that ignore it (#47).**
+  A Pulsar MAX accepts `w_lck 1` but ignores `w_lck 0`, with auto-lock on or
+  off; what unlocks it is auto-lock going from on to off. Every lock and unlock
+  is now checked against `r_lck`. If an unlock didn't take, the gateway switches
+  auto-lock on and straight back to your own setting (off stays off, a timeout
+  you set is restored), which unlocks it. A lock that didn't take is logged
+  (some Pulsar Plus firmware only locks while auto-lock is on). The original
+  Pulsar is unchanged.
+
 ### Fixed (schedules)
 - **`Next Scheduled Charge` and `plug_reminder` no longer land a day out near
   local midnight (#81).** A schedule's `start` is stored in UTC but its `days`

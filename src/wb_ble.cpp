@@ -8,6 +8,7 @@
 #include "wb_stop_guard.h"  // never send a stop to a non-charging session
 #include "wb_bapi_caps.h"  // skip periodic reads this charger doesn't support
 #include "wb_ceiling.h"    // the current ceiling, kept across reboots
+#include "wb_lock_verify.h" // check w_lck took; unlock fallback via auto-lock (#47)
 #include "wb_tz.h"         // charger-local weekday for schedules (#81)
 #include <ArduinoJson.h>
 #include <esp_coexist.h>
@@ -304,6 +305,11 @@ void WallboxBLE::loop() {
                         resp = (v == wb_stop_guard::Verdict::Skip) ? wb_stop_guard::skippedReply(kind)
                                                                    : wb_stop_guard::unreadableReply();
                     }
+                } else if (strcmp(req.met, bapi::MET_LOCK) == 0) {
+                    // Lock / unlock from any path (HTTP, MQTT, raw BAPI): check it
+                    // took, and unlock through an auto-lock toggle if the charger
+                    // ignored it (wb_lock_verify.h).
+                    resp = _sendLockVerified(req.par, to);
                 } else if (wb_bapi_caps::isRead(req.met, req.par) && wb_bapi_caps::shouldSkip(req.met)) {
                     // A read this charger has proven it doesn't support, asked
                     // for by a client (HA integration, dashboard, MQTT bapi):
@@ -2256,6 +2262,56 @@ String WallboxBLE::_pollRead(const char* met, const char* par, uint32_t timeoutM
     String r = _sendCommandDirect(met, par, timeoutMs);
     wb_bapi_caps::record(met, r);
     return r;
+}
+
+// The lock state read straight from the charger, or -1.
+int WallboxBLE::_readLockNow() {
+    return wb_lock_verify::lockOf(_sendCommandDirect(bapi::MET_GET_LOCK_STATE, "null", 2000));
+}
+
+// Wait up to kVerifyMs for r_lck to reach `want`. Returns the last state read.
+int WallboxBLE::_awaitLock(int want) {
+    int now = -1;
+    const uint32_t t0 = millis();
+    do {
+        vTaskDelay(pdMS_TO_TICKS(wb_lock_verify::kPollMs));
+        now = _readLockNow();
+        if (now == want) break;
+    } while (millis() - t0 < wb_lock_verify::kVerifyMs && _state == State::CONNECTED);
+    return now;
+}
+
+String WallboxBLE::_sendLockVerified(const char* par, uint32_t timeoutMs) {
+    String resp = _sendCommandDirect(bapi::MET_LOCK, par, timeoutMs);
+    const int want = wb_lock_verify::wantedOf(par);
+    if (want < 0 || resp.isEmpty() || isLegacyPulsar()) return resp;
+
+    int now = _awaitLock(want);
+    if (now != want && want == 0) {
+        // Ignored unlock: take auto-lock through ON and back to the user's
+        // setting; the ON -> OFF step is what unlocks (measured on a MAX).
+        const int orig = wb_lock_verify::autolockOf(
+            _sendCommandDirect(bapi::MET_GET_AUTOLOCK, "null", 2000));
+        if (orig >= 0) {
+            const wb_lock_verify::Toggle t = wb_lock_verify::unlockToggle(orig);
+            Log.printf("[BLE] unlock ignored (r_lck %d), toggling auto-lock %d -> %d -> %d s (#47)\n",
+                       now, orig, t.first, t.second);
+            _sendCommandDirect(bapi::MET_SET_AUTOLOCK, String(t.first).c_str(), 3000);
+            vTaskDelay(pdMS_TO_TICKS(wb_lock_verify::kToggleGapMs));
+            _sendCommandDirect(bapi::MET_SET_AUTOLOCK, String(t.second).c_str(), 3000);
+            now = _awaitLock(0);
+            const int after = wb_lock_verify::autolockOf(
+                _sendCommandDirect(bapi::MET_GET_AUTOLOCK, "null", 2000));
+            if (after != orig)
+                Log.printf("[BLE] auto-lock is %d s after the unlock toggle, was %d s\n", after, orig);
+        }
+    }
+    if (now == 0 || now == 1) _chgLockState = now;
+    Log.printf("[BLE] %s %s (r_lck %d)\n", want ? "lock" : "unlock",
+               now == want ? "applied" : "NOT applied", now);
+    if (now != want && want == 1)
+        Log.println("[BLE] lock not applied: some chargers only lock with Auto-lock on (#47)");
+    return resp;
 }
 
 void WallboxBLE::_pollLockFallback() {
