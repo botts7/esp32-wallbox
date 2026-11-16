@@ -604,6 +604,10 @@ private:
     String _sendLockVerified(const char* par, uint32_t timeoutMs);
     int _awaitLock(int want);
     int _readLockNow();
+    int _readAutolockNow();
+    void _setAutolock(int secs);
+    void _releaseLockHold(const char* why);
+    void _noteLockState(int lock);
 
     // RSSI smoothing — NimBLE's getRssi() returns per-packet instantaneous
     // values that swing wildly (issue #6). Sample on a fixed cadence and
