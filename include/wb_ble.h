@@ -600,6 +600,14 @@ private:
     String _pollRead(const char* met, const char* par = "null", uint32_t timeoutMs = 5000);
     // Original Pulsar: refresh lock state from r_lck when r_sta is unsupported.
     void _pollLockFallback();
+    // Lock / unlock with a check that it took, and the unlock fallback (#47).
+    String _sendLockVerified(const char* par, uint32_t timeoutMs);
+    int _awaitLock(int want);
+    int _readLockNow();
+    int _readAutolockNow();
+    void _setAutolock(int secs);
+    void _releaseLockHold(const char* why);
+    void _noteLockState(int lock);
 
     // RSSI smoothing — NimBLE's getRssi() returns per-packet instantaneous
     // values that swing wildly (issue #6). Sample on a fixed cadence and
