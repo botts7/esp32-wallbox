@@ -6,6 +6,19 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (Sessions page, #79 follow-ups)
+- **The daily list shows more than the newest 10 days.** A "Show more days"
+  button adds more, and "Load older sessions" now shows the days it loaded
+  (before, only the heatmap and CSV changed, so it looked as if nothing happened).
+- **Unplug time.** Each session shows its charging time and when the car was
+  unplugged (`r_log` stop, what the Wallbox portal shows as End). The CSV has
+  separate "Charging end" and "Unplugged" columns.
+- **All time** falls back to the total of the loaded sessions (marked *) when
+  the charger has no lifetime meter, as on the original Pulsar.
+- **CSV:** a session with no energy or time gets 0, not a blank.
+- Sessions cached by the previous page are read again once (to pick up the
+  unplug time).
+
 ### Fixed (lock)
 - **Lock and unlock from HA, MQTT or the web UI work on chargers that ignore
   them (#47).** Every lock and unlock is now checked against `r_lck`:
