@@ -4016,7 +4016,14 @@ function renderTiles(sessions, lifetimeKwh){
     if(s.ts>=weekSec)weekKwh+=kwh;
     if(s.ts>=monthSec)monthKwh+=kwh;
   });
-  if(lifetimeKwh!=null)document.getElementById('tile-allt').textContent=lifetimeKwh.toFixed(0)+' kWh';
+  // The charger's lifetime meter (r_dca) when it has one; the original Pulsar
+  // doesn't, so fall back to the total of the sessions loaded here (#79).
+  var allt=document.getElementById('tile-allt');
+  if(lifetimeKwh!=null){allt.textContent=lifetimeKwh.toFixed(0)+' kWh';allt.title=''}
+  else{
+    var loadedKwh=sessions.reduce(function(a,s){return a+((s&&s.en)||0)/1000},0);
+    if(loadedKwh>0){allt.textContent=loadedKwh.toFixed(0)+' kWh*';allt.title='Total of the '+sessions.length+' sessions loaded on this page (the charger reports no lifetime meter)'}
+  }
   document.getElementById('tile-week').textContent=weekKwh.toFixed(1)+' kWh';
   document.getElementById('tile-month').textContent=monthKwh.toFixed(1)+' kWh';
   // Cost tiles (computed if tariff enabled)
@@ -4037,6 +4044,8 @@ function renderTiles(sessions, lifetimeKwh){
   }
 }
 function fmtTime(ts){var d=new Date(ts*1000);try{return d.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){return d.toLocaleTimeString()}}
+function dayOf(ts){var d=new Date(ts*1000);try{return d.toLocaleDateString('en-CA',{timeZone:CHARGER_TZ})}catch(e){return d.toLocaleDateString('en-CA')}}
+function dayLabelOf(ts){var d=new Date(ts*1000);try{return d.toLocaleDateString(undefined,{timeZone:CHARGER_TZ,weekday:'short',day:'numeric'})}catch(e){return dayOf(ts)}}
 function fmtDur(sec){var h=Math.floor(sec/3600),m=Math.round((sec%3600)/60);return (h?h+'h ':'')+m+'m'}
 function toggleDay(i){var det=document.getElementById('det-'+i);var ch=document.getElementById('ch-'+i);if(!det)return;if(det.style.display==='none'){det.style.display='block';ch.textContent='\u25B4'}else{det.style.display='none';ch.textContent='\u25BE'}}
 function renderDays(sessions){
@@ -4055,7 +4064,8 @@ function renderDays(sessions){
     var endTs=s.ts+(s.dur||0);
     if(endTs>byDay[key].last)byDay[key].last=endTs;
   });
-  var dayKeys=Object.keys(byDay).sort().reverse().slice(0,10);
+  var allDays=Object.keys(byDay).sort().reverse();
+  var dayKeys=allDays.slice(0,DAYS_SHOWN);
   var html='';
   dayKeys.forEach(function(key,i){
     var d=byDay[key];
@@ -4071,7 +4081,8 @@ function renderDays(sessions){
       var sEnd=s.dur?fmtTime(s.ts+s.dur):'?';
       var sDur=fmtDur(s.dur||0);
       var sKwh=((s.en||0)/1000).toFixed(2);
-      detail+="<div style='display:flex;justify-content:space-between;padding:6px 4px;border-top:1px solid var(--border);font-size:.8em'><div><div>"+sStart+" \u2013 "+sEnd+"</div><div style='color:var(--text3);font-size:.92em;margin-top:2px'>#"+s.id+" \u00B7 "+sDur+"</div></div><div style='text-align:right'><div style='font-weight:500'>"+sKwh+" kWh</div>"+(TARIFF&&TARIFF.enabled?"<div style='font-size:.75em;color:#22c55e'>"+fmt$(costOf(s))+"</div>":"")+"</div></div>";
+      var sOut=(s.stop&&s.stop>=s.ts)?" \u00B7 unplugged "+fmtTime(s.stop)+(dayOf(s.stop)!==dayOf(s.ts)?" "+dayLabelOf(s.stop):""):"";
+      detail+="<div style='display:flex;justify-content:space-between;padding:6px 4px;border-top:1px solid var(--border);font-size:.8em'><div><div>"+sStart+" \u2013 "+sEnd+"</div><div style='color:var(--text3);font-size:.92em;margin-top:2px'>#"+s.id+" \u00B7 "+sDur+" charging"+sOut+"</div></div><div style='text-align:right'><div style='font-weight:500'>"+sKwh+" kWh</div>"+(TARIFF&&TARIFF.enabled?"<div style='font-size:.75em;color:#22c55e'>"+fmt$(costOf(s))+"</div>":"")+"</div></div>";
     });
     html+="<div style='background:var(--bg);border-radius:8px;padding:10px;margin:4px 0;cursor:pointer;user-select:none' onclick='toggleDay("+i+")'>"+
       "<div style='display:flex;justify-content:space-between;align-items:center'>"+
@@ -4082,6 +4093,7 @@ function renderDays(sessions){
       "<div id='det-"+i+"' style='display:none;margin-top:6px'>"+detail+"</div>"+
     "</div>";
   });
+  if(allDays.length>dayKeys.length){html+="<div style='text-align:center;margin-top:10px'><button class='btn btn-outline' onclick='showMoreDays()'>Show more days ("+(allDays.length-dayKeys.length)+" more)</button></div>";}
   var ids=sessions.map(function(s){return s.id||0}).filter(function(n){return n>0});
   var minId=ids.length?Math.min.apply(null,ids):0;
   if(minId>oldestSid()){html+="<div style='text-align:center;margin-top:10px'><button id='load-older-btn' class='btn btn-outline' onclick='loadOlder()'>Load older sessions</button></div>";}
@@ -4093,10 +4105,13 @@ function renderDays(sessions){
 // r_log <last> is empty). SES_SLOT is set by the probe; a charger that does take
 // the session number keeps SES_SLOT false. Cache v2: v1 keyed by session number
 // could hold the next session's record under each number.
-var SES_KEY='wb-sessions-v2',SES_SLOT=false,SES_RING=0,SES_LAST=0;
+var SES_KEY='wb-sessions-v3',SES_SLOT=false,SES_RING=0,SES_LAST=0;
+// One r_log record as the page keeps it: ts = plug-in, dur = charging seconds,
+// stop = unplug (what the Wallbox portal shows as End). v3 adds stop.
+function sesFromLog(id,r){return {id:id,ts:r.start,stop:r.stop||0,dur:r.sec||r.dur||r.duration||0,en:r.en||r.energy||0,gen:r.gen||0}}
 function logPar(n){return SES_SLOT?(SES_RING?(n-1)%SES_RING:n-1):n}
 function oldestSid(){return SES_SLOT&&SES_RING&&SES_LAST?Math.max(1,SES_LAST-SES_RING+1):1}
-(function(){try{localStorage.removeItem('wb-sessions-v1');var c=JSON.parse(localStorage.getItem(SES_KEY)||'{}');SES_SLOT=!!c.slot;SES_RING=c.ring||0;SES_LAST=c.last||0}catch(e){}})();
+(function(){try{localStorage.removeItem('wb-sessions-v1');localStorage.removeItem('wb-sessions-v2');var c=JSON.parse(localStorage.getItem(SES_KEY)||'{}');SES_SLOT=!!c.slot;SES_RING=c.ring||0;SES_LAST=c.last||0}catch(e){}})();
 function loadOlder(){
   var cache;try{cache=JSON.parse(localStorage.getItem(SES_KEY)||'{}')}catch(e){cache={}}
   if(!cache.s)cache.s={};
@@ -4109,6 +4124,7 @@ function loadOlder(){
   function fetchNext(){
     if(sid>endSid){try{localStorage.setItem(SES_KEY,JSON.stringify(cache))}catch(e){}
       var allList=Object.keys(cache.s).map(function(k){return cache.s[k]});
+      DAYS_SHOWN=1e9;  // show the days just loaded, not only the newest 10 (#79)
       renderAll(allList,cache.lifetimeKwh);return}
     if(btn){btn.textContent='Loading '+(fetched+1)+' / '+total+'...';btn.disabled=true}
     var advanced=false;
@@ -4118,13 +4134,17 @@ function loadOlder(){
     fetch('/api/command?action=bapi&met=r_log&par='+logPar(thisSid),{signal:AbortSignal.timeout(8000)})
       .then(function(x){return x.json()}).then(function(sd){
         clearTimeout(hardTimer);
-        if(sd.r&&sd.r.start){cache.s[thisSid]={id:thisSid,ts:sd.r.start,dur:sd.r.sec||sd.r.dur||sd.r.duration||0,en:sd.r.en||sd.r.energy||0,gen:sd.r.gen||0}}
+        if(sd.r&&sd.r.start){cache.s[thisSid]=sesFromLog(thisSid,sd.r)}
         advance();
       }).catch(function(){clearTimeout(hardTimer);advance()});
   }
   fetchNext();
 }
+// Days in the list; "Show more days" adds more, "Load older sessions" shows all.
+var DAYS_SHOWN=10,LAST_SESSIONS=[];
+function showMoreDays(){DAYS_SHOWN+=20;renderDays(LAST_SESSIONS)}
 function renderAll(sessions, lifetimeKwh){
+  LAST_SESSIONS=sessions;
   renderTiles(sessions, lifetimeKwh);
   renderDays(sessions);
   try{buildHeatmap(sessions)}catch(e){console.error('heatmap failed',e)}
@@ -4160,18 +4180,21 @@ function exportCsv(){
   var arr=Object.keys(cache.s||{}).map(function(k){return cache.s[k]});
   if(!arr.length){toast('No sessions to export','info');return}
   arr.sort(function(a,c){return (a.ts||0)-(c.ts||0)});
-  var rows=[['Session ID','Date','Start','End','Duration (min)','Energy (kWh)','Cost']];
+  // Start = plug-in; Charging end = start + charging time; Unplugged = r_log stop
+  // (the Wallbox portal's End). A session with no energy or time gets 0, not a blank.
+  var rows=[['Session ID','Date','Start','Charging end','Unplugged','Duration (min)','Energy (kWh)','Cost']];
+  var fmtT=function(d){try{return d.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){return d.toLocaleTimeString()}};
+  var fmtD=function(d){try{return d.toLocaleDateString('en-CA',{timeZone:CHARGER_TZ})}catch(e){return d.toLocaleDateString('en-CA')}};
   arr.forEach(function(s){
     if(!s.ts)return;
     var sd=new Date(s.ts*1000);
-    var ed=s.dur?new Date((s.ts+s.dur)*1000):null;
-    var dateStr,startStr,endStr='';
-    try{dateStr=sd.toLocaleDateString('en-CA',{timeZone:CHARGER_TZ})}catch(e){dateStr=sd.toLocaleDateString('en-CA')}
-    try{startStr=sd.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){startStr=sd.toLocaleTimeString()}
-    if(ed)try{endStr=ed.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){endStr=ed.toLocaleTimeString()}
-    var dur=s.dur?Math.round(s.dur/60):'';
-    var kwh=s.en?(s.en/1000).toFixed(2):'';
-    rows.push([s.id,dateStr,startStr,endStr,dur,kwh,(TARIFF&&TARIFF.enabled)?costOf(s).toFixed(2):'']);
+    var dateStr=fmtD(sd);
+    var endStr=fmtT(new Date((s.ts+(s.dur||0))*1000));
+    var unplug='';
+    if(s.stop&&s.stop>=s.ts){var ud=new Date(s.stop*1000);unplug=(fmtD(ud)===dateStr?'':fmtD(ud)+' ')+fmtT(ud)}
+    var dur=Math.round((s.dur||0)/60);
+    var kwh=((s.en||0)/1000).toFixed(2);
+    rows.push([s.id,dateStr,fmtT(sd),endStr,unplug,dur,kwh,(TARIFF&&TARIFF.enabled)?(costOf(s)||0).toFixed(2):'']);
   });
   var csv=rows.map(function(r){return r.join(',')}).join('\n');
   var blob=new Blob([csv],{type:'text/csv'});
@@ -4240,7 +4263,7 @@ function loadSessions2(){
           .then(function(x){return x.json()}).then(function(sd){
             clearTimeout(hardTimer);
             if(sd.r&&sd.r.start){
-              cache.s[thisSid]={id:thisSid,ts:sd.r.start,dur:sd.r.sec||sd.r.dur||sd.r.duration||0,en:sd.r.en||sd.r.energy||0,gen:sd.r.gen||0};
+              cache.s[thisSid]=sesFromLog(thisSid,sd.r);
             }
             advance();
           }).catch(function(){clearTimeout(hardTimer);advance()});
