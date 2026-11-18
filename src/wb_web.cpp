@@ -4055,13 +4055,13 @@ function renderDays(sessions){
     var d=new Date(s.ts*1000);
     var key;
     try{key=d.toLocaleDateString('en-CA',{timeZone:CHARGER_TZ})}catch(e){key=d.toLocaleDateString('en-CA')}
-    if(!byDay[key])byDay[key]={kwh:0,sec:0,n:0,first:s.ts,last:s.ts+(s.dur||0),items:[]};
+    if(!byDay[key])byDay[key]={kwh:0,sec:0,n:0,first:s.ts,last:chgEndOf(s),items:[]};
     byDay[key].kwh+=(s.en||0)/1000;
     byDay[key].sec+=(s.dur||0);
     byDay[key].n++;
     byDay[key].items.push(s);
     if(s.ts<byDay[key].first)byDay[key].first=s.ts;
-    var endTs=s.ts+(s.dur||0);
+    var endTs=chgEndOf(s);
     if(endTs>byDay[key].last)byDay[key].last=endTs;
   });
   var allDays=Object.keys(byDay).sort().reverse();
@@ -4078,7 +4078,7 @@ function renderDays(sessions){
     var detail='';
     d.items.sort(function(a,b){return a.ts-b.ts}).forEach(function(s){
       var sStart=fmtTime(s.ts);
-      var sEnd=s.dur?fmtTime(s.ts+s.dur):'?';
+      var sEnd=s.dur?fmtTime(chgEndOf(s)):'?';
       var sDur=fmtDur(s.dur||0);
       var sKwh=((s.en||0)/1000).toFixed(2);
       var sOut=(s.stop&&s.stop>=s.ts)?" \u00B7 unplugged "+fmtTime(s.stop)+(dayOf(s.stop)!==dayOf(s.ts)?" "+dayLabelOf(s.stop):""):"";
@@ -4165,7 +4165,7 @@ function showHour(day,hr){
     var dateStr,startStr,endStr;
     try{dateStr=d.toLocaleDateString(undefined,{timeZone:CHARGER_TZ,weekday:'short',month:'short',day:'numeric'})}catch(e){dateStr=d.toDateString()}
     try{startStr=d.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){startStr=d.toLocaleTimeString()}
-    var endD=s.dur?new Date((s.ts+s.dur)*1000):null;
+    var endD=s.dur?new Date(chgEndOf(s)*1000):null;
     if(endD)try{endStr=endD.toLocaleTimeString(undefined,{timeZone:CHARGER_TZ,hour:'2-digit',minute:'2-digit',hour12:false})}catch(e){endStr=endD.toLocaleTimeString()}
     var dur=s.dur?Math.floor(s.dur/3600)+'h '+Math.round((s.dur%3600)/60)+'m':'-';
     var kwh=s.en?(s.en/1000).toFixed(2)+' kWh':'-';
@@ -4175,6 +4175,9 @@ function showHour(day,hr){
   modal.innerHTML=inner;
   document.body.appendChild(modal);
 }
+// When charging ended: start + charging time, which can round a minute past
+// the unplug, so never later than it (#79).
+function chgEndOf(s){var e=s.ts+(s.dur||0);return (s.stop&&s.stop>=s.ts&&e>s.stop)?s.stop:e}
 function exportCsv(){
   var cache;try{cache=JSON.parse(localStorage.getItem(SES_KEY)||'{}')}catch(e){cache={}}
   var arr=Object.keys(cache.s||{}).map(function(k){return cache.s[k]});
@@ -4189,9 +4192,10 @@ function exportCsv(){
     if(!s.ts)return;
     var sd=new Date(s.ts*1000);
     var dateStr=fmtD(sd);
-    var endStr=fmtT(new Date((s.ts+(s.dur||0))*1000));
+    var hasStop=s.stop&&s.stop>=s.ts;
+    var endStr=fmtT(new Date(chgEndOf(s)*1000));
     var unplug='';
-    if(s.stop&&s.stop>=s.ts){var ud=new Date(s.stop*1000);unplug=(fmtD(ud)===dateStr?'':fmtD(ud)+' ')+fmtT(ud)}
+    if(hasStop){var ud=new Date(s.stop*1000);unplug=(fmtD(ud)===dateStr?'':fmtD(ud)+' ')+fmtT(ud)}
     var dur=Math.round((s.dur||0)/60);
     var kwh=((s.en||0)/1000).toFixed(2);
     rows.push([s.id,dateStr,fmtT(sd),endStr,unplug,dur,kwh,(TARIFF&&TARIFF.enabled)?(costOf(s)||0).toFixed(2):'']);
