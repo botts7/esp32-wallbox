@@ -13,6 +13,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Unplug time.** Each session shows its charging time and when the car was
   unplugged (`r_log` stop, what the Wallbox portal shows as End). The CSV has
   separate "Charging end" and "Unplugged" columns.
+  Charging end is never later than Unplugged (start plus charging time could
+  round a minute past it).
 - **All time** falls back to the total of the loaded sessions (marked *) when
   the charger has no lifetime meter, as on the original Pulsar.
 - **CSV:** a session with no energy or time gets 0, not a blank.
