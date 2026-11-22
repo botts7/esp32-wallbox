@@ -253,8 +253,10 @@ Both work; choose based on whether you want the gateway to be self-contained
 |---|---|
 | **Pulsar MAX** (FW 6.11.16 and earlier) | ✅ Fully tested |
 | **Pulsar MAX** (FW 6.11.26+) | ✅ Working in v2.6.1+ — at this firmware Wallbox switched MAX to the dual-char BLE protocol that previously only shipped on Plus/Copper/Quasar; the gateway auto-detects the mismatch on connect and adopts the right protocol family without a reboot |
-| **Pulsar Plus** | 🟡 Active prep, looking for testers |
-| **Copper SB**, **Commander 2**, **Quasar / Quasar 2** | ⚪ Untested — reports welcome |
+| **Pulsar Plus** | ✅ Working (both BLE radios auto-detected; FW 6.11+ needs the Bluetooth passcode) |
+| **Original Pulsar** (Zentri) | ✅ Working: reads and start/stop |
+| **Copper SB** (Zentri radio) | 🟡 Reads confirmed on v3.2.24-rc.4 (#89); start/stop and current not yet tested |
+| **Commander 2**, **Quasar / Quasar 2** | ⚪ Untested — reports welcome |
 
 See **[COMPATIBILITY.md](COMPATIBILITY.md)** for the full matrix including
 gateway-board recommendations, BLE signal-strength thresholds, and how to
