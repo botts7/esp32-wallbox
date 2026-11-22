@@ -3,6 +3,7 @@
 #include "wb_config.h"
 #include "wb_health.h"
 #include "wb_zentri_normalize.h"
+#include "wb_time_sync.h"
 #include "wb_copper_normalize.h"
 #include "wb_ble_err.h"   // bleErrName() — decode NimBLE codes to names (#161)
 #include "wb_stop_guard.h"  // never send a stop to a non-charging session
@@ -210,8 +211,8 @@ void WallboxBLE::loop() {
         // auth). Wtime accepts a 14-char ASCII string:
         //   ss mm hh dd ww MM yy   (ww: weekday Sun=0..Sat=6, yy=year%100)
         // Skips if NTP hasn't synced the gateway yet (year would be 1970).
-        if (_lastTimeSyncMs == 0 ||
-            millis() - _lastTimeSyncMs >= TIME_SYNC_INTERVAL_MS) {
+        if (wb_time_sync::due(millis(), _lastTimeSyncMs, _lastTimeSyncAnyMs,
+                              _timeSyncMisses)) {
             time_t now = time(nullptr);
             struct tm tmu;
             gmtime_r(&now, &tmu);
@@ -228,11 +229,16 @@ void WallboxBLE::loop() {
                 // {r:null} on success which the response parser may
                 // collapse to an empty string.
                 _lastTimeSyncMs = millis();
-                String r = _sendCommandDirect("Wtime", buf, 4000);
+                _lastTimeSyncAnyMs = _lastTimeSyncMs ? _lastTimeSyncMs : 1;
+                _sendCommandDirect("Wtime", buf, 4000);   // success may be {"r":null}
+                _timeSyncMisses = wb_time_sync::afterTry(_timeSyncMisses, _lastDirectReplied);
+                if (_timeSyncMisses == wb_time_sync::kMissesBeforeBackoff)
+                    Log.printf("[BLE] Wtime unanswered %u times in a row, syncing once a day\n",
+                               (unsigned)_timeSyncMisses);
                 Log.printf("[BLE] Wtime sync %02d:%02d:%02d %02d-%02d-%02d UTC (%s)\n",
                            tmu.tm_hour, tmu.tm_min, tmu.tm_sec,
                            tmu.tm_year + 1900, tmu.tm_mon + 1, tmu.tm_mday,
-                           r.isEmpty() ? "no-reply" : "ack");
+                           _lastDirectReplied ? "ack" : "no-reply");
             }
         }
 
@@ -1349,6 +1355,7 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
     // write so a panic in BLE-write land tells us which command was
     // in flight. RTC NOINIT survives the reset.
     wb_health::setBreadcrumbBapi(met);
+    _lastDirectReplied = false;   // set once a reply arrives (an empty one counts)
 
     // Serialise BAPI commands across tasks. The BLE task's own keepalive
     // and the Arduino main task's polls can both end up here — without
@@ -1465,6 +1472,7 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
         if (_yieldCb) _yieldCb();  // let web server + OTA run
     }
 
+    _lastDirectReplied = _responseReady;
     if (!_responseReady) {
         Log.printf("[BLE] Timeout %s (%dms)\n", met, (int)(millis() - start));
         // Check if connection died during wait

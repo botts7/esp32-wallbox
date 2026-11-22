@@ -438,7 +438,13 @@ private:
     // the wall-clock to the charger periodically. 0 = never synced
     // this session (forces a sync on the first keepalive after auth).
     uint32_t _lastTimeSyncMs = 0;
-    static const uint32_t TIME_SYNC_INTERVAL_MS = 3600000;  // 1 hour
+    // Pacing (wb_time_sync.h): unanswered tries in a row, and the time of the
+    // last try in any connection, so a charger that never answers backs off.
+    uint8_t _timeSyncMisses = 0;
+    uint32_t _lastTimeSyncAnyMs = 0;
+    // Whether the last _sendCommandDirect got any reply ({"r":null} included,
+    // which comes back as an empty String just like a timeout).
+    bool _lastDirectReplied = false;
 
     // Scan cache for smart reconnect
     uint32_t _lastSeenTime = 0;

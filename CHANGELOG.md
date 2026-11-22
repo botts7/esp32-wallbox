@@ -6,6 +6,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (charger clock sync)
+- **The hourly charger clock sync (Wtime) backs off when the charger never
+  answers it.** Some chargers don't reply (a Copper SB on a Zentri radio,
+  #89, and a Pulsar MAX on 6.11.x), so each try held the Bluetooth link for a
+  4 s timeout every hour and on every reconnect. After 3 unanswered tries in
+  a row it syncs once a day and no longer forces a try on reconnect; any
+  reply (an empty `{"r":null}` counts) restores the hourly sync.
+
+### Docs
+- Copper SB (Zentri radio) moved to "reads confirmed" (#89); README charger
+  table brought in line with COMPATIBILITY.md (Pulsar Plus, original Pulsar).
+
 ### Fixed (Sessions page, #79 follow-ups)
 - **The daily list shows more than the newest 10 days.** A "Show more days"
   button adds more, and "Load older sessions" now shows the days it loaded

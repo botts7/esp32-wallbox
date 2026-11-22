@@ -13,7 +13,7 @@ This list grows as users report. Reports of **either** working **or** broken set
 | **Pulsar Pro** | all (6.x) | ✅ Working | u-blox NINA-B22, single-char protocol. Confirmed by users (#53). |
 | **Pulsar Plus** | all (6.x) | ✅ Working | Both radios auto-detected: dual-char (Silicon Labs BGX13P) and the newer single-char (u-blox NINA-B22) units. On firmware 6.11+ a Bluetooth passcode is required — set it on the Config page (BLE Passcode). |
 | **Original Pulsar** (Zentri) | all | ✅ Working (reads + start/stop) | TruConnect / Zentri radio. Reads and start/stop work; live current control over BLE is not available. |
-| **Copper SB** | _any_ | ⚪ Unknown | Protocol likely overlaps with Pulsar Plus. Reports welcome. |
+| **Copper SB** | 6.7.38 | 🟡 Reads confirmed | Zentri AMS002 radio (TruConnect), auto-detected from v3.2.24-rc.4, no custom UUIDs or PIN needed (#89). Status, realtime, schedules, energy meter, sessions and HA entities work. Start/stop and current not yet tested (that unit runs OCPP). Mains voltage and grid power read 0 without the power meter accessory (#20). |
 | **Commander 2** | _any_ | ⚪ Unknown | Similar BAPI surface expected. Reports welcome. |
 | **Quasar / Quasar 2** | _any_ | ⚪ Unknown | DC bidirectional models — `den` (discharge) field already in the protocol; UI is ready. Untested. |
 
