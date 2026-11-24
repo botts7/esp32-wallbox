@@ -1,5 +1,6 @@
 #include "wb_mqtt.h"
 #include "wb_ble.h"
+#include "wb_web.h"
 #include "wb_config.h"
 #include "wb_log.h"
 #include "wb_diag.h"
@@ -75,7 +76,7 @@ static const char* kTzOptions[]   = {
 // Total number of discovery entities the state machine publishes.
 // Keep in sync with the cases in tickDiscovery(). Bumping this requires
 // adding a new case and renumbering nothing — cases are dense 0..N-1.
-static const size_t kDiscoveryCount = 76;  // +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power L1/L2/L3 +meter total energy (EM340) +chip_temp (#162) -green_energy (v3.2.0: r_dat.gen is the override flag, not energy)
+static const size_t kDiscoveryCount = 77;  // +reboot_gateway (#89) +next_scheduled_charge +plug_reminder (#127) +last_burst_energy +charge_log_count (#141) +per-phase grid power L1/L2/L3 +meter total energy (EM340) +chip_temp (#162) -green_energy (v3.2.0: r_dat.gen is the override flag, not energy)
 
 // ---------------------------------------------------------------------
 // 3.0 task #77: table-driven HA discovery.
@@ -130,6 +131,7 @@ enum class TopicSlot : uint8_t {
     CMD_CHARGING,
     CMD_LOCK,
     CMD_REBOOT,
+    CMD_REBOOT_GATEWAY,
     CMD_AUTOLOCK_EN,
     CMD_AUTOLOCK_TIME,
     CMD_ECO_MODE,
@@ -642,12 +644,19 @@ void WallboxMQTT::_mqttCallback(char* topic, byte* payload, unsigned int len) {
 }
 
 void WallboxMQTT::_handleCommand(const char* subtopic, const char* payload) {
+    String sub = subtopic;
+    // Gateway reboot does not need BLE, so handle it before the BLE check (#89).
+    if (sub == "reboot_gateway") {
+        Log.println("[MQTT] Rebooting gateway via MQTT");
+        webServer.requestReboot();
+        return;
+    }
+
     if (!wallboxBLE.isConnected()) {
         Log.println("[MQTT] BLE not connected, ignoring command");
         return;
     }
 
-    String sub = subtopic;
     String par;
 
     if (sub == "charging") {
@@ -1010,6 +1019,7 @@ void WallboxMQTT::sendDiscovery() {
     _discTopics.cmdCharging      = cPrefix + "charging";
     _discTopics.cmdLock          = cPrefix + "lock";
     _discTopics.cmdReboot        = cPrefix + "reboot";
+    _discTopics.cmdRebootGateway = cPrefix + "reboot_gateway";
     _discTopics.cmdAutolockEnable= cPrefix + "autolock_enable";
     _discTopics.cmdAutolockTime  = cPrefix + "autolock_time";
     _discTopics.cmdEcoMode       = cPrefix + "eco_mode";
@@ -1555,6 +1565,13 @@ const DiscoveryEntry kEntries[] = {
                "{{ value_json.charge_log_count | default(0) }}",
                nullptr, nullptr, "measurement", "diagnostic",
                TopicSlot::NONE, 0,0,0, nullptr, nullptr, nullptr, nullptr, 0 },
+
+    // Gateway reboot button alongside "Reboot Charger" so the two are clear (#89).
+    /* 76 */ { EntityKind::BUTTON, "reboot_gateway", "Reboot Gateway", "mdi:restart-alert",
+               TopicSlot::NONE, nullptr,
+               nullptr, nullptr, nullptr, nullptr,
+               TopicSlot::CMD_REBOOT_GATEWAY, 0,0,0, nullptr,
+               nullptr, nullptr, nullptr, 0 },
 };
 
 const size_t kEntryCount = sizeof(kEntries) / sizeof(kEntries[0]);
@@ -1645,6 +1662,7 @@ void WallboxMQTT::_tickDiscoveryFromTable(size_t index) {
             case wb_disc::TopicSlot::CMD_CHARGING:     return _discTopics.cmdCharging.c_str();
             case wb_disc::TopicSlot::CMD_LOCK:         return _discTopics.cmdLock.c_str();
             case wb_disc::TopicSlot::CMD_REBOOT:       return _discTopics.cmdReboot.c_str();
+            case wb_disc::TopicSlot::CMD_REBOOT_GATEWAY: return _discTopics.cmdRebootGateway.c_str();
             case wb_disc::TopicSlot::CMD_AUTOLOCK_EN:  return _discTopics.cmdAutolockEnable.c_str();
             case wb_disc::TopicSlot::CMD_AUTOLOCK_TIME:return _discTopics.cmdAutolockTime.c_str();
             case wb_disc::TopicSlot::CMD_ECO_MODE:     return _discTopics.cmdEcoMode.c_str();

@@ -46,6 +46,10 @@ enum class Verdict { Send, Skip, Unreadable };
 // Which kind of w_cha frame this is (None for any other method).
 Kind kindOf(const char* met, const char* par);
 
+// True when rdatReply is valid JSON containing an object "r" with integer "st".
+// A non-status frame (such as a late {"r":null} ack) is unreadable, not "stopped".
+bool validStatus(const String& rdatReply);
+
 // Is a session started right now, from a fresh r_dat reply?
 // st 1 (charging) or 2 (waiting for the car), or delivering >= 0.5 kW.
 // Returns false for an unparseable / error reply.

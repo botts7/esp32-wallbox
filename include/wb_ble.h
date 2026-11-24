@@ -445,6 +445,9 @@ private:
     // Whether the last _sendCommandDirect got any reply ({"r":null} included,
     // which comes back as an empty String just like a timeout).
     bool _lastDirectReplied = false;
+    // Consecutive invalid r_dat replies (missing integer r.st). Reconnects BLE
+    // at wb_poll_guard::kMaxBadStatusPolls to resync a shifted stream (#89).
+    uint8_t _badStatusPolls = 0;
 
     // Scan cache for smart reconnect
     uint32_t _lastSeenTime = 0;

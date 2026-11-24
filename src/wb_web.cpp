@@ -1748,7 +1748,7 @@ static void handleSettings() {
       <button class='btn btn-outline' style='padding:12px' onclick='E("pin")'>&#x1F511; Bluetooth Passcode</button>
       <button class='btn btn-outline' style='padding:12px' onclick='E("ota")'>&#x1F4E6; Firmware Update</button>
       <button id='ble-pause-btn' class='btn btn-outline' style='padding:12px' onclick='pauseBle()'>&#x1F4F4; Release BLE for App</button>
-      <button class='btn btn-outline' style='padding:12px' onclick='confirm2("Reboot the charger?",function(){fetch("/api/command?action=reboot").then(function(){toast("Reboot sent","success")})})' style='background:rgba(239,68,68,.08);border-color:var(--danger);color:var(--danger)'>&#x1F504; Reboot</button>
+      <button class='btn btn-outline' style='padding:12px' onclick='confirm2("Reboot the charger?",function(){fetch("/api/command?action=reboot").then(function(){toast("Reboot sent","success")})})' style='background:rgba(239,68,68,.08);border-color:var(--danger);color:var(--danger)'>&#x1F504; Reboot Charger</button>
     </div>
     <div id='qr3' style='display:none;margin-top:12px'></div>
   </div>
