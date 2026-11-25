@@ -6,6 +6,16 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (BLE / WiFi scan JSON escaping and MAC input, #88)
+- **`/api/ble-scan` and `/api/wifi-scan` always return valid JSON.** Nearby BLE
+  devices or WiFi networks advertising control characters (such as `0x10`),
+  quotes, backslashes, or invalid UTF-8 bytes are now sanitized through
+  `wb_jsonEsc` instead of breaking `JSON.parse()` for the whole scan list.
+- **Manual BLE address editing on `/config` and `/setup`:** switched the BLE
+  Address field from `oninput` to `onchange` auto-formatting so typing,
+  pasting, or backspacing over an existing MAC address is no longer blocked or
+  fighting the cursor.
+
 ### Fixed (BLE stream resync and stop guard, #89)
 - **A late BLE reply can no longer shift commands off by one or poison status.**
   `_sendCommandDirect` now checks the reply's JSON `id` against the request `id`

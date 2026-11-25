@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "wb_json_esc.h"
 
 // Gateway die-temperature as a JSON value. ESP32-S3/S2/C3/C6 have a usable
 // internal temperature sensor; the classic ESP32 (WROOM — future esp32dev
@@ -31,11 +32,7 @@ inline String wb_chipTempJson() {
 inline String wb_jsonEsc(const String& s) {
     String out;
     out.reserve(s.length() + 8);
-    for (size_t i = 0; i < s.length(); i++) {
-        char c = s[i];
-        if (c == '"' || c == '\\') { out += '\\'; out += c; }
-        else if ((uint8_t)c >= 0x20)  out += c;   // drop control chars (< 0x20)
-    }
+    wb_json_esc::appendEscaped(s.c_str(), s.length(), out);
     return out;
 }
 

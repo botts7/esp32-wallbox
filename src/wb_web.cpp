@@ -684,14 +684,16 @@ String wb_runBleScan() {
         String addr = dev.getAddress().toString().c_str();
         int rssi = dev.getRSSI();
         bool isWB = name.startsWith("WB") || name.indexOf("allbox") >= 0;
+        String safeName = wb_jsonEsc(name);
+        String safeAddr = wb_jsonEsc(addr);
         Log.printf("[BLE-Scan]   %s%s %s  RSSI:%d\n",
                    isWB ? "* " : "  ",
-                   addr.c_str(),
-                   name.length() ? name.c_str() : "(no name)",
+                   safeAddr.c_str(),
+                   safeName.length() ? safeName.c_str() : "(no name)",
                    rssi);
         if (!first) json += ",";
         first = false;
-        json += "{\"addr\":\"" + addr + "\",\"name\":\"" + name + "\",\"rssi\":" + String(rssi) + ",\"is_wallbox\":" + (isWB ? "true" : "false") + "}";
+        json += "{\"addr\":\"" + safeAddr + "\",\"name\":\"" + safeName + "\",\"rssi\":" + String(rssi) + ",\"is_wallbox\":" + (isWB ? "true" : "false") + "}";
     }
     json += "]}";
     return json;
@@ -729,8 +731,7 @@ ScanResult wb_runWifiScan() {
         if (ssid.length() == 0) continue;  // hidden networks
         if (!first) json += ",";
         first = false;
-        String s = ssid; s.replace("\\", "\\\\"); s.replace("\"", "\\\"");
-        json += "{\"ssid\":\"" + s + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
+        json += "{\"ssid\":\"" + wb_jsonEsc(ssid) + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
     }
     json += "]}";
     WiFi.scanDelete();
@@ -2759,7 +2760,7 @@ String wb_buildSetupPage() {
     <label>BLE Address</label>
     <input id='ble_addr' name='ble_addr' value=')HTML";
     page += cfg.bleAddr;
-    page += R"HTML(' placeholder='6C:1D:EB:30:98:08 (with or without colons)' oninput='formatMAC(this)'>
+    page += R"HTML(' placeholder='6C:1D:EB:30:98:08 (with or without colons)' onchange='formatMAC(this)'>
     <label>Charger model</label>
     <select name='chg_model'>
 )HTML";
@@ -3030,7 +3031,7 @@ String wb_buildConfigPage() {
     page += "<div class='cfg-panel' data-panel='2'><div class='card'>";
     page += "<button type='button' id='scanBtn' class='btn btn-outline' style='margin-bottom:12px' onclick='startScan()'>Scan for Chargers</button>";
     page += "<div id='scanResults'></div>";
-    page += "<label>BLE Address</label><input id='ble_addr' name='ble_addr' value='" + cfg.bleAddr + "' placeholder='6C1DEB309808' oninput='formatMAC(this)'>";
+    page += "<label>BLE Address</label><input id='ble_addr' name='ble_addr' value='" + cfg.bleAddr + "' placeholder='6C1DEB309808' onchange='formatMAC(this)'>";
     page += "<p class='help'>With or without colons</p>";
     page += "<label>Bluetooth Passcode <span style='color:var(--text3);font-weight:400'>(also called \"BLE PIN\")</span></label><input name='ble_pin' value='" + cfg.blePin + "' placeholder='Leave blank if your firmware has no passcode'>";
     page += "<p class='help'>For Pulsar Plus / newer Pulsar MAX firmware (6.11+): open the Wallbox app, go to your charger &rarr; Settings, and look for <b>Bluetooth Passcode</b>. Copy that 8-digit code here. On older firmware leave blank.</p>";
