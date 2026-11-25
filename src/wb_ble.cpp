@@ -4,6 +4,7 @@
 #include "wb_health.h"
 #include "wb_zentri_normalize.h"
 #include "wb_time_sync.h"
+#include "wb_poll_guard.h"
 #include "wb_copper_normalize.h"
 #include "wb_ble_err.h"   // bleErrName() — decode NimBLE codes to names (#161)
 #include "wb_stop_guard.h"  // never send a stop to a non-charging session
@@ -1060,6 +1061,7 @@ void WallboxBLE::_disconnect() {
     _rssiLastSample = 0;
     _seenBapiThisConnection = false;  // re-enable raw-RX logging for next connect
     _lastTimeSyncMs = 0;   // force a Wtime push on the next reconnect
+    _badStatusPolls = 0;   // fresh connection starts with a clean poll streak
 }
 
 void WallboxBLE::_enterConfigMismatch(const char* what) {
@@ -1464,16 +1466,49 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
     }
     _txCount++;
 
-    // Wait for response — yield to other tasks (web server, OTA) while waiting
+    // Wait for a matching response, yielding to other tasks (web server, OTA).
+    // If a late reply to an earlier timed-out command arrives first (mismatched
+    // JSON "id"), discard it and keep waiting within timeoutMs so the stream
+    // cannot shift permanently off by one (#89).
     { char ph[16]; snprintf(ph, sizeof(ph), "q:%s", met); wb_health::setBreadcrumbBapi(ph); }  // #168 phase = waiting
     uint32_t start = millis();
-    while (!_responseReady && (millis() - start) < timeoutMs) {
-        delay(1);
-        if (_yieldCb) _yieldCb();  // let web server + OTA run
+    String resp;
+    bool matched = false;
+    while ((millis() - start) < timeoutMs) {
+        while (!_responseReady && (millis() - start) < timeoutMs) {
+            delay(1);
+            if (_yieldCb) _yieldCb();  // let web server + OTA run
+        }
+        if (!_responseReady) break;
+
+        // Move ownership of the response buffer out under _parserMutex so a late/
+        // duplicate notification's takeBuffer()->_lastResponse write can't race this
+        // read+move (that race corrupts the String -> panic). Clear _responseReady
+        // under the same lock so another frame can arrive if this one is stale.
+        if (_parserMutex) xSemaphoreTake(_parserMutex, portMAX_DELAY);
+        resp = std::move(_lastResponse);
+        _responseReady = false;
+        if (_parserMutex) xSemaphoreGive(_parserMutex);
+
+        int gotId = -1;
+        {
+            JsonDocument idDoc;
+            if (deserializeJson(idDoc, resp) == DeserializationError::Ok &&
+                idDoc["id"].is<int>()) {
+                gotId = idDoc["id"].as<int>();
+            }
+        }
+        if (wb_poll_guard::isReplyIdMatch(id, gotId)) {
+            matched = true;
+            break;
+        }
+        Log.printf("[BLE] Discarding stale reply for %s (%u bytes, got id=%d, want %d)\n",
+                   met, (unsigned)resp.length(), gotId, id);
+        resp = String();
     }
 
-    _lastDirectReplied = _responseReady;
-    if (!_responseReady) {
+    _lastDirectReplied = matched;
+    if (!matched) {
         Log.printf("[BLE] Timeout %s (%dms)\n", met, (int)(millis() - start));
         // Check if connection died during wait
         if (_client && !_client->isConnected()) {
@@ -1485,14 +1520,6 @@ String WallboxBLE::_sendCommandDirect(const char* met, const char* par, uint32_t
         return "";
     }
 
-    // Move ownership of the response buffer out under _parserMutex so a late/
-    // duplicate notification's takeBuffer()→_lastResponse write can't race this
-    // read+move (that race corrupts the String → panic). _cmdMutex serialises
-    // callers; _parserMutex serialises against the host-task notify callback.
-    String resp;
-    if (_parserMutex) xSemaphoreTake(_parserMutex, portMAX_DELAY);
-    resp = std::move(_lastResponse);
-    if (_parserMutex) xSemaphoreGive(_parserMutex);
     Log.printf("[BLE] RX %s (%d bytes)\n", met, resp.length());
     // #168: total write+response round-trip; track the worst case for /diag.
     uint32_t rtMs = millis() - wStart;
@@ -1634,12 +1661,32 @@ void WallboxBLE::_pollStatus() {
         bool storeStatus = true;
         int newSt  = _statusStOf(resp);
         int prevSt = _statusStOf(_cachedStatusJson);
-        if (prevSt == 1 && newSt != -1 && newSt != 1 && _state == State::CONNECTED) {
+        if (!wb_poll_guard::statusFieldValid(newSt)) {
+            // Never overwrite _cachedStatusJson with a non-status reply (such as
+            // a shifted 21-byte {"r":null}), which makes HA render "Code", drops
+            // car_connected off, and makes startStopRedundant skip stops (#89).
+            storeStatus = false;
+            delay(20);
+            if (_parserMutex) xSemaphoreTake(_parserMutex, portMAX_DELAY);
+            _parser.reset();
+            _responseReady = false;
+            if (_parserMutex) xSemaphoreGive(_parserMutex);
+            _badStatusPolls = wb_poll_guard::afterStatusPoll(_badStatusPolls, false);
+            Log.printf("[BLE] Ignoring invalid r_dat reply (%u bytes, missing r.st; streak %u/%u)\n",
+                       (unsigned)resp.length(), (unsigned)_badStatusPolls,
+                       (unsigned)wb_poll_guard::kMaxBadStatusPolls);
+            if (wb_poll_guard::shouldReconnect(_badStatusPolls)) {
+                Log.printf("[BLE] %u invalid r_dat replies in a row, reconnecting to resync stream\n",
+                           (unsigned)_badStatusPolls);
+                _disconnect();
+                return;
+            }
+        } else if (prevSt == 1 && newSt != 1 && _state == State::CONNECTED) {
             delay(50);
             String confirm = _sendCommandDirect(bapi::MET_GET_STATUS);
             int confSt = _statusStOf(confirm);
-            if (confSt == 1 || confirm.isEmpty()) {
-                storeStatus = false;   // transient blip / dropped confirm — hold last-good
+            if (confSt == 1 || confirm.isEmpty() || !wb_poll_guard::statusFieldValid(confSt)) {
+                storeStatus = false;   // transient blip / dropped or invalid confirm -> hold last-good
                 Log.printf("[BLE] status blip suppressed (st %d->%d, confirm=%d) — kept Charging\n",
                            prevSt, newSt, confSt);
             } else {
@@ -1647,6 +1694,7 @@ void WallboxBLE::_pollStatus() {
             }
         }
         if (storeStatus) {
+            _badStatusPolls = wb_poll_guard::afterStatusPoll(_badStatusPolls, true);
             // Zentri/original Pulsar omits `cp` — synthesise charge power from the
             // phase currents so every downstream consumer (dashboard, MQTT,
             // charge-interval log) works unchanged (#12). Uses the previous
@@ -1744,20 +1792,27 @@ void WallboxBLE::_pollRealtime() {
         return;
     }
     if (!resp.isEmpty()) {
-        _storeCache(_cachedRealtimeJson, _seqRealtime, resp);
-        // Keep the discrete lock state fresh. r_lck is only read once (in
-        // _connect), so the HA "Lock state" entity would freeze at its
-        // connect-time value if the user locks/unlocks later — it read 0 at
-        // connect and never moved (forum report: lock_status stuck at 0
-        // after locking). r_sta.lock_status carries the same 0=unlocked /
-        // 1=locked fact and updates every poll, so mirror it here.
+        // Validate r_sta shape before updating cache so a shifted/wrong-method
+        // reply cannot clobber realtime sensors (#89).
         JsonDocument d;
-        if (deserializeJson(d, resp) == DeserializationError::Ok) {
+        if (deserializeJson(d, resp) == DeserializationError::Ok &&
+            wb_poll_guard::realtimeFieldsValid(d["r"]["charger_status"].is<int>(),
+                                               d["r"]["lock_status"].is<int>())) {
+            _storeCache(_cachedRealtimeJson, _seqRealtime, resp);
+            // Keep the discrete lock state fresh. r_lck is only read once (in
+            // _connect), so the HA "Lock state" entity would freeze at its
+            // connect-time value if the user locks/unlocks later — it read 0 at
+            // connect and never moved (forum report: lock_status stuck at 0
+            // after locking). r_sta.lock_status carries the same 0=unlocked /
+            // 1=locked fact and updates every poll, so mirror it here.
             if (d["r"]["lock_status"].is<int>()) {
                 _chgLockState = d["r"]["lock_status"].as<int32_t>();
                 _noteLockState((int)_chgLockState);  // a held lock unlocked elsewhere (#47)
             }
             _captureMaxAvail(d["r"]);
+        } else {
+            Log.printf("[BLE] Ignoring invalid r_sta reply (%u bytes, missing charger_status/lock_status)\n",
+                       (unsigned)resp.length());
         }
     }
 }

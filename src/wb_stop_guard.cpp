@@ -14,6 +14,15 @@ Kind kindOf(const char* met, const char* par) {
     return Kind::Stop;   // 2 on a MAX, 0 on a Plus / original Pulsar
 }
 
+bool validStatus(const String& rdatReply) {
+    if (rdatReply.isEmpty()) return false;
+    JsonDocument d;
+    if (deserializeJson(d, rdatReply) != DeserializationError::Ok) return false;
+    JsonVariantConst r = d["r"];
+    if (!r.is<JsonObjectConst>()) return false;
+    return r["st"].is<int>();
+}
+
 bool sessionStarted(const String& rdatReply) {
     if (rdatReply.isEmpty()) return false;
     JsonDocument d;
@@ -30,7 +39,7 @@ Verdict decide(Kind kind, bool recentSameKind, const String& fresh, bool legacyP
     if (kind == Kind::None) return Verdict::Send;
     if (recentSameKind) return Verdict::Skip;
     if (legacyPulsar) return Verdict::Send;   // its status codes differ; windows only
-    if (fresh.isEmpty()) return Verdict::Unreadable;
+    if (fresh.isEmpty() || !validStatus(fresh)) return Verdict::Unreadable;
     const bool started = sessionStarted(fresh);
     if (kind == Kind::Stop) return started ? Verdict::Send : Verdict::Skip;
     return started ? Verdict::Skip : Verdict::Send;   // Start

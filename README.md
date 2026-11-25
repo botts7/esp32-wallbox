@@ -27,7 +27,7 @@
 
 ### Compatibility
 
-**Chargers:** Pulsar MAX, MAX Pro, Plus (including pre-6.11 firmware, via a legacy schedule-write fallback), Pulsar Pro, and the original (Zentri) Pulsar. Reads work across all of them; a few writes are firmware-specific (see below).
+**Chargers:** Pulsar MAX, MAX Pro, Plus (including pre-6.11 firmware, via a legacy schedule-write fallback), Pulsar Pro, Copper SB, and the original (Zentri) Pulsar. Reads work across all of them; a few writes are firmware-specific (see below).
 
 **Boards:** any ESP32-S3. A board **with PSRAM** is recommended (e.g. ESP32-S3-WROOM-1/1U N16R8, S3-DevKitC-1) — no-PSRAM boards run but have tighter heap headroom under sustained load. The classic ESP32-WROOM (`esp32dev`) is also built and supported. A wired-Ethernet build is available for Waveshare ESP32-S3-ETH / POE-ETH (WIZnet W5500) boards — it frees the 2.4 GHz radio for BLE and is hardware-validated on the POE-ETH (#59), and releases ship an `esp32s3-eth` binary so wired gateways update from HA like the others. Its stock SPI pins fit the ESP32-S3-ETH / POE-ETH; for a board wired differently, build from a **new** PlatformIO env rather than editing the pins in place (see `platformio.ini`), so HA never offers it the stock-pin image.
 
@@ -255,7 +255,7 @@ Both work; choose based on whether you want the gateway to be self-contained
 | **Pulsar MAX** (FW 6.11.26+) | ✅ Working in v2.6.1+ — at this firmware Wallbox switched MAX to the dual-char BLE protocol that previously only shipped on Plus/Copper/Quasar; the gateway auto-detects the mismatch on connect and adopts the right protocol family without a reboot |
 | **Pulsar Plus** | ✅ Working (both BLE radios auto-detected; FW 6.11+ needs the Bluetooth passcode) |
 | **Original Pulsar** (Zentri) | ✅ Working: reads and start/stop |
-| **Copper SB** (Zentri radio) | 🟡 Reads confirmed on v3.2.24-rc.4 (#89); start/stop and current not yet tested |
+| **Copper SB** (Zentri radio) | ✅ Working on v3.2.24-rc.4+ (#89): reads, start/stop/resume, and current control confirmed (active OCPP overrides BLE `w_cha` start/stop while `w_mxI` still works) |
 | **Commander 2**, **Quasar / Quasar 2** | ⚪ Untested — reports welcome |
 
 See **[COMPATIBILITY.md](COMPATIBILITY.md)** for the full matrix including

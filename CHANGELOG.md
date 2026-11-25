@@ -6,6 +6,21 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (BLE stream resync and stop guard, #89)
+- **A late BLE reply can no longer shift commands off by one or poison status.**
+  `_sendCommandDirect` now checks the reply's JSON `id` against the request `id`
+  when present, discarding stale replies from earlier timed-out commands. As a
+  second guard, `_pollStatus` and `_pollRealtime` refuse to overwrite cached
+  state with frames missing `r.st` / `charger_status` / `lock_status` (and
+  reconnect BLE after 3 invalid `r_dat` polls in a row), and `wb_stop_guard`
+  treats a non-status `r_dat` frame as unreadable rather than "not charging".
+
+### Added / Changed (reboot clarity, #89)
+- **MQTT "Reboot Gateway" button** (`reboot_gateway`, works even while BLE is
+  down) added alongside **Reboot Charger**.
+- Web dashboard's charger reboot button relabelled from "Reboot" to
+  **Reboot Charger** so it isn't confused with Config's gateway reboot.
+
 ### Fixed (charger clock sync)
 - **The hourly charger clock sync (Wtime) backs off when the charger never
   answers it.** Some chargers don't reply (a Copper SB on a Zentri radio,
@@ -15,8 +30,9 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   reply (an empty `{"r":null}` counts) restores the hourly sync.
 
 ### Docs
-- Copper SB (Zentri radio) moved to "reads confirmed" (#89); README charger
-  table brought in line with COMPATIBILITY.md (Pulsar Plus, original Pulsar).
+- Copper SB (Zentri radio, fw 6.7.38) moved to working in README and
+  COMPATIBILITY.md (#89), with reads, start/stop/resume, and current control
+  confirmed (and a note that active OCPP overrides BLE `w_cha` start/stop).
 
 ### Fixed (Sessions page, #79 follow-ups)
 - **The daily list shows more than the newest 10 days.** A "Show more days"
